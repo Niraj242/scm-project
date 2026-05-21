@@ -1,6 +1,7 @@
-const API_BASE_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
 import { useEffect, useMemo, useState } from "react";
 import "./Orders.css";
+
+const API_BASE_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:8000";
 
 function Orders() {
   const [orders, setOrders] = useState([]);
@@ -27,7 +28,6 @@ function Orders() {
   // ================= FETCH ORDERS =================
   const fetchOrders = async () => {
     try {
-      // ✅ FIXED: Changed double quotes to backticks
       const res = await fetch(`${API_BASE_URL}/get_orders`);
       const data = await res.json();
       setOrders(Array.isArray(data) ? data : []);
@@ -39,7 +39,6 @@ function Orders() {
   // ================= FETCH SHEET NAMES =================
   const fetchSheetNames = async () => {
     try {
-      // ✅ FIXED: Changed double quotes to backticks
       const res = await fetch(`${API_BASE_URL}/get_sheet_names`);
       const data = await res.json();
       const sheets = Array.isArray(data) ? data : data.sheets || [];
@@ -99,7 +98,6 @@ function Orders() {
       return;
     }
 
-    // ✅ FIXED: Changed the baseline fallback line to backticks
     const url = editingId
       ? `${API_BASE_URL}/update_order/${editingId}`
       : `${API_BASE_URL}/add_order`;
@@ -155,7 +153,6 @@ function Orders() {
   // ================= IMPORT FROM GOOGLE SHEET =================
   const handleImport = async () => {
     try {
-      // ✅ FIXED: Changed double quotes to backticks
       const res = await fetch(`${API_BASE_URL}/import_orders_google_sheet`, {
         method: "POST",
       });

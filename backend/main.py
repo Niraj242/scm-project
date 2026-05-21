@@ -42,6 +42,8 @@ app.add_middleware(
 )
 
 
+
+
 # ================= DATABASE =================
 Base.metadata.create_all(bind=engine)
 
@@ -51,6 +53,45 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# ================= REGISTRATION ROUTE =================
+@app.post("/register")
+def register_user(user_data: RegisterRequest, db: Session = Depends(get_db)):
+    # 1. Check if user already exists
+    existing_user = db.query(User).filter(User.email == user_data.email).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+    
+    # 2. Hash the password
+    hashed_pwd = hash_password(user_data.password)
+    
+    # 3. Create the new User object
+    new_user = User(
+        email=user_data.email,
+        password=hashed_pwd
+        # Add other fields here if your User model requires them (e.g., name, role)
+    )
+    
+    # 4. Save to database
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    return {"message": "User registered successfully"}
+
+# ================= LOGIN ROUTE (Ensure this is in your code) =================
+@app.post("/login")
+def login(user_data: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == user_data.email).first()
+    if not user or not verify_password(user_data.password, user.password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    token = create_token(user.email)
+    return {"access_token": token, "token_type": "bearer"}
+
+# ================= INCLUDE ROUTER =================
+app.include_router(order_router)
+
 
 # ================= ROOT =================
 @app.get("/")

@@ -22,7 +22,7 @@ import uuid
 import os
 
 # ================= DATABASE =================
-DATABASE_URL = os.getenv("postgresql://neondb_owner:npg_EeyF0hi3JRcV@ep-wild-resonance-aoturwvf.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require")
+DATABASE_URL = os.getenv("postgresql://neondb_owner:npg_YywgVvfEO6s3@ep-wild-resonance-aoturwvf.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require")
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()

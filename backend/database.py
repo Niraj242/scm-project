@@ -1,15 +1,22 @@
-from sqlalchemy.orm import sessionmaker, declarative_base
 import os
 from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker, declarative_base
 
-DATABASE_URL = os.getenv("postgresql://neondb_owner:npg_EeyF0hi3JRcV@ep-wild-resonance-aoturwvf.c-2.ap-southeast-1.aws.neon.tech/neondb?sslmode=require")
+# 1. Correctly read the variable from Render's environment settings
+DATABASE_URL = os.getenv("DATABASE_URL")
 
+# 2. Safety check: crash early if Render isn't configured yet
 if not DATABASE_URL:
     raise Exception("DATABASE_URL not set")
 
+# 3. Handle SQLAlchemy's requirement for "postgresql://" instead of "postgres://"
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
+# 4. Create the engine with the safe URL
 engine = create_engine(
     DATABASE_URL,
-    echo=True  # shows SQL queries in terminal (good for learning/debug)
+    echo=True  # useful for debugging logs on Render
 )
 
 SessionLocal = sessionmaker(

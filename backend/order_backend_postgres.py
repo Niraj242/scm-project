@@ -212,7 +212,6 @@ def import_orders_from_google_sheet(
     db: Session = Depends(get_db),
 ):
     SHEET_ID = "1J1c2u7Riv0vwhEXK3KzVXPQvxXRaHWpYdrJU9CE0FlI"
-
     ALL_SHEETS = [
         "Jan-26","Feb-26","Mar-26","Apr-26","May-26","Jun-26",
         "Jul-26","Aug-26","Sep-26","Oct-26","Nov-26","Dec-26",
@@ -223,10 +222,21 @@ def import_orders_from_google_sheet(
     imported = 0
 
     for sheet in sheets_to_read:
-        # 🧹 DELETE existing records for this sheet before reimport
+        # 1. 🧠 REMEMBER EXISTING STATUSES BEFORE DELETING
+        existing_orders = db.query(OrderDB).filter(OrderDB.sheet_name == sheet).all()
+        
+        # Create a memory dictionary to map: "CustomerName_ProductName_Date" -> "Status"
+        status_memory = {}
+        for o in existing_orders:
+            if o.status:  # Only remember if it actually had a custom status
+                key = f"{o.customer_name}_{o.product_name}_{o.expected_delivery_date}"
+                status_memory[key] = o.status
+
+        # 2. 🧹 DELETE EXISTING RECORDS (Standard behavior)
         db.query(OrderDB).filter(OrderDB.sheet_name == sheet).delete()
         db.commit()
 
+        # 3. 📥 FETCH NEW GOOGLE SHEET DATA
         url = f"https://opensheet.elk.sh/{SHEET_ID}/{sheet}"
         response = requests.get(url)
 
@@ -237,40 +247,21 @@ def import_orders_from_google_sheet(
 
         for row in rows:
             try:
-                customer_name = (
-                    row.get("customer_name")
-                    or row.get("Customer Name")
-                    or row.get("Customer")
-                )
-
-                product_name = (
-                    row.get("product_name")
-                    or row.get("Product")
-                    or row.get("Product Name")
-                )
-
+                customer_name = row.get("customer_name") or row.get("Customer Name") or row.get("Customer")
+                product_name = row.get("product_name") or row.get("Product") or row.get("Product Name")
                 quantity = row.get("quantity") or row.get("Qty") or 0
-
-                expected_delivery_date = (
-                    row.get("expected_delivery_date")
-                    or row.get("Delivery Date")
-                    or row.get("Expected Delivery Date")
-                )
-
-                customer_location = (
-                    row.get("customer_location")
-                    or row.get("Location")
-                    or ""
-                )
-
-                status = row.get("status") or row.get("Status") or ""
+                expected_delivery_date = row.get("expected_delivery_date") or row.get("Delivery Date") or row.get("Expected Delivery Date")
+                customer_location = row.get("customer_location") or row.get("Location") or ""
+                sheet_status = row.get("status") or row.get("Status") or ""
 
                 if not customer_name or not product_name or not expected_delivery_date:
                     continue
 
-                delivery_date = datetime.datetime.strptime(
-                    expected_delivery_date, "%Y-%m-%d"
-                ).date()
+                delivery_date = datetime.datetime.strptime(expected_delivery_date, "%Y-%m-%d").date()
+
+                # 4. 🛡️ RE-APPLY THE SAVED STATUS IF IT EXISTS
+                lookup_key = f"{customer_name}_{product_name}_{delivery_date}"
+                final_status = status_memory.get(lookup_key, sheet_status)
 
                 db_order = OrderDB(
                     order_number=str(uuid.uuid4())[:8],
@@ -280,23 +271,21 @@ def import_orders_from_google_sheet(
                     quantity=int(quantity),
                     order_date=datetime.date.today(),
                     expected_delivery_date=delivery_date,
-                    status=status,
+                    status=final_status,
                     sheet_name=sheet,
                 )
-
                 db.add(db_order)
                 imported += 1
 
             except Exception as e:
                 print("Skipped row:", row, e)
 
-    db.commit()
+        db.commit()
 
     return {
-        "message": f"Imported {imported} orders",
+        "message": f"Imported {imported} orders (Statuses preserved!)",
         "sheet": sheet_name,
     }
-
 
 
 # ================= GET SHEET NAMES =================

@@ -247,8 +247,8 @@ function Orders() {
     ).length;
 
     const pending = filteredOrders.filter((o) =>
-      ["pending", "in work", "issue"].some((k) =>
-        o.status?.toLowerCase().includes(k)
+      !o.status || ["pending", "in work", "issue"].some((k) =>
+        o.status.toLowerCase().includes(k)
       )
     ).length;
 

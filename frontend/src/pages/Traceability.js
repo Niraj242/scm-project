@@ -1,181 +1,328 @@
-import React, { useState } from 'react';
+```javascript
+import React, { useEffect, useState } from 'react';
 import './Traceability.css';
 
+const API =
+  'https://scm-backend-pshv.onrender.com';
+
 const Traceability = () => {
-  const [mo, setMo] = useState('');
-  const [data, setData] = useState(null);
+
+  const [allMos, setAllMos] = useState([]);
+
+  const [filteredMos, setFilteredMos] = useState([]);
+
+  const [search, setSearch] = useState('');
+
+  const [selectedMo, setSelectedMo] = useState(null);
+
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
 
-  const fetchTraceability = async () => {
+  // =====================================================
+  // LOAD ALL MOs
+  // =====================================================
 
-    if (!mo) return;
+  useEffect(() => {
 
-    setLoading(true);
-    setError('');
-    setData(null);
+    fetchAllMos();
+
+  }, []);
+
+  const fetchAllMos = async () => {
 
     try {
 
+      setLoading(true);
+
       const response = await fetch(
-        `https://scm-backend-pshv.onrender.com/traceability_report/${mo}`
+        `${API}/traceability_all_mos`
       );
 
       const result = await response.json();
 
-      if (!response.ok) {
-        throw new Error(result.detail || 'Failed to fetch');
+      if (result.status === 'success') {
+
+        setAllMos(result.data);
+
+        setFilteredMos(result.data);
       }
 
-      setData(result);
+    } catch (error) {
 
-    } catch (err) {
-
-      console.error(err);
-      setError(err.message);
+      console.error(error);
 
     } finally {
 
       setLoading(false);
-
     }
   };
 
+  // =====================================================
+  // SEARCH
+  // =====================================================
+
+  const handleSearch = (value) => {
+
+    setSearch(value);
+
+    if (!value) {
+
+      setFilteredMos(allMos);
+
+      return;
+    }
+
+    const filtered = allMos.filter((item) =>
+      item.mo.toLowerCase().includes(
+        value.toLowerCase()
+      )
+    );
+
+    setFilteredMos(filtered);
+  };
+
+  // =====================================================
+  // FETCH SINGLE MO DETAIL
+  // =====================================================
+
+  const openMoDetails = async (mo) => {
+
+    try {
+
+      setLoading(true);
+
+      const response = await fetch(
+        `${API}/traceability_report/${mo}`
+      );
+
+      const result = await response.json();
+
+      if (
+        result.status === 'success' &&
+        result.data.length > 0
+      ) {
+
+        setSelectedMo(result.data[0]);
+      }
+
+    } catch (error) {
+
+      console.error(error);
+
+    } finally {
+
+      setLoading(false);
+    }
+  };
+
+  // =====================================================
+  // UI
+  // =====================================================
+
   return (
+
     <div className="traceability-container">
 
-      <h2>MO Traceability Lookup</h2>
+      <h1>MO Traceability Dashboard</h1>
 
-      <div className="search-section">
+      <input
+        className="search-box"
+        placeholder="Search MO Number..."
+        value={search}
+        onChange={(e) =>
+          handleSearch(e.target.value)
+        }
+      />
 
-        <input
-          value={mo}
-          onChange={(e) => setMo(e.target.value)}
-          placeholder="Enter MO Number"
-        />
+      {loading && (
+        <p>Loading...</p>
+      )}
 
-        <button onClick={fetchTraceability}>
-          Track MO
-        </button>
+      {/* ================================================= */}
+      {/* MASTER TABLE */}
+      {/* ================================================= */}
+
+      <div className="table-wrapper">
+
+        <table>
+
+          <thead>
+
+            <tr>
+              <th>MO</th>
+              <th>Total Stages</th>
+              <th>Latest Activity</th>
+              <th>Total Output</th>
+              <th>Action</th>
+            </tr>
+
+          </thead>
+
+          <tbody>
+
+            {filteredMos.map((row, index) => (
+
+              <tr key={index}>
+
+                <td>{row.mo}</td>
+
+                <td>{row.total_stages}</td>
+
+                <td>
+                  {row.latest_activity || '-'}
+                </td>
+
+                <td>
+                  {row.total_output || 0}
+                </td>
+
+                <td>
+
+                  <button
+                    onClick={() =>
+                      openMoDetails(row.mo)
+                    }
+                  >
+                    View Flow
+                  </button>
+
+                </td>
+
+              </tr>
+
+            ))}
+
+          </tbody>
+
+        </table>
 
       </div>
 
-      {loading && (
-        <div className="loading">
-          Loading traceability...
-        </div>
-      )}
+      {/* ================================================= */}
+      {/* DETAIL TABLE */}
+      {/* ================================================= */}
 
-      {error && (
-        <div className="error-box">
-          {error}
-        </div>
-      )}
+      {selectedMo && (
 
-      {data && (
+        <div className="details-section">
 
-        <div className="result-card">
+          <h2>
+            MO Flow : {selectedMo.mo}
+          </h2>
 
-          <div className="summary-grid">
+          <div className="table-wrapper">
 
-            <div>
-              <strong>Searched MO</strong>
-              <p>{data.searched_mo}</p>
-            </div>
-
-            <div>
-              <strong>Normalized MO</strong>
-              <p>{data.normalized_mo}</p>
-            </div>
-
-            <div>
-              <strong>Total Records</strong>
-              <p>{data.total_records}</p>
-            </div>
-
-            <div>
-              <strong>Status</strong>
-              <p>{data.status}</p>
-            </div>
-
-          </div>
-
-          <div className="timeline-table-wrapper">
-
-            <table className="timeline-table">
+            <table>
 
               <thead>
+
                 <tr>
+
+                  <th>Stage</th>
+
+                  <th>Department</th>
+
+                  <th>Channel</th>
+
                   <th>Date</th>
-                  <th>Source</th>
-                  <th>Sheet/Channel</th>
-                  <th>MO</th>
+
                   <th>Shift</th>
+
                   <th>Production</th>
+
+                  <th>Cumulative</th>
+
                   <th>Approved Qty</th>
+
                   <th>Returned Qty</th>
-                  <th>Status</th>
+
+                  <th>Output Qty</th>
+
+                  <th>Towards Packaging</th>
+
+                  <th>End Buffer</th>
+
                   <th>Next Station</th>
+
+                  <th>Status</th>
+
                   <th>Remark</th>
+
                 </tr>
+
               </thead>
 
               <tbody>
 
-                {data.timeline?.map((row, index) => (
+                {selectedMo.stages.map(
+                  (stage, idx) => (
 
-                  <tr key={index}>
+                    <tr key={idx}>
 
-                    <td>
-                      {row.date || '-'}
-                    </td>
+                      <td>
+                        {stage.stage || '-'}
+                      </td>
 
-                    <td>
-                      {row.source || '-'}
-                    </td>
+                      <td>
+                        {stage.department || '-'}
+                      </td>
 
-                    <td>
-                      {row.channel ||
-                        row.sheet ||
-                        row.source_channel ||
-                        '-'}
-                    </td>
+                      <td>
+                        {stage.channel || '-'}
+                      </td>
 
-                    <td>
-                      {row.mo || '-'}
-                    </td>
+                      <td>
+                        {stage.date ||
+                          stage.in_date ||
+                          '-'}
+                      </td>
 
-                    <td>
-                      {row.shift || '-'}
-                    </td>
+                      <td>
+                        {stage.shift || '-'}
+                      </td>
 
-                    <td>
-                      {row.production || '-'}
-                    </td>
+                      <td>
+                        {stage.production || '-'}
+                      </td>
 
-                    <td>
-                      {row.qty_approved || '-'}
-                    </td>
+                      <td>
+                        {stage.cumulative_production || '-'}
+                      </td>
 
-                    <td>
-                      {row.qty_returned || '-'}
-                    </td>
+                      <td>
+                        {stage.quantity || '-'}
+                      </td>
 
-                    <td>
-                      {row.status || '-'}
-                    </td>
+                      <td>
+                        {stage.returned_qty || '-'}
+                      </td>
 
-                    <td>
-                      {row.next_station || '-'}
-                    </td>
+                      <td>
+                        {stage.output_quantity || '-'}
+                      </td>
 
-                    <td>
-                      {row.remark || '-'}
-                    </td>
+                      <td>
+                        {stage.towards_packaging || '-'}
+                      </td>
 
-                  </tr>
+                      <td>
+                        {stage.end_buffer || '-'}
+                      </td>
 
-                ))}
+                      <td>
+                        {stage.next_station || '-'}
+                      </td>
+
+                      <td>
+                        {stage.status || '-'}
+                      </td>
+
+                      <td>
+                        {stage.remark || '-'}
+                      </td>
+
+                    </tr>
+                  )
+                )}
 
               </tbody>
 
@@ -184,11 +331,10 @@ const Traceability = () => {
           </div>
 
         </div>
-
       )}
-
     </div>
   );
 };
 
 export default Traceability;
+```

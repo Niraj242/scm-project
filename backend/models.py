@@ -12,7 +12,6 @@ class User(Base):
     is_active = Column(Integer, default=1)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-
 # -------------------- ORDERS --------------------
 class Order(Base):
     __tablename__ = "orders"
@@ -100,3 +99,111 @@ class ChatbotLog(Base):
     user_query = Column(String, nullable=False)
     bot_response = Column(String, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
+
+# =======================================================
+#               TRACEABILITY MODULE MODELS
+# =======================================================
+
+class JobWorkReport(Base):
+    __tablename__ = 'jobwork_report'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sr_no = Column(Integer)
+    company_code = Column(String)
+    system_manual_challan = Column(String)
+    challan_type = Column(String)
+    month = Column(String)
+    year = Column(Integer)
+    gstin_jw = Column(String)
+    job_worker = Column(String)
+    jw_challan_no = Column(String, unique=True)
+    jw_challan_date = Column(Date)
+    mo_number = Column(String, index=True)  # Populated from PO / PR No.
+    product_code = Column(String)           # e.g., IM302098, OM302098
+    hsn_code = Column(String)
+    uqc = Column(String)
+    qty_sent = Column(Float)
+    unit_rate = Column(Float)
+    taxable_value = Column(Float)
+    gst_rate = Column(Float)
+    gst = Column(Float)
+    last_challan_date = Column(Date, nullable=True)
+    qty_approved = Column(Float)
+    qty_returned = Column(Float)
+    returned_weight = Column(Float)
+    difference_balance_qty = Column(Float)
+    mat_recd_within_days = Column(Integer, nullable=True)
+    current_status = Column(String)
+    user_name = Column(String)
+    
+    # Calculated field for normalization engine
+    normalized_mo = Column(String, index=True) 
+
+class TRBMaster(Base):
+    __tablename__ = 'trb_master'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sheet_name = Column(String) # T3, T4, T5, T6
+    mo_type = Column(String)    # e.g., M0HVZ00
+    pc_qty = Column(String)     # Part description / drawing number
+    tag_type = Column(String)
+    packaging_details = Column(String)
+    date = Column(Date, index=True)
+    shift = Column(Integer)
+    production = Column(Float)
+    cumulative_production = Column(Float)
+    remark = Column(String)
+    end_buffer = Column(Float)
+    towards_packaging = Column(Float)
+    next_station = Column(String)
+    qty1 = Column(Float)
+    qty2 = Column(Float)
+    qty3 = Column(Float)
+    
+    normalized_mo = Column(String, index=True)
+
+class DGBBMaster(Base):
+    __tablename__ = 'dgbb_master'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    sheet_name = Column(String) # CH02, CH03, etc.
+    mo_type = Column(String)    # e.g., M0SSBB1
+    pc_qty = Column(String)
+    tag_type = Column(String)
+    packaging_details = Column(String)
+    date = Column(Date, index=True)
+    shift = Column(Integer)
+    production = Column(Float)
+    cumulative_production = Column(Float)
+    remark = Column(String)
+    end_buffer = Column(Float)
+    towards_packaging = Column(Float)
+    next_station = Column(String)
+    qty1 = Column(Float)
+    qty2 = Column(Float)
+    qty3 = Column(Float)
+    
+    normalized_mo = Column(String, index=True)
+
+class TraceabilityMaster(Base):
+    __tablename__ = 'traceability_master'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    source_channel = Column(String) # T3, CH02, etc.
+    mo_type = Column(String)
+    pc_qty = Column(String)
+    tag_type = Column(String)
+    packaging_details = Column(String)
+    date = Column(Date)
+    shift = Column(Integer)
+    production = Column(Float)
+    cumulative_production = Column(Float)
+    remark = Column(String)
+    end_buffer = Column(Float)
+    towards_packaging = Column(Float)
+    next_station = Column(String)
+    qty1 = Column(Float)
+    qty2 = Column(Float)
+    qty3 = Column(Float)
+    
+    normalized_mo = Column(String, index=True)

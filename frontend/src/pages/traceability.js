@@ -1,36 +1,34 @@
 import React, { useState } from 'react';
-import axios from 'axios';
+import './Traceability.css';
 
 const Traceability = () => {
-    const [loading, setLoading] = useState(false);
-    const [message, setMessage] = useState('');
+  const [mo, setMo] = useState('');
+  const [data, setData] = useState(null);
 
-    const handleSync = async () => {
-        setLoading(true);
-        try {
-            // Adjust the URL to match your backend host
-            const response = await axios.post('http://localhost:8000/run_traceability_sync');
-            setMessage('Sync successful: ' + response.data.message);
-        } catch (error) {
-            setMessage('Error running sync: ' + error.message);
-        } finally {
-            setLoading(false);
-        }
-    };
+  const fetchTraceability = async () => {
+    try {
+      // Replace with your actual Render backend URL
+      const response = await fetch(`https://scm-backend-pshv.onrender.com/traceability_report/${mo}`);
+      const result = await response.json();
+      setData(result);
+    } catch (error) {
+      console.error("Error fetching traceability:", error);
+    }
+  };
 
-    return (
-        <div className="p-6">
-            <h1 className="text-2xl font-bold">Traceability Dashboard</h1>
-            <button 
-                onClick={handleSync} 
-                disabled={loading}
-                className="mt-4 px-4 py-2 bg-blue-600 text-white rounded"
-            >
-                {loading ? 'Syncing...' : 'Run Traceability Sync'}
-            </button>
-            {message && <p className="mt-4">{message}</p>}
+  return (
+    <div className="traceability-container">
+      <h2>MO Traceability Lookup</h2>
+      <input value={mo} onChange={(e) => setMo(e.target.value)} placeholder="Enter MO Number" />
+      <button onClick={fetchTraceability}>Track MO</button>
+      
+      {data && (
+        <div className="result-card">
+          <p>Status: {data.status}</p>
+          <pre>{JSON.stringify(data, null, 2)}</pre>
         </div>
-    );
+      )}
+    </div>
+  );
 };
-
 export default Traceability;

@@ -427,7 +427,15 @@ def get_traceability_history(mo_number: str, db: Session = Depends(get_db)):
         }
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+
+    import traceback
+
+    print("TRACEABILITY ERROR:")
+    print(traceback.format_exc())
+
+    raise HTTPException(
+        status_code=500,
+        detail=str(e)
+    )
+    
+

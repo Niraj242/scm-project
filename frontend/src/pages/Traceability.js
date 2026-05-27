@@ -27,7 +27,6 @@ const Traceability = () => {
       
       if (json.status === 'initializing') {
         setIsInitializing(true);
-        // Retry connection in 4 seconds automatically
         setTimeout(fetchSummaryDashboard, 4000);
       } else if (json.status === 'success') {
         setIsInitializing(false);
@@ -59,21 +58,15 @@ const Traceability = () => {
 
   const filteredSummary = summaryData.filter(item => 
     item.mo.toLowerCase().includes(search.toLowerCase()) ||
-    item.base_product.toLowerCase().includes(search.toLowerCase()) ||
-    (item.final_variant && item.final_variant.toLowerCase().includes(search.toLowerCase()))
+    item.base_product.toLowerCase().includes(search.toLowerCase())
   );
 
-  /**
-   * Lookahead utility to calculate the vertical rowSpan values.
-   * Merges matching 7-letter manufacturing order meta properties safely.
-   */
+  // Lookahead utility ONLY for the MO number column now
   const getMoRowSpan = (dataArray, currentIndex) => {
     const currentMo = dataArray[currentIndex].mo;
-    // If the previous row belongs to the same MO, this cell gets hidden (span 0)
     if (currentIndex > 0 && dataArray[currentIndex - 1].mo === currentMo) {
       return 0;
     }
-    // Loop ahead to calculate how many consecutive matching rows exist
     let span = 1;
     while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].mo === currentMo) {
       span++;
@@ -110,7 +103,6 @@ const Traceability = () => {
 
       {error && <div className="error-box">{error}</div>}
       
-      {/* Dynamic system warmup handling */}
       {isInitializing && (
         <div className="initializing-box">
           <div className="spinner"></div>
@@ -127,18 +119,17 @@ const Traceability = () => {
           <table>
             <thead>
               <tr className="super-header">
-                {/* Expanded to 4 columns to cover: MO, Product details, Qty Req, and Item Type */}
                 <th colSpan="4">Order Metadata</th>
                 <th colSpan="3" className="sho-head">SHO Department</th>
                 <th colSpan="3" className="tb-head">Transit Buffer</th>
-                <th colSpan="3" className="ch-head">Channel Section</th>
+                <th colSpan="3" className="ch-head">Channel Section (Combined)</th>
                 <th>System Status</th>
               </tr>
               <tr>
                 <th>MO Number</th>
-                <th>Product Detail</th>
+                <th>Product (4-Digit Family)</th>
                 <th>Target Qty</th>
-                <th>Type</th>
+                <th>Ring Type</th>
                 <th className="sho-head">Qty</th>
                 <th className="sho-head">In Date</th>
                 <th className="sho-head">Out Date</th>
@@ -153,51 +144,39 @@ const Traceability = () => {
             </thead>
             <tbody>
               {filteredSummary.map((row, idx) => {
-                const spanValue = getMoRowSpan(filteredSummary, idx);
+                const moSpan = getMoRowSpan(filteredSummary, idx);
                 
                 return (
                   <tr key={idx}>
-                    {/* MERGED CELL: MO LINK */}
-                    {spanValue > 0 && (
-                      <td rowSpan={spanValue} className="merged-mo-cell">
+                    {/* ONLY the MO cell spans vertically now */}
+                    {moSpan > 0 && (
+                      <td rowSpan={moSpan} className="merged-mo-cell">
                         <button className="mo-link-btn" onClick={() => handleViewDetail(row.mo)}>
                           {row.mo}
                         </button>
                       </td>
                     )}
 
-                    {/* MERGED CELL: BASE PRODUCT + SUB VARIANT */}
-                    {spanValue > 0 && (
-                      <td rowSpan={spanValue} className="merged-product-cell">
-                        <div style={{ fontWeight: '600' }}>{row.base_product}</div>
-                        {row.final_variant && (
-                          <span className="variant-subtext" style={{ fontSize: '11px', color: '#666', display: 'block', marginTop: '2px' }}>
-                            {row.final_variant}
-                          </span>
-                        )}
-                      </td>
-                    )}
-
-                    {/* MERGED CELL: TARGET REQUIREMENT QUANTITY */}
-                    {spanValue > 0 && (
-                      <td rowSpan={spanValue} className="merged-qty-cell" style={{ fontWeight: '600', color: '#2c3e50' }}>
-                        {row.qty_req > 0 ? row.qty_req.toLocaleString() : '-'}
-                      </td>
-                    )}
-
-                    {/* ALWAYS DISTINCT: COMPONENT TYPE SPLIT (IM/OM) */}
+                    {/* These render individually per IM/OM row */}
+                    <td><strong>{row.base_product}</strong></td>
+                    <td style={{ fontWeight: '600', color: '#2c3e50' }}>
+                      {row.qty_req > 0 ? row.qty_req.toLocaleString() : '-'}
+                    </td>
                     <td><strong>{row.component_type}</strong></td>
                     
-                    {/* DEPARTMENTAL BREAKDOWNS */}
+                    {/* Standard Data */}
                     <td>{row.sho_qty.toLocaleString()}</td>
                     <td>{row.sho_in}</td>
                     <td>{row.sho_out}</td>
                     <td>{row.tb_qty.toLocaleString()}</td>
                     <td>{row.tb_in}</td>
                     <td>{row.tb_out}</td>
+                    
+                    {/* This Channel data will naturally be identical for IM/OM if aggregated correctly in backend */}
                     <td>{row.ch_qty.toLocaleString()}</td>
                     <td>{row.ch_in}</td>
                     <td>{row.ch_out}</td>
+                    
                     <td>
                       <span className={`status-badge ${row.status.toLowerCase().replace(/\s+/g, '-')}`}>
                         {row.status}

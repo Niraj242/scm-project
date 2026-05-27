@@ -21,10 +21,11 @@ CACHE_DURATION_MINUTES = 5
 # =========================================================
 # SECURITY & CLEANING HELPERS
 # =========================================================
-def normalize_mo(value):
+def extract_mo_prefix(value):
+    """Extracts the first 4 characters to group Jobwork and Channels perfectly (e.g., M108)"""
     if pd.isna(value):
         return ""
-    return str(value).strip().upper()
+    return str(value).strip().upper().replace(" ", "")[:4]
 
 def normalize_text(value):
     if pd.isna(value):
@@ -67,7 +68,7 @@ def load_excel_sheets(url):
         for sheet in xls.sheet_names:
             try:
                 df = pd.read_excel(xls, sheet_name=sheet)
-                # CRITICAL: Force all columns to lowercase and stripped to avoid missing matches
+                # CRITICAL: Force all columns to lowercase to avoid missing matches
                 df.columns = [str(c).strip().lower() for c in df.columns]
                 sheets[sheet] = df
             except Exception as e:
@@ -90,12 +91,11 @@ def process_traceability_data():
     print(f"[{datetime.now()}] STARTING BACKGROUND EXCEL CACHE REFRESH...")
 
     try:
-        # Load all sheets safely
         jobwork_sheets = load_excel_sheets(settings.JOBWORK_REPORT_URL)
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
         dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
 
-        # Unified tracking structure mapped by exact normalized full MO string
+        # Grouping strictly by the first 4 characters (Prefix) to ensure SHO and Channels merge
         mo_records = {}
 
         # ---------------------------------------------------------
@@ -107,14 +107,14 @@ def process_traceability_data():
 
             for _, row in df.iterrows():
                 raw_mo = row.get("po / pr no.")
-                mo_key = normalize_mo(raw_mo)
-                if not mo_key: 
+                prefix = extract_mo_prefix(raw_mo)
+                if not prefix: 
                     continue
 
-                if mo_key not in mo_records:
-                    mo_records[mo_key] = {
+                if prefix not in mo_records:
+                    mo_records[prefix] = {
                         "full_mo": normalize_text(raw_mo),
-                        "family": mo_key[:4], # First 4 characters fallback for family identification
+                        "family": prefix,
                         "rows": []
                     }
 
@@ -126,10 +126,10 @@ def process_traceability_data():
                 status = normalize_text(row.get("current status"))
 
                 # Create SHO Entry
-                mo_records[mo_key]["rows"].append({
+                mo_records[prefix]["rows"].append({
                     "department": "SHO",
                     "product": product,
-                    "in_date": "", # Kept explicitly empty per requirements
+                    "in_date": "",
                     "out_date": str(last_challan_date) if last_challan_date else "",
                     "qty_in": qty_approved,
                     "qty_out": qty_returned,
@@ -137,7 +137,7 @@ def process_traceability_data():
                 })
 
                 # Create Transit Buffer Entry
-                mo_records[mo_key]["rows"].append({
+                mo_records[prefix]["rows"].append({
                     "department": "Transit Buffer",
                     "product": product,
                     "in_date": str(jw_challan_date) if jw_challan_date else "",
@@ -150,28 +150,19 @@ def process_traceability_data():
         # ---------------------------------------------------------
         # 2. PROCESS CHANNELS (TRB Master & DGBB Master Subsheets)
         # ---------------------------------------------------------
-        # Combine all channel subsheets to iterate over them
-        all_channels = {}
-        for sname, df in trb_sheets.items():
-            all_channels[sname] = df
-        for sname, df in dgbb_sheets.items():
-            all_channels[sname] = df
-
-        # We keep an aggregation tracker to calculate matching timelines across multiple rows
-        # Structure: channel_aggregation[(mo_key, channel_name, product_type)] = {...}
+        all_channels = {**trb_sheets, **dgbb_sheets}
         channel_aggregation = {}
 
         for channel_name, df in all_channels.items():
             if "mo" not in df.columns:
                 continue
 
-            # Identify structural variants of product type column name safely
             type_col = "type" if "type" in df.columns else ("product" if "product" in df.columns else None)
 
             for _, row in df.iterrows():
                 raw_mo = row.get("mo")
-                mo_key = normalize_mo(raw_mo)
-                if not mo_key:
+                prefix = extract_mo_prefix(raw_mo)
+                if not prefix:
                     continue
 
                 prod_type = normalize_text(row.get(type_col)) if type_col else "Unknown Type"
@@ -179,8 +170,8 @@ def process_traceability_data():
                 cumulative = clean_nan(row.get("cumulative production"))
                 date_val = parse_date_safe(row.get("date"))
 
-                # Unique compound key ensures no cross-contamination across multiple types or channels
-                agg_key = (mo_key, channel_name, prod_type)
+                # Aggregate by Prefix + Exact Channel Name + Product Type
+                agg_key = (prefix, channel_name, prod_type)
 
                 if agg_key not in channel_aggregation:
                     channel_aggregation[agg_key] = {
@@ -192,27 +183,24 @@ def process_traceability_data():
 
                 agg = channel_aggregation[agg_key]
 
-                # Rule: Identify initial production date where production value directly reflects setup run match
                 if production > 0 and production == cumulative:
                     if not agg["first_date"] or (date_val and date_val < agg["first_date"]):
                         agg["first_date"] = date_val
 
-                # Rule: Track exact max progression peak points
                 if cumulative > agg["max_cumulative"]:
                     agg["max_cumulative"] = cumulative
                     agg["max_cum_date"] = date_val
                 elif cumulative == agg["max_cumulative"] and agg["max_cumulative"] > 0:
-                    # If values tie out, preserve the latest date stamp
                     if date_val and (not agg["max_cum_date"] or date_val > agg["max_cum_date"]):
                         agg["max_cum_date"] = date_val
 
         # Push processed channel records back into global tracking map
-        for (mo_key, channel_name, prod_type), metrics in channel_aggregation.items():
-            if mo_key not in mo_records:
+        for (prefix, channel_name, prod_type), metrics in channel_aggregation.items():
+            if prefix not in mo_records:
                 # Capture External Suppliers that are directly allocated straight to channels
-                mo_records[mo_key] = {
+                mo_records[prefix] = {
                     "full_mo": metrics["raw_mo_string"],
-                    "family": mo_key[:4],
+                    "family": prefix,
                     "rows": []
                 }
 
@@ -220,8 +208,8 @@ def process_traceability_data():
             out_d_str = str(metrics["max_cum_date"]) if metrics["max_cum_date"] else ""
             max_qty = metrics["max_cumulative"]
 
-            mo_records[mo_key]["rows"].append({
-                "department": channel_name, # Exact channel (e.g., CH02, T3)
+            mo_records[prefix]["rows"].append({
+                "department": channel_name, # CH02, T3, etc.
                 "product": prod_type,
                 "in_date": in_d_str,
                 "out_date": out_d_str,
@@ -236,7 +224,7 @@ def process_traceability_data():
         new_master = []
         new_flow = {}
 
-        for mo_key, data in mo_records.items():
+        for prefix, data in mo_records.items():
             sho_sum = sum(r["qty_in"] for r in data["rows"] if r["department"] == "SHO")
             channel_sum = sum(r["qty_out"] for r in data["rows"] if r["department"] not in ["SHO", "Transit Buffer"])
 
@@ -248,7 +236,7 @@ def process_traceability_data():
                 "stage_count": len(data["rows"])
             })
 
-            new_flow[mo_key] = {
+            new_flow[prefix] = {
                 "mo": data["full_mo"],
                 "family": data["family"],
                 "flow_data": data["rows"]
@@ -257,7 +245,7 @@ def process_traceability_data():
         MASTER_CACHE = new_master
         FLOW_CACHE = new_flow
         LAST_REFRESH = datetime.now()
-        print(f"[{datetime.now()}] BACKGROUND REFRESH SUCCESSFUL. {len(MASTER_CACHE)} UNIQUE MOs INDEXED.")
+        print(f"[{datetime.now()}] BACKGROUND REFRESH SUCCESSFUL. {len(MASTER_CACHE)} UNIQUE MO FAMILIES INDEXED.")
 
     except Exception as e:
         print(f"CRITICAL ERROR ENCOUNTERED IN BACKGROUND THREAD: {str(e)}")
@@ -291,23 +279,13 @@ def get_all_mos():
 
 @router.get("/traceability_report/{mo}")
 def get_flow(mo: str):
-    search_key = normalize_mo(mo)
+    search_prefix = extract_mo_prefix(mo)
     
-    # Priority Match 1: Look for the exact matching full MO key identifier
-    if search_key in FLOW_CACHE:
+    if search_prefix in FLOW_CACHE:
         return {
             "status": "success",
             "last_updated": str(LAST_REFRESH),
-            "data": FLOW_CACHE[search_key]
+            "data": FLOW_CACHE[search_prefix]
         }
-        
-    # Priority Match 2: Substring scan if exact target string matching is missed (e.g. searching prefix)
-    for cached_key, dataset in FLOW_CACHE.items():
-        if search_key in cached_key or cached_key in search_key:
-            return {
-                "status": "success",
-                "last_updated": str(LAST_REFRESH),
-                "data": dataset
-            }
 
     raise HTTPException(status_code=404, detail=f"No traceability logs matched for order criteria ID: '{mo}'")

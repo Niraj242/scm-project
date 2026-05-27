@@ -59,8 +59,27 @@ const Traceability = () => {
 
   const filteredSummary = summaryData.filter(item => 
     item.mo.toLowerCase().includes(search.toLowerCase()) ||
-    item.base_product.toLowerCase().includes(search.toLowerCase())
+    item.base_product.toLowerCase().includes(search.toLowerCase()) ||
+    (item.final_variant && item.final_variant.toLowerCase().includes(search.toLowerCase()))
   );
+
+  /**
+   * Lookahead utility to calculate the vertical rowSpan values.
+   * Merges matching 7-letter manufacturing order meta properties safely.
+   */
+  const getMoRowSpan = (dataArray, currentIndex) => {
+    const currentMo = dataArray[currentIndex].mo;
+    // If the previous row belongs to the same MO, this cell gets hidden (span 0)
+    if (currentIndex > 0 && dataArray[currentIndex - 1].mo === currentMo) {
+      return 0;
+    }
+    // Loop ahead to calculate how many consecutive matching rows exist
+    let span = 1;
+    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].mo === currentMo) {
+      span++;
+    }
+    return span;
+  };
 
   return (
     <div className="traceability-container">
@@ -108,7 +127,8 @@ const Traceability = () => {
           <table>
             <thead>
               <tr className="super-header">
-                <th colSpan="3">Order Metadata</th>
+                {/* Expanded to 4 columns to cover: MO, Product details, Qty Req, and Item Type */}
+                <th colSpan="4">Order Metadata</th>
                 <th colSpan="3" className="sho-head">SHO Department</th>
                 <th colSpan="3" className="tb-head">Transit Buffer</th>
                 <th colSpan="3" className="ch-head">Channel Section</th>
@@ -116,8 +136,9 @@ const Traceability = () => {
               </tr>
               <tr>
                 <th>MO Number</th>
+                <th>Product Detail</th>
+                <th>Target Qty</th>
                 <th>Type</th>
-                <th>Product</th>
                 <th className="sho-head">Qty</th>
                 <th className="sho-head">In Date</th>
                 <th className="sho-head">Out Date</th>
@@ -131,34 +152,63 @@ const Traceability = () => {
               </tr>
             </thead>
             <tbody>
-              {filteredSummary.map((row, idx) => (
-                <tr key={idx}>
-                  <td>
-                    <button className="mo-link-btn" onClick={() => handleViewDetail(row.mo)}>
-                      {row.mo}
-                    </button>
-                  </td>
-                  <td><strong>{row.component_type}</strong></td>
-                  <td>{row.base_product}</td>
-                  <td>{row.sho_qty.toLocaleString()}</td>
-                  <td>{row.sho_in}</td>
-                  <td>{row.sho_out}</td>
-                  <td>{row.tb_qty.toLocaleString()}</td>
-                  <td>{row.tb_in}</td>
-                  <td>{row.tb_out}</td>
-                  <td>{row.ch_qty.toLocaleString()}</td>
-                  <td>{row.ch_in}</td>
-                  <td>{row.ch_out}</td>
-                  <td>
-                    <span className={`status-badge ${row.status.toLowerCase().replace(/\s+/g, '-')}`}>
-                      {row.status}
-                    </span>
-                  </td>
-                </tr>
-              ))}
+              {filteredSummary.map((row, idx) => {
+                const spanValue = getMoRowSpan(filteredSummary, idx);
+                
+                return (
+                  <tr key={idx}>
+                    {/* MERGED CELL: MO LINK */}
+                    {spanValue > 0 && (
+                      <td rowSpan={spanValue} className="merged-mo-cell">
+                        <button className="mo-link-btn" onClick={() => handleViewDetail(row.mo)}>
+                          {row.mo}
+                        </button>
+                      </td>
+                    )}
+
+                    {/* MERGED CELL: BASE PRODUCT + SUB VARIANT */}
+                    {spanValue > 0 && (
+                      <td rowSpan={spanValue} className="merged-product-cell">
+                        <div style={{ fontWeight: '600' }}>{row.base_product}</div>
+                        {row.final_variant && (
+                          <span className="variant-subtext" style={{ fontSize: '11px', color: '#666', display: 'block', marginTop: '2px' }}>
+                            {row.final_variant}
+                          </span>
+                        )}
+                      </td>
+                    )}
+
+                    {/* MERGED CELL: TARGET REQUIREMENT QUANTITY */}
+                    {spanValue > 0 && (
+                      <td rowSpan={spanValue} className="merged-qty-cell" style={{ fontWeight: '600', color: '#2c3e50' }}>
+                        {row.qty_req > 0 ? row.qty_req.toLocaleString() : '-'}
+                      </td>
+                    )}
+
+                    {/* ALWAYS DISTINCT: COMPONENT TYPE SPLIT (IM/OM) */}
+                    <td><strong>{row.component_type}</strong></td>
+                    
+                    {/* DEPARTMENTAL BREAKDOWNS */}
+                    <td>{row.sho_qty.toLocaleString()}</td>
+                    <td>{row.sho_in}</td>
+                    <td>{row.sho_out}</td>
+                    <td>{row.tb_qty.toLocaleString()}</td>
+                    <td>{row.tb_in}</td>
+                    <td>{row.tb_out}</td>
+                    <td>{row.ch_qty.toLocaleString()}</td>
+                    <td>{row.ch_in}</td>
+                    <td>{row.ch_out}</td>
+                    <td>
+                      <span className={`status-badge ${row.status.toLowerCase().replace(/\s+/g, '-')}`}>
+                        {row.status}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
               {filteredSummary.length === 0 && (
                 <tr>
-                  <td colSpan="13" style={{ textAlign: 'center', padding: '30px' }}>
+                  <td colSpan="14" style={{ textAlign: 'center', padding: '30px' }}>
                     No matching Production Tracking data frames located.
                   </td>
                 </tr>

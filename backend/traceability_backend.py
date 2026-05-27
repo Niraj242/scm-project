@@ -4,6 +4,7 @@ import requests
 import io
 import threading
 import time
+import re
 from datetime import datetime
 from settings import settings
 
@@ -19,10 +20,9 @@ IS_UPDATING = False
 CACHE_DURATION_MINUTES = 5
 
 # =========================================================
-# SECURITY & CLEANING HELPERS
+# SECURITY, CLEANING & PARSING HELPERS
 # =========================================================
 def extract_mo_prefix(value):
-    """Extracts the first 4 characters to group Jobwork and Channels perfectly (e.g., M108)"""
     if pd.isna(value):
         return ""
     return str(value).strip().upper().replace(" ", "")[:4]
@@ -54,6 +54,22 @@ def parse_date_safe(value):
     except:
         return None
 
+def parse_product_details(prod_text):
+    """
+    Extracts base bearing model (e.g., 6007) and component type (IM/OM)
+    Filters variations like /C3, -2RS1, (Exp)
+    """
+    text = normalize_text(prod_text).upper()
+    
+    # Identify Component Variant Line Type
+    component = "IM" if "IM" in text else ("OM" if "OM" in text else "Assembly")
+    
+    # Extract first 4-5 digit bearing series designation number sequence
+    match = re.search(r'\d{4,5}', text)
+    base_product = match.group(0) if match else "Gen Product"
+    
+    return base_product, component
+
 def download_excel(url):
     response = requests.get(url)
     if response.status_code != 200:
@@ -68,7 +84,6 @@ def load_excel_sheets(url):
         for sheet in xls.sheet_names:
             try:
                 df = pd.read_excel(xls, sheet_name=sheet)
-                # Force all columns to lowercase to avoid missing matches
                 df.columns = [str(c).strip().lower() for c in df.columns]
                 sheets[sheet] = df
             except Exception as e:
@@ -95,14 +110,11 @@ def process_traceability_data():
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
         dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
 
-        mo_records = {}
-        
-        # Temporary tracker to compute Type-Wise summaries for JobWork
-        # Key: (prefix, product_type) -> values
-        jobwork_totals = {}
+        mo_flow_records = {}
+        summary_aggregation = {}
 
         # ---------------------------------------------------------
-        # 1. PROCESS JOBWORK REPORT (SHO & Transit Buffer Individual)
+        # 1. PROCESS JOBWORK REPORT (SHO & Transit Buffer)
         # ---------------------------------------------------------
         for sheet_name, df in jobwork_sheets.items():
             if "po / pr no." not in df.columns:
@@ -114,89 +126,58 @@ def process_traceability_data():
                 if not prefix: 
                     continue
 
-                if prefix not in mo_records:
-                    mo_records[prefix] = {
-                        "full_mo": normalize_text(raw_mo),
-                        "family": prefix,
-                        "rows": []
-                    }
+                # Initialize Flow Structure (Detailed View)
+                if prefix not in mo_flow_records:
+                    mo_flow_records[prefix] = {"full_mo": normalize_text(raw_mo), "rows": []}
 
-                product = normalize_text(row.get("product")) # Keeps IM / OM separate
+                product_raw = row.get("product")
+                product_str = normalize_text(product_raw)
+                base_prod, comp_type = parse_product_details(product_str)
+                
                 jw_challan_date = parse_date_safe(row.get("jw challan date"))
                 last_challan_date = parse_date_safe(row.get("last challan date"))
                 qty_approved = clean_nan(row.get("qty approved"))
                 qty_returned = clean_nan(row.get("qty returned"))
                 status = normalize_text(row.get("current status"))
 
-                # Add individual SHO entry
-                mo_records[prefix]["rows"].append({
-                    "department": "SHO",
-                    "product": product,
-                    "in_date": "",
+                # Append detailed flow lines
+                mo_flow_records[prefix]["rows"].append({
+                    "department": "SHO", "product": product_str, "in_date": "",
                     "out_date": str(last_challan_date) if last_challan_date else "",
-                    "qty_in": qty_approved,
-                    "qty_out": qty_returned,
-                    "status": status
+                    "qty_in": qty_approved, "qty_out": qty_returned, "status": status
                 })
-
-                # Add individual Transit Buffer entry
-                mo_records[prefix]["rows"].append({
-                    "department": "Transit Buffer",
-                    "product": product,
+                mo_flow_records[prefix]["rows"].append({
+                    "department": "Transit Buffer", "product": product_str, 
                     "in_date": str(jw_challan_date) if jw_challan_date else "",
                     "out_date": str(last_challan_date) if last_challan_date else "",
-                    "qty_in": qty_returned, 
-                    "qty_out": qty_returned,
-                    "status": status
+                    "qty_in": qty_returned, "qty_out": qty_returned, "status": status
                 })
 
-                # Aggregate dynamically by compound key (Prefix + Product Type)
-                jw_key = (prefix, product)
-                if jw_key not in jobwork_totals:
-                    jobwork_totals[jw_key] = {
-                        "sho_in": 0.0,
-                        "sho_out": 0.0,
-                        "tb_in": 0.0,
-                        "tb_out": 0.0
+                # Aggregate metrics for the Summary View Dashboard
+                sum_key = (prefix, base_prod, comp_type)
+                if sum_key not in summary_aggregation:
+                    summary_aggregation[sum_key] = {
+                        "full_mo": normalize_text(raw_mo),
+                        "sho_qty": 0.0, "sho_in_date": None, "sho_out_date": None,
+                        "tb_qty": 0.0, "tb_in_date": None, "tb_out_date": None,
+                        "ch_qty": 0.0, "ch_in_date": None, "ch_out_date": None,
                     }
                 
-                jobwork_totals[jw_key]["sho_in"] += qty_approved
-                jobwork_totals[jw_key]["sho_out"] += qty_returned
-                jobwork_totals[jw_key]["tb_in"] += qty_returned
-                jobwork_totals[jw_key]["tb_out"] += qty_returned
+                s_agg = summary_aggregation[sum_key]
+                s_agg["sho_qty"] += qty_approved
+                s_agg["tb_qty"] += qty_returned
 
-        # ---------------------------------------------------------
-        # INSERT TYPE-WISE SUMMARY ROWS FOR SHO & TRANSIT BUFFER
-        # ---------------------------------------------------------
-        for (prefix, product), totals in jobwork_totals.items():
-            if prefix in mo_records:
-                # Add specific SHO total row for this type (IM/OM)
-                mo_records[prefix]["rows"].append({
-                    "department": "SHO (Total)",
-                    "product": product, # e.g. IM or OM
-                    "in_date": "",
-                    "out_date": "",
-                    "qty_in": totals["sho_in"],
-                    "qty_out": totals["sho_out"],
-                    "status": "Aggregated"
-                })
-
-                # Add specific Transit Buffer total row for this type (IM/OM)
-                mo_records[prefix]["rows"].append({
-                    "department": "Transit Buffer (Total)",
-                    "product": product, # e.g. IM or OM
-                    "in_date": "",
-                    "out_date": "",
-                    "qty_in": totals["tb_in"],
-                    "qty_out": totals["tb_out"],
-                    "status": "Aggregated"
-                })
+                if last_challan_date:
+                    s_agg["sho_out_date"] = max(s_agg["sho_out_date"], last_challan_date) if s_agg["sho_out_date"] else last_challan_date
+                    s_agg["tb_out_date"] = max(s_agg["tb_out_date"], last_challan_date) if s_agg["tb_out_date"] else last_challan_date
+                if jw_challan_date:
+                    s_agg["sho_in_date"] = min(s_agg["sho_in_date"], jw_challan_date) if s_agg["sho_in_date"] else jw_challan_date
+                    s_agg["tb_in_date"] = min(s_agg["tb_in_date"], jw_challan_date) if s_agg["tb_in_date"] else jw_challan_date
 
         # ---------------------------------------------------------
         # 2. PROCESS CHANNELS (TRB Master & DGBB Master Subsheets)
         # ---------------------------------------------------------
         all_channels = {**trb_sheets, **dgbb_sheets}
-        channel_aggregation = {}
 
         for channel_name, df in all_channels.items():
             if "mo" not in df.columns:
@@ -210,95 +191,87 @@ def process_traceability_data():
                 if not prefix:
                     continue
 
-                prod_type = normalize_text(row.get(type_col)) if type_col else "Unknown Type"
+                prod_raw = row.get(type_col)
+                prod_str = normalize_text(prod_raw)
+                base_prod, _ = parse_product_details(prod_str)
+                
                 production = clean_nan(row.get("production"))
                 cumulative = clean_nan(row.get("cumulative production"))
                 date_val = parse_date_safe(row.get("date"))
 
-                # Aggregate by Prefix + Exact Channel Name + Product Type
-                agg_key = (prefix, channel_name, prod_type)
+                # Inject into Detailed Flow records map directly
+                if prefix in mo_flow_records:
+                    mo_flow_records[prefix]["rows"].append({
+                        "department": channel_name, "product": prod_str,
+                        "in_date": str(date_val) if production > 0 and production == cumulative else "",
+                        "out_date": str(date_val) if cumulative > 0 else "",
+                        "qty_in": cumulative, "qty_out": cumulative, "status": "Completed" if cumulative > 0 else "Running"
+                    })
 
-                if agg_key not in channel_aggregation:
-                    channel_aggregation[agg_key] = {
-                        "raw_mo_string": normalize_text(raw_mo),
-                        "first_date": None,
-                        "max_cum_date": None,
-                        "max_cumulative": 0.0
-                    }
+                # Combine channel metrics into Summary matching entries by Base Model Type
+                for comp in ["IM", "OM"]:
+                    sum_key = (prefix, base_prod, comp)
+                    if sum_key in summary_aggregation:
+                        s_agg = summary_aggregation[sum_key]
+                        # Aggregate the production maximum value across variants
+                        if cumulative > s_agg["ch_qty"]:
+                            s_agg["ch_qty"] = cumulative
+                        if date_val:
+                            s_agg["ch_in_date"] = min(s_agg["ch_in_date"], date_val) if s_agg["ch_in_date"] else date_val
+                            s_agg["ch_out_date"] = max(s_agg["ch_out_date"], date_val) if s_agg["ch_out_date"] else date_val
 
-                agg = channel_aggregation[agg_key]
+        # ---------------------------------------------------------
+        # 3. BUILD AND FORMAT DASHBOARD ENTRIES & STATUS DEFINITIONS
+        # ---------------------------------------------------------
+        compiled_summary = []
+        for (prefix, base_prod, comp_type), s_agg in summary_aggregation.items():
+            # Status Evaluation Matrix
+            if s_agg["sho_qty"] == 0 and s_agg["ch_qty"] == 0:
+                calc_status = "Yet to Start"
+            elif s_agg["ch_qty"] >= s_agg["sho_qty"] and s_agg["sho_qty"] > 0:
+                calc_status = "Completed"
+            else:
+                calc_status = "In Process"
 
-                if production > 0 and production == cumulative:
-                    if not agg["first_date"] or (date_val and date_val < agg["first_date"]):
-                        agg["first_date"] = date_val
-
-                if cumulative > agg["max_cumulative"]:
-                    agg["max_cumulative"] = cumulative
-                    agg["max_cum_date"] = date_val
-                elif cumulative == agg["max_cumulative"] and agg["max_cumulative"] > 0:
-                    if date_val and (not agg["max_cum_date"] or date_val > agg["max_cum_date"]):
-                        agg["max_cum_date"] = date_val
-
-        # Push processed channel records back into global tracking map
-        for (prefix, channel_name, prod_type), metrics in channel_aggregation.items():
-            if prefix not in mo_records:
-                mo_records[prefix] = {
-                    "full_mo": metrics["raw_mo_string"],
-                    "family": prefix,
-                    "rows": []
-                }
-
-            in_d_str = str(metrics["first_date"]) if metrics["first_date"] else ""
-            out_d_str = str(metrics["max_cum_date"]) if metrics["max_cum_date"] else ""
-            max_qty = metrics["max_cumulative"]
-
-            mo_records[prefix]["rows"].append({
-                "department": channel_name, 
-                "product": prod_type,
-                "in_date": in_d_str,
-                "out_date": out_d_str,
-                "qty_in": max_qty,
-                "qty_out": max_qty,
-                "status": "Completed" if max_qty > 0 else "Running"
+            compiled_summary.append({
+                "mo": s_agg["full_mo"],
+                "prefix": prefix,
+                "base_product": base_prod,
+                "component_type": comp_type,
+                "sho_qty": s_agg["sho_qty"],
+                "sho_in": str(s_agg["sho_in_date"]) if s_agg["sho_in_date"] else "-",
+                "sho_out": str(s_agg["sho_out_date"]) if s_agg["sho_out_date"] else "-",
+                "tb_qty": s_agg["tb_qty"],
+                "tb_in": str(s_agg["tb_in_date"]) if s_agg["tb_in_date"] else "-",
+                "tb_out": str(s_agg["tb_out_date"]) if s_agg["tb_out_date"] else "-",
+                "ch_qty": s_agg["ch_qty"],
+                "ch_in": str(s_agg["ch_in_date"]) if s_agg["ch_in_date"] else "-",
+                "ch_out": str(s_agg["ch_out_date"]) if s_agg["ch_out_date"] else "-",
+                "status": calc_status
             })
 
-        # ---------------------------------------------------------
-        # 3. COMPILE STRUCTURED QUICK CACHE
-        # ---------------------------------------------------------
-        new_master = []
+        # Set Compiled Cache Structures
+        MASTER_CACHE = compiled_summary
+        
+        # Format Flow Data Cache Lookups
         new_flow = {}
-
-        for prefix, data in mo_records.items():
-            # For master KPI summaries, count base entries to prevent doubling calculations
-            sho_sum = sum(r["qty_in"] for r in data["rows"] if r["department"] == "SHO")
-            channel_sum = sum(r["qty_out"] for r in data["rows"] if r["department"] not in ["SHO", "Transit Buffer", "SHO (Total)", "Transit Buffer (Total)"])
-
-            new_master.append({
-                "mo": data["full_mo"],
-                "family": data["family"],
-                "sho_qty": sho_sum,
-                "channel_qty": channel_sum,
-                "stage_count": len(data["rows"])
-            })
-
-            new_flow[prefix] = {
-                "mo": data["full_mo"],
-                "family": data["family"],
-                "flow_data": data["rows"]
+        for pfx, dataset in mo_flow_records.items():
+            new_flow[pfx] = {
+                "mo": dataset["full_mo"],
+                "flow_data": dataset["rows"]
             }
-
-        MASTER_CACHE = new_master
         FLOW_CACHE = new_flow
+        
         LAST_REFRESH = datetime.now()
-        print(f"[{datetime.now()}] BACKGROUND REFRESH SUCCESSFUL. {len(MASTER_CACHE)} UNIQUE MO FAMILIES INDEXED.")
+        print(f"[{datetime.now()}] REFRESH COMPLETION. SUMMARY RECORDS INSTANCED: {len(MASTER_CACHE)}")
 
     except Exception as e:
-        print(f"CRITICAL ERROR ENCOUNTERED IN BACKGROUND THREAD: {str(e)}")
+        print(f"CRITICAL FAULT ENCOUNTERED IN REFRESH CORE THREAD: {str(e)}")
     finally:
         IS_UPDATING = False
 
 # =========================================================
-# BACKGROUND DAEMON INITIALIZATION
+# BACKGROUND DAEMON SCHEDULER INITIALIZATION
 # =========================================================
 def background_refresh_loop():
     process_traceability_data()
@@ -310,7 +283,7 @@ t = threading.Thread(target=background_refresh_loop, daemon=True)
 t.start()
 
 # =========================================================
-# ROUTER API ENDPOINTS
+# ROUTER API SERVICE ENDPOINTS
 # =========================================================
 @router.get("/traceability_all_mos")
 def get_all_mos():
@@ -325,12 +298,10 @@ def get_all_mos():
 @router.get("/traceability_report/{mo}")
 def get_flow(mo: str):
     search_prefix = extract_mo_prefix(mo)
-    
     if search_prefix in FLOW_CACHE:
         return {
             "status": "success",
             "last_updated": str(LAST_REFRESH),
             "data": FLOW_CACHE[search_prefix]
         }
-
-    raise HTTPException(status_code=404, detail=f"No traceability logs matched for order criteria ID: '{mo}'")
+    raise HTTPException(status_code=404, detail=f"No logs matched for sequence target ID: '{mo}'")

@@ -114,6 +114,29 @@ tr:hover {
   background: #f8fafc;
 }
 
+/* Layout Engine Spanning Controls */
+.merged-mo-cell,
+.merged-product-cell,
+.merged-qty-cell {
+  vertical-align: middle !important;
+  background: #ffffff;
+  border-bottom: 2px solid #cbd5e1; /* Clear division line between distinct batches */
+  border-right: 1px solid #cbd5e1;
+}
+
+.merged-mo-cell {
+  text-align: center;
+}
+
+.merged-qty-cell {
+  text-align: center;
+}
+
+.variant-subtext {
+  font-style: italic;
+  letter-spacing: 0.2px;
+}
+
 .mo-cell {
   background: #f1f5f9;
   text-align: center;
@@ -155,7 +178,6 @@ tr:hover {
   font-size: 14px;
   font-weight: 500;
 }
-
 
 .initializing-box {
   background: #f0fdf4;

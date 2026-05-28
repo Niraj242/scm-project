@@ -59,12 +59,18 @@ export default function MainDashboard() {
       path: "/chatbot",
       icon: "🤖",
     },
-    // --- ADDED TRACEABILITY MODULE BELOW ---
     {
       title: "MO Traceability",
       desc: "End-to-end manufacturing order tracking",
       path: "/traceability",
       icon: "🔍",
+    },
+    // --- ADDED TBE MODULE BELOW ---
+    {
+      title: "TBE Calibration",
+      desc: "Transit Buffer Entry & Calibration tracking",
+      path: "/tbe",
+      icon: "⚖️",
     },
   ];
 

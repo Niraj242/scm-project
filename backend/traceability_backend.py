@@ -81,16 +81,21 @@ def parse_date_safe(value):
     except:
         return None
 
+
 def extract_base_family(item_name):
     """
     Extracts the exact sequence of numbers for grouping.
-    Prevents '332211' from being falsely grouped with '33221'.
+    Requires at least 3 digits (e.g., 6007, 6206) to prevent grabbing junk "1"s.
     """
     if pd.isna(item_name):
         return "UNKNOWN"
-    # Find the first continuous block of numbers
-    match = re.search(r'\d+', str(item_name))
-    return match.group(0) if match else str(item_name).strip()
+        
+    item_str = str(item_name).strip()
+    # Find the first continuous block of AT LEAST 3 numbers
+    match = re.search(r'\d{3,}', item_str)
+    
+    return match.group(0) if match else item_str
+
 
 def parse_product_details(prod_text):
     """

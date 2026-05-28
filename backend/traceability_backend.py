@@ -339,79 +339,40 @@ def process_traceability_data():
 
         # ---------------------------------------------------------
         # 3. COMPILING FINAL CACHE DATA FRAMES & SORTING 
-        # (Combining IM and OM for the Main Page)
+        # (Modified to KEEP IM and OM Separate for the React UI)
         # ---------------------------------------------------------
-        combined_families = {}
-        
-        # Merge IM and OM into a single Bearing representation
-        for (mo_group, base_prod, comp_type), s_agg in summary_aggregation.items():
-            comb_key = (mo_group, base_prod)
-            
-            if comb_key not in combined_families:
-                combined_families[comb_key] = {
-                    "mo": mo_group,
-                    "base_product": base_prod,
-                    "variants_seen": set(),
-                    "qty_req": 0, "sho_qty": 0.0, "tb_qty": 0.0, "ch_qty": 0.0,
-                    "sho_in": None, "sho_out": None, "tb_in": None, "tb_out": None,
-                    "ch_in": None, "ch_out": None,
-                }
-            
-            cf = combined_families[comb_key]
-            
-            # Avoid putting the temp 'Combined Family' label in variants
-            if s_agg["final_variant"] != "Combined Family Channel Grouping":
-                cf["variants_seen"].add(s_agg["final_variant"])
-            
-            # 1 IM + 1 OM = 1 Bearing. Taking the Max ensures the overall channel logic remains accurate.
-            cf["qty_req"] = max(cf["qty_req"], int(s_agg["qty_req"]))
-            cf["sho_qty"] = max(cf["sho_qty"], s_agg["sho_qty"])
-            cf["tb_qty"] = max(cf["tb_qty"], s_agg["tb_qty"])
-            cf["ch_qty"] = max(cf["ch_qty"], s_agg["ch_qty"])
-            
-            # Safe Min/Max logic for dates
-            def update_date(current, new_date, is_min):
-                if not new_date: return current
-                if not current: return new_date
-                return min(current, new_date) if is_min else max(current, new_date)
-
-            cf["sho_in"] = update_date(cf["sho_in"], s_agg["sho_in_date"], True)
-            cf["sho_out"] = update_date(cf["sho_out"], s_agg["sho_out_date"], False)
-            cf["tb_in"] = update_date(cf["tb_in"], s_agg["tb_in_date"], True)
-            cf["tb_out"] = update_date(cf["tb_out"], s_agg["tb_out_date"], False)
-            cf["ch_in"] = update_date(cf["ch_in"], s_agg["ch_in_date"], True)
-            cf["ch_out"] = update_date(cf["ch_out"], s_agg["ch_out_date"], False)
-
-
-        # Push merged dictionary into the final MASTER_CACHE array
         compiled_summary = []
-        for cf in combined_families.values():
-            if cf["sho_qty"] == 0 and cf["ch_qty"] == 0:
+        
+        for (mo_group, base_prod, comp_type), s_agg in summary_aggregation.items():
+            
+            # Simple status calculation based on quantities
+            if s_agg["sho_qty"] == 0 and s_agg["ch_qty"] == 0:
                 calc_status = "Yet to Start"
-            elif cf["ch_qty"] >= cf["sho_qty"] and cf["sho_qty"] > 0:
+            elif s_agg["ch_qty"] >= s_agg["sho_qty"] and s_agg["sho_qty"] > 0:
                 calc_status = "Completed"
             else:
                 calc_status = "In Process"
 
             compiled_summary.append({
-                "mo": cf["mo"],
-                "base_product": cf["base_product"],
-                "final_variant": ", ".join(sorted(list(cf["variants_seen"]))) if cf["variants_seen"] else cf["base_product"],
-                "component_type": "Bearing (IM+OM)", # Represents combined row
-                "qty_req": int(cf["qty_req"]),
-                "sho_qty": cf["sho_qty"],
-                "sho_in": str(cf["sho_in"]) if cf["sho_in"] else "-",
-                "sho_out": str(cf["sho_out"]) if cf["sho_out"] else "-",
-                "tb_qty": cf["tb_qty"],
-                "tb_in": str(cf["tb_in"]) if cf["tb_in"] else "-",
-                "tb_out": str(cf["tb_out"]) if cf["tb_out"] else "-",
-                "ch_qty": cf["ch_qty"],
-                "ch_in": str(cf["ch_in"]) if cf["ch_in"] else "-",
-                "ch_out": str(cf["ch_out"]) if cf["ch_out"] else "-",
+                "mo": mo_group,
+                "base_product": base_prod,
+                "final_variant": s_agg["final_variant"] if s_agg["final_variant"] != "Combined Family Channel Grouping" else base_prod,
+                "component_type": comp_type, # Maintains IM or OM
+                "qty_req": int(s_agg["qty_req"]),
+                "sho_qty": s_agg["sho_qty"],
+                "sho_in": str(s_agg["sho_in_date"]) if s_agg["sho_in_date"] else "-",
+                "sho_out": str(s_agg["sho_out_date"]) if s_agg["sho_out_date"] else "-",
+                "tb_qty": s_agg["tb_qty"],
+                "tb_in": str(s_agg["tb_in_date"]) if s_agg["tb_in_date"] else "-",
+                "tb_out": str(s_agg["tb_out_date"]) if s_agg["tb_out_date"] else "-",
+                "ch_qty": s_agg["ch_qty"],
+                "ch_in": str(s_agg["ch_in_date"]) if s_agg["ch_in_date"] else "-",
+                "ch_out": str(s_agg["ch_out_date"]) if s_agg["ch_out_date"] else "-",
                 "status": calc_status
             })
 
-        compiled_summary.sort(key=lambda x: (x["mo"], x["base_product"]))
+        # Sorting is absolutely mandatory for the React rowSpan logic to work
+        compiled_summary.sort(key=lambda x: (x["mo"], x["base_product"], x["component_type"]))
         
         MASTER_CACHE = compiled_summary
         FLOW_CACHE = mo_flow_records

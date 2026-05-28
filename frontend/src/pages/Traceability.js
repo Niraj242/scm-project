@@ -60,16 +60,24 @@ const Traceability = () => {
     }
   };
 
+  // 1. Filter the data based on search
   const filteredSummary = summaryData.filter(item => 
     (item.mo && item.mo.toLowerCase().includes(search.toLowerCase())) ||
     (item.base_product && String(item.base_product).toLowerCase().includes(search.toLowerCase()))
   );
 
-  // Lookahead utility calculates row spans for identical MO numbers
+  // 2. SORT the data by MO. (Critical to ensure IM and OM of the same MO are next to each other so RowSpan works).
+  const sortedSummary = [...filteredSummary].sort((a, b) => {
+    if (a.mo < b.mo) return -1;
+    if (a.mo > b.mo) return 1;
+    return 0;
+  });
+
+  // 3. Row Span Logic calculates how many identical MOs sit next to each other
   const getMoRowSpan = (dataArray, currentIndex) => {
     const currentMo = dataArray[currentIndex].mo;
     if (currentIndex > 0 && dataArray[currentIndex - 1].mo === currentMo) {
-      return 0; // Already rendered in a previous row's span
+      return 0; // Already spanned from a row above
     }
     let span = 1;
     while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].mo === currentMo) {
@@ -147,8 +155,8 @@ const Traceability = () => {
               </tr>
             </thead>
             <tbody>
-              {filteredSummary.map((row, idx) => {
-                const moSpan = getMoRowSpan(filteredSummary, idx);
+              {sortedSummary.map((row, idx) => {
+                const moSpan = getMoRowSpan(sortedSummary, idx);
                 
                 return (
                   <tr key={idx}>
@@ -176,10 +184,10 @@ const Traceability = () => {
                     <td>{row.tb_in || '-'}</td>
                     <td>{row.tb_out || '-'}</td>
                     
-                    {/* NEW: Merged Channel Section (Spans across IM/OM rows) */}
+                    {/* Merged Channel Section (Spans across IM/OM rows) */}
                     {moSpan > 0 && (
                       <>
-                        <td rowSpan={moSpan} className="merged-qty-cell">
+                        <td rowSpan={moSpan} className="merged-qty-cell" style={{ fontWeight: '600' }}>
                           {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}
                         </td>
                         <td rowSpan={moSpan} className="merged-qty-cell">{row.ch_in || '-'}</td>
@@ -187,7 +195,7 @@ const Traceability = () => {
                       </>
                     )}
                     
-                    {/* Status rendered per line so you can see if IM or OM is specifically delayed */}
+                    {/* Status rendered per line */}
                     <td>
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'default'}`}>
                         {row.status || 'Pending'}
@@ -196,7 +204,7 @@ const Traceability = () => {
                   </tr>
                 );
               })}
-              {filteredSummary.length === 0 && (
+              {sortedSummary.length === 0 && (
                 <tr>
                   <td colSpan="14" style={{ textAlign: 'center', padding: '30px' }}>
                     No matching Production Tracking data frames located.

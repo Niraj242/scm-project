@@ -1,0 +1,205 @@
+/* Container & Headers */
+.traceability-container {
+  padding: 24px;
+  background-color: #f8fafc;
+  min-height: 100vh;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.header-section {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  margin-bottom: 24px;
+}
+
+.header-section h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 4px 0;
+}
+
+.sub-tag {
+  color: #64748b;
+  font-size: 14px;
+  margin: 0;
+}
+
+/* Controls */
+.search-box {
+  padding: 10px 16px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  width: 260px;
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.search-box:focus {
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.back-btn {
+  background-color: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  color: #334155;
+  transition: background-color 0.2s;
+}
+
+.back-btn:hover {
+  background-color: #e2e8f0;
+}
+
+/* Table Styling */
+.table-wrapper {
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  overflow-x: auto;
+}
+
+.trace-table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: center;
+  font-size: 13px;
+  color: #334155;
+}
+
+/* Ensures every cell has exactly a 1px border */
+.trace-table th, 
+.trace-table td {
+  border: 1px solid #e2e8f0;
+  padding: 12px;
+  vertical-align: middle;
+}
+
+/* Super Headers */
+.super-header th {
+  color: #ffffff;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 12px;
+  border: 1px solid #ffffff20; 
+}
+
+/* Updated Colors to differentiate TBE from Traceability if desired, 
+   but kept structurally identical so it feels like the same app */
+.meta-head { background-color: #1e293b; } /* Slate 800 */
+.sho-head  { background-color: #1e3a8a; } /* Blue 900 */
+.ch-head   { background-color: #065f46; } /* Emerald 800 */
+.tb-head   { background-color: #7c2d12; } /* Orange 900 */
+
+/* Sub Headers */
+.sub-header th {
+  background-color: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+}
+
+/* Data Rows */
+.data-row:hover td {
+  background-color: #f8fafc;
+}
+
+/* Merged Cells */
+.merged-mo-cell, 
+.merged-channel-cell {
+  background-color: #ffffff !important;
+}
+
+.mo-link-btn {
+  background: none;
+  border: none;
+  color: #2563eb;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.mo-link-btn:hover {
+  color: #1d4ed8;
+}
+
+/* Typography Helpers */
+.fw-bold {
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.qty-cell {
+  font-weight: 600;
+  color: #334155;
+}
+
+/* Status Badges */
+.status-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+/* TBE Specific Statuses */
+.status-badge.completed {
+  background-color: #dcfce7;
+  color: #166534;
+}
+
+.status-badge.in-queue {
+  background-color: #e0e7ff;
+  color: #3730a3;
+}
+
+.status-badge.in-process,
+.status-badge.pending,
+.status-badge.default {
+  background-color: #fef9c3;
+  color: #854d0e;
+}
+
+/* States */
+.empty-state {
+  text-align: center;
+  padding: 40px !important;
+  color: #64748b;
+  font-style: italic;
+}
+
+.loading-spinner {
+  text-align: center;
+  padding: 40px;
+  color: #64748b;
+  font-weight: 600;
+}
+
+.error-box {
+  background-color: #fee2e2;
+  color: #991b1b;
+  padding: 16px;
+  border-radius: 6px;
+  margin-bottom: 24px;
+  border: 1px solid #f87171;
+}
+
+.initializing-box {
+  background-color: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 24px;
+  border-radius: 8px;
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.initializing-box strong { color: #1e3a8a; }
+.initializing-box .sub-text { color: #3b82f6; font-size: 14px; margin-top: 8px; }

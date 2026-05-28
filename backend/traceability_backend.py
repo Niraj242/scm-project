@@ -81,32 +81,15 @@ def parse_date_safe(value):
     except:
         return None
 
-
-def extract_base_family(item_name):
-    """
-    Extracts the exact sequence of numbers for grouping.
-    Requires at least 3 digits (e.g., 6007, 6206) to prevent grabbing junk "1"s.
-    """
-    if pd.isna(item_name):
-        return "UNKNOWN"
-        
-    item_str = str(item_name).strip()
-    # Find the first continuous block of AT LEAST 3 numbers
-    match = re.search(r'\d{3,}', item_str)
-    
-    return match.group(0) if match else item_str
-
-
 def parse_product_details(prod_text):
     """
-    Extracts component type and uses Strict Regex to pull the Base Family.
+    Extracts component type but skips the 4-digit product matching 
+    as requested, passing the base product through as-is.
     """
     text = normalize_text(prod_text).upper()
     component = "IM" if "IM" in text or "IR" in text else ("OM" if "OM" in text or "OR" in text else "Assembly")
     
-    # Extract the exact base family number dynamically
-    base_product = extract_base_family(text)
-    
+    base_product = text if text else "Gen Product"
     return base_product, component
 
 def download_excel(url):
@@ -227,16 +210,17 @@ def process_traceability_data():
                 qty_returned = clean_nan(row.get("qty returned"))
                 status = normalize_text(row.get("current status"))
 
-                # Detailed Row Appending (Maintains Exact Variants)
+                # LOGIC UPDATE: SHO gets In Date, TB gets Out Date. Others blank.
                 mo_flow_records[mo_group]["rows"].append({
-                    "department": "SHO", "product": product_str, "in_date": "",
-                    "out_date": str(last_challan_date) if last_challan_date else "",
+                    "department": "SHO", "product": product_str, 
+                    "in_date": str(jw_challan_date) if jw_challan_date else "-",
+                    "out_date": "-",
                     "qty_in": qty_approved, "qty_out": qty_returned, "status": status
                 })
                 mo_flow_records[mo_group]["rows"].append({
                     "department": "Transit Buffer", "product": product_str, 
-                    "in_date": str(jw_challan_date) if jw_challan_date else "",
-                    "out_date": str(last_challan_date) if last_challan_date else "",
+                    "in_date": "-",
+                    "out_date": str(last_challan_date) if last_challan_date else "-",
                     "qty_in": qty_returned, "qty_out": qty_returned, "status": status
                 })
 
@@ -246,20 +230,20 @@ def process_traceability_data():
                     s_agg["sho_qty"] += qty_approved
                     s_agg["tb_qty"] += qty_returned
 
-                    if last_challan_date:
-                        s_agg["sho_out_date"] = max(s_agg["sho_out_date"], last_challan_date) if s_agg["sho_out_date"] else last_challan_date
-                        s_agg["tb_out_date"] = max(s_agg["tb_out_date"], last_challan_date) if s_agg["tb_out_date"] else last_challan_date
+                    # LOGIC UPDATE: Master summary min/max rules adjusted
                     if jw_challan_date:
                         s_agg["sho_in_date"] = min(s_agg["sho_in_date"], jw_challan_date) if s_agg["sho_in_date"] else jw_challan_date
-                        s_agg["tb_in_date"] = min(s_agg["tb_in_date"], jw_challan_date) if s_agg["tb_in_date"] else jw_challan_date
+                    if last_challan_date:
+                        s_agg["tb_out_date"] = max(s_agg["tb_out_date"], last_challan_date) if s_agg["tb_out_date"] else last_challan_date
                 else:
-                    summary_aggregation[sum_key] = {
-                        "mo": mo_group, "base_product": base_prod, "final_variant": product_str,
-                        "component_type": comp_type, "qty_req": 0,
-                        "sho_qty": qty_approved, "sho_in_date": jw_challan_date, "sho_out_date": last_challan_date,
-                        "tb_qty": qty_returned, "tb_in_date": jw_challan_date, "tb_out_date": last_challan_date,
-                        "ch_qty": 0.0, "ch_in_date": None, "ch_out_date": None,
-                    }
+                    if sum_key not in summary_aggregation:
+                        summary_aggregation[sum_key] = {
+                            "mo": mo_group, "base_product": base_prod, "final_variant": product_str,
+                            "component_type": comp_type, "qty_req": 0,
+                            "sho_qty": qty_approved, "sho_in_date": jw_challan_date, "sho_out_date": None,
+                            "tb_qty": qty_returned, "tb_in_date": None, "tb_out_date": last_challan_date,
+                            "ch_qty": 0.0, "ch_in_date": None, "ch_out_date": None,
+                        }
 
         # ---------------------------------------------------------
         # 2. PROCESS CHANNELS WITH SUMMED LOGIC
@@ -293,7 +277,6 @@ def process_traceability_data():
                 if mo_group not in mo_flow_records:
                     mo_flow_records[mo_group] = {"mo": mo_group, "rows": []}
 
-                # Detailed Row Appending (Maintains Exact Variants)
                 mo_flow_records[mo_group]["rows"].append({
                     "department": channel_name, "product": prod_str,
                     "in_date": str(date_val) if production > 0 and production == cumulative else "",
@@ -343,14 +326,10 @@ def process_traceability_data():
                     }
 
         # ---------------------------------------------------------
-        # 3. COMPILING FINAL CACHE DATA FRAMES & SORTING 
-        # (Modified to KEEP IM and OM Separate for the React UI)
+        # 3. COMPILING FINAL CACHE DATA FRAMES & SORTING
         # ---------------------------------------------------------
         compiled_summary = []
-        
         for (mo_group, base_prod, comp_type), s_agg in summary_aggregation.items():
-            
-            # Simple status calculation based on quantities
             if s_agg["sho_qty"] == 0 and s_agg["ch_qty"] == 0:
                 calc_status = "Yet to Start"
             elif s_agg["ch_qty"] >= s_agg["sho_qty"] and s_agg["sho_qty"] > 0:
@@ -360,15 +339,15 @@ def process_traceability_data():
 
             compiled_summary.append({
                 "mo": mo_group,
-                "base_product": base_prod,
-                "final_variant": s_agg["final_variant"] if s_agg["final_variant"] != "Combined Family Channel Grouping" else base_prod,
-                "component_type": comp_type, # Maintains IM or OM
+                "base_product": s_agg["base_product"],
+                "final_variant": s_agg["final_variant"],
+                "component_type": comp_type,
                 "qty_req": int(s_agg["qty_req"]),
                 "sho_qty": s_agg["sho_qty"],
                 "sho_in": str(s_agg["sho_in_date"]) if s_agg["sho_in_date"] else "-",
-                "sho_out": str(s_agg["sho_out_date"]) if s_agg["sho_out_date"] else "-",
+                "sho_out": "-",  # Hardcoded blank based on new logic
                 "tb_qty": s_agg["tb_qty"],
-                "tb_in": str(s_agg["tb_in_date"]) if s_agg["tb_in_date"] else "-",
+                "tb_in": "-",    # Hardcoded blank based on new logic
                 "tb_out": str(s_agg["tb_out_date"]) if s_agg["tb_out_date"] else "-",
                 "ch_qty": s_agg["ch_qty"],
                 "ch_in": str(s_agg["ch_in_date"]) if s_agg["ch_in_date"] else "-",
@@ -376,7 +355,6 @@ def process_traceability_data():
                 "status": calc_status
             })
 
-        # Sorting is absolutely mandatory for the React rowSpan logic to work
         compiled_summary.sort(key=lambda x: (x["mo"], x["base_product"], x["component_type"]))
         
         MASTER_CACHE = compiled_summary

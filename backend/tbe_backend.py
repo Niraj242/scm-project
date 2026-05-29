@@ -109,7 +109,7 @@ def process_tbe_dashboard_data():
                     mo_grp = get_mo_group(raw_mo)
                     target_qty_lookup[mo_grp] = target_qty_lookup.get(mo_grp, 0.0) + clean_nan(row.get(qty_col))
 
-        # RULE 2: ANCHOR CHANNELS (Fixed to avoid sheet dictionary clobbering)
+        # RULE 2: ANCHOR CHANNELS
         for sheet_dict in [trb_sheets, dgbb_sheets]:
             for _, df in sheet_dict.items():
                 mo_col = "mo" if "mo" in df.columns else ("mo#" if "mo#" in df.columns else None)
@@ -123,9 +123,17 @@ def process_tbe_dashboard_data():
                     
                     mo_group = get_mo_group(raw_mo)
                     variant_raw = normalize_text(row.get(type_col))
+                    
+                    # FIX: Clear Excel Placeholder String Junk
+                    variant_raw = variant_raw.replace("COMBINED FAMILY CHANNEL GROUPING-", "").replace("COMBINED FAMILY CHANNEL GROUPING", "").strip()
                     ring_type = extract_ring_type(variant_raw)
+                    
+                    if not variant_raw or variant_raw in ["IM", "OM"]:
+                        family_item = ring_type
+                    else:
+                        family_item = variant_raw.split('_')[0].split(' ')[0] if variant_raw else ring_type
+
                     channel_id = clean_channel(row.get(channel_col)) if channel_col else ""
-                    family_item = variant_raw.split('_')[0].split(' ')[0] if variant_raw else "Unknown Family"
                     
                     cum_production = clean_nan(row.get("cumulative production"))
                     production = clean_nan(row.get("production"))
@@ -150,7 +158,7 @@ def process_tbe_dashboard_data():
                         if row_date:
                             if meta["ch_in_date"] is None or row_date < meta["ch_in_date"]: meta["ch_in_date"] = row_date
 
-        # RULE 3: TRANSIT BUFFER (No of Rings)
+        # RULE 3: TRANSIT BUFFER
         for _, df in transit_buffer_sheets.items():
             ch_col = next((c for c in ["ch#", "channel", "ch"] if c in df.columns), None)
             type_col = "type" if "type" in df.columns else None
@@ -160,7 +168,7 @@ def process_tbe_dashboard_data():
 
             for _, row in df.iterrows():
                 tb_channel = clean_channel(row.get(ch_col))
-                tb_type_raw = normalize_text(row.get(type_col))
+                tb_type_raw = normalize_text(row.get(type_col)).replace("COMBINED FAMILY CHANNEL GROUPING-", "").replace("COMBINED FAMILY CHANNEL GROUPING", "").strip()
                 row_ring_type = extract_ring_type(tb_type_raw)
                 qty_tb = clean_nan(row.get(qty_col))
                 tb_date = parse_date_safe(row.get(date_col))
@@ -171,40 +179,35 @@ def process_tbe_dashboard_data():
                         if tb_date:
                             if meta["tb_out_date"] is None or tb_date > meta["tb_out_date"]: meta["tb_out_date"] = tb_date
 
-        # COMPILE LIST
+        # COMPILE UNIFIED CACHE LIST
         compiled_summary = []
         for agg_key, meta in tbe_aggregation.items():
             if meta["max_cumulative"] == 0 and meta["sho_qty"] == 0: tracking_status = "Yet to Start"
             elif meta["max_cumulative"] >= meta["sho_qty"] and meta["sho_qty"] > 0: tracking_status = "Completed"
             else: tracking_status = "In Process"
 
-            compiled_summary.append({
-                "mo_number": meta["mo_number"],
-                "product_variant": meta["product_variant"],
-                "target_qty": int(meta["target_qty"]) if meta["target_qty"] > 0 else "-",
-                "ring_type": meta["ring_type"],
+            record = {
+                "mo": meta["mo_number"],
+                "final_variant": meta["product_variant"],
+                "qty_req": int(meta["target_qty"]) if meta["target_qty"] > 0 else "-",
+                "component_type": meta["ring_type"],
                 "sho_qty": meta["sho_qty"] if meta["sho_qty"] > 0 else meta["max_cumulative"],
-                "sho_in_date": "-", 
+                "sho_in": "-", 
                 "tb_qty": meta["tb_qty"] if meta["tb_qty"] > 0 else meta["max_cumulative"],
-                "tb_out_date": str(meta["tb_out_date"]) if meta["tb_out_date"] else "-",
+                "tb_out": str(meta["tb_out_date"]) if meta["tb_out_date"] else "-",
                 "ch_qty": meta["max_cumulative"],
-                "ch_in_date": str(meta["ch_in_date"]) if meta["ch_in_date"] else "-",
-                "ch_out_date": str(meta["ch_out_date"]) if meta["ch_out_date"] else "-",
-                "tracking_status": tracking_status
-            })
+                "ch_in": str(meta["ch_in_date"]) if meta["ch_in_date"] else "-",
+                "ch_out": str(meta["ch_out_date"]) if meta["ch_out_date"] else "-",
+                "status": tracking_status
+            }
+            compiled_summary.append(record)
 
             m_group = meta["mo_group"]
-            if m_group not in mo_flow_records: mo_flow_records[m_group] = {"mo": meta["mo_number"], "timeline": []}
-            mo_flow_records[m_group]["timeline"].append(compiled_summary[-1])
+            if m_group not in mo_flow_records: 
+                mo_flow_records[m_group] = {"mo": meta["mo_number"], "timeline": []}
+            mo_flow_records[m_group]["timeline"].append(record)
 
-        compiled_summary.sort(key=lambda x: (x["mo_number"], x["product_variant"]))
-
-        print("--- DEBUG INFO ---")
-        print(f"MO Sheets Loaded: {len(mo_sheets)}")
-        print(f"TRB Sheets Loaded: {len(trb_sheets)}")
-        print(f"Total Aggregated Records: {len(compiled_summary)}")
-        print("------------------")
-        
+        compiled_summary.sort(key=lambda x: (x["mo"], x["final_variant"]))
         
         MASTER_CACHE = compiled_summary
         FLOW_CACHE = mo_flow_records
@@ -222,7 +225,6 @@ def background_refresh_loop():
 t = threading.Thread(target=background_refresh_loop, daemon=True)
 t.start()
 
-# RESTORED OLD ENDPOINT NAMES TO FIX FRONTEND NETWORK ERROR
 @router.get("/traceability_all_mos")
 def get_all_mos():
     if not LAST_REFRESH and not MASTER_CACHE:

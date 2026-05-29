@@ -1,3 +1,6 @@
+# FINAL `tbe_backend.py`
+
+```python
 from fastapi import APIRouter, HTTPException
 import pandas as pd
 import requests
@@ -50,7 +53,6 @@ def normalize_text(value):
         .strip()
         .upper()
         .replace("-", " ")
-        .replace("  ", " ")
     )
 
 
@@ -113,14 +115,9 @@ def parse_date_safe(value):
 
 
 # =========================================================
-# FAMILY EXTRACTION
+# FAMILY & TYPE EXTRACTION
 # =========================================================
 def extract_family(product_name):
-    """
-    Examples:
-    6204 ZZ IM -> 6204
-    6305 OPEN OM -> 6305
-    """
 
     text = normalize_text(product_name)
 
@@ -133,6 +130,7 @@ def extract_family(product_name):
 
 
 def extract_component(product_name):
+
     text = normalize_text(product_name)
 
     if "IM" in text or "IR" in text:
@@ -145,9 +143,10 @@ def extract_component(product_name):
 
 
 # =========================================================
-# EXCEL LOADER
+# EXCEL LOADERS
 # =========================================================
 def download_excel(url):
+
     response = requests.get(url)
 
     if response.status_code != 200:
@@ -157,6 +156,7 @@ def download_excel(url):
 
 
 def load_excel_sheets(url):
+
     try:
         excel_data = download_excel(url)
 
@@ -165,6 +165,7 @@ def load_excel_sheets(url):
         sheets = {}
 
         for sheet in xls.sheet_names:
+
             try:
                 df = pd.read_excel(xls, sheet_name=sheet)
 
@@ -181,7 +182,7 @@ def load_excel_sheets(url):
         return sheets
 
     except Exception as e:
-        print(f"Failed loading workbook {url} : {str(e)}")
+        print(f"Failed loading workbook : {str(e)}")
         return {}
 
 
@@ -189,6 +190,7 @@ def load_excel_sheets(url):
 # MAIN ENGINE
 # =========================================================
 def process_tbe_dashboard_data():
+
     global MASTER_CACHE
     global FLOW_CACHE
     global LAST_REFRESH
@@ -203,9 +205,6 @@ def process_tbe_dashboard_data():
 
     try:
 
-        # =====================================================
-        # LOAD FILES
-        # =====================================================
         transit_sheets = load_excel_sheets(
             settings.RINGWT_TRANSITBUFFER_URL
         )
@@ -222,20 +221,20 @@ def process_tbe_dashboard_data():
         # STORAGE
         # =====================================================
         summary_aggregation = {}
+
         flow_records = {}
 
-        # channel + family -> timeline rows
         channel_family_map = {}
 
+        variant_max_tracker = {}
+
         # =====================================================
-        # STEP 1 : PROCESS CHANNEL FILES
+        # STEP 1 : CHANNEL SHEETS = MASTER SOURCE
         # =====================================================
         all_channel_sheets = {
             **trb_sheets,
             **dgbb_sheets
         }
-
-        variant_max_tracker = {}
 
         for sheet_name, df in all_channel_sheets.items():
 
@@ -306,9 +305,9 @@ def process_tbe_dashboard_data():
                     row.get("date")
                 )
 
-                # -----------------------------------------
+                # =================================================
                 # FLOW RECORDS
-                # -----------------------------------------
+                # =================================================
                 if raw_mo not in flow_records:
                     flow_records[raw_mo] = {
                         "mo": raw_mo,
@@ -324,30 +323,32 @@ def process_tbe_dashboard_data():
                     "cumulative": cumulative
                 })
 
-                # -----------------------------------------
+                # =================================================
                 # CHANNEL FAMILY MAP
-                # -----------------------------------------
+                # =================================================
                 if channel and family and row_date:
 
-                    map_key = (channel, family)
+                    map_key = (
+                        channel,
+                        family,
+                        component
+                    )
 
                     if map_key not in channel_family_map:
                         channel_family_map[map_key] = []
 
                     channel_family_map[map_key].append({
                         "mo": raw_mo,
-                        "family": family,
-                        "product": product,
-                        "component": component,
                         "date": row_date
                     })
 
-                # -----------------------------------------
-                # MAX CUMULATIVE TRACKER
-                # -----------------------------------------
+                # =================================================
+                # MAX VARIANT TRACKING
+                # =================================================
                 v_key = (
                     raw_mo,
                     family,
+                    component,
                     product
                 )
 
@@ -364,6 +365,7 @@ def process_tbe_dashboard_data():
                     v_meta["max_cum"] = cumulative
 
                 if row_date:
+
                     if (
                         not v_meta["min_date"]
                         or row_date < v_meta["min_date"]
@@ -377,59 +379,61 @@ def process_tbe_dashboard_data():
                         v_meta["max_date"] = row_date
 
         # =====================================================
-        # STEP 2 : FAMILY LEVEL CHANNEL TOTALS
+        # STEP 2 : FAMILY AGGREGATION
         # =====================================================
-        family_channel_totals = {}
-
         for (
             raw_mo,
             family,
+            component,
             product
         ), v_meta in variant_max_tracker.items():
 
-            component = extract_component(product)
-
-            f_key = (
+            agg_key = (
                 raw_mo,
                 family,
                 component
             )
 
-            if f_key not in family_channel_totals:
-                family_channel_totals[f_key] = {
+            if agg_key not in summary_aggregation:
+
+                summary_aggregation[agg_key] = {
                     "mo": raw_mo,
                     "family": family,
                     "component": component,
 
-                    "ch_qty": 0.0,
-                    "ch_in": None,
-                    "ch_out": None,
-
                     "sho_qty": 0.0,
                     "tb_qty": 0.0,
-                    "tb_out": None
+                    "tb_out": None,
+
+                    "ch_qty": 0.0,
+                    "ch_in": None,
+                    "ch_out": None
                 }
 
-            f_meta = family_channel_totals[f_key]
+            agg = summary_aggregation[agg_key]
 
-            f_meta["ch_qty"] += v_meta["max_cum"]
+            # IMPORTANT:
+            # SUM OF MAX CUMULATIVE OF ALL SUB VARIANTS
+            agg["ch_qty"] += v_meta["max_cum"]
 
             if v_meta["min_date"]:
+
                 if (
-                    not f_meta["ch_in"]
-                    or v_meta["min_date"] < f_meta["ch_in"]
+                    not agg["ch_in"]
+                    or v_meta["min_date"] < agg["ch_in"]
                 ):
-                    f_meta["ch_in"] = v_meta["min_date"]
+                    agg["ch_in"] = v_meta["min_date"]
 
             if v_meta["max_date"]:
+
                 if (
-                    not f_meta["ch_out"]
-                    or v_meta["max_date"] > f_meta["ch_out"]
+                    not agg["ch_out"]
+                    or v_meta["max_date"] > agg["ch_out"]
                 ):
-                    f_meta["ch_out"] = v_meta["max_date"]
+                    agg["ch_out"] = v_meta["max_date"]
 
         # =====================================================
-        # STEP 3 : MATCH TRANSIT BUFFER
+        # STEP 3 : TRANSIT BUFFER MATCHING
         # =====================================================
         for sheet_name, df in transit_sheets.items():
 
@@ -503,64 +507,62 @@ def process_tbe_dashboard_data():
                 if tb_qty <= 0:
                     continue
 
-                # -----------------------------------------
-                # MATCH CHANNEL + FAMILY
-                # -----------------------------------------
+                # =================================================
+                # MATCH EXISTING CHANNEL ONLY
+                # =================================================
                 possible_matches = channel_family_map.get(
-                    (tb_channel, tb_family),
+                    (
+                        tb_channel,
+                        tb_family,
+                        tb_component
+                    ),
                     []
                 )
 
                 if not possible_matches:
                     continue
 
-                # -----------------------------------------
-                # FILTER COMPONENT
-                # -----------------------------------------
-                possible_matches = [
-                    x
-                    for x in possible_matches
-                    if x["component"] == tb_component
-                ]
-
-                if not possible_matches:
-                    continue
-
-                # -----------------------------------------
+                # =================================================
                 # CLOSEST DATE MATCH
-                # -----------------------------------------
+                # =================================================
                 if tb_date:
+
                     best_match = min(
                         possible_matches,
                         key=lambda x: abs(
                             (x["date"] - tb_date).days
                         )
                     )
+
                 else:
                     best_match = possible_matches[-1]
 
                 agg_key = (
                     best_match["mo"],
-                    best_match["family"],
-                    best_match["component"]
+                    tb_family,
+                    tb_component
                 )
 
-                if agg_key not in family_channel_totals:
+                # IMPORTANT:
+                # ONLY UPDATE EXISTING ROWS
+                # NEVER CREATE NEW ROWS
+                if agg_key not in summary_aggregation:
                     continue
 
-                family_channel_totals[agg_key]["sho_qty"] += tb_qty
-                family_channel_totals[agg_key]["tb_qty"] += tb_qty
+                summary_aggregation[agg_key]["sho_qty"] += tb_qty
+                summary_aggregation[agg_key]["tb_qty"] += tb_qty
 
                 if tb_date:
-                    current_tb_out = family_channel_totals[
+
+                    curr_out = summary_aggregation[
                         agg_key
                     ]["tb_out"]
 
                     if (
-                        not current_tb_out
-                        or tb_date > current_tb_out
+                        not curr_out
+                        or tb_date > curr_out
                     ):
-                        family_channel_totals[
+                        summary_aggregation[
                             agg_key
                         ]["tb_out"] = tb_date
 
@@ -573,55 +575,55 @@ def process_tbe_dashboard_data():
             raw_mo,
             family,
             component
-        ), meta in family_channel_totals.items():
+        ), agg in summary_aggregation.items():
 
-            # STATUS
-            if meta["sho_qty"] == 0 and meta["ch_qty"] == 0:
+            if agg["sho_qty"] == 0 and agg["ch_qty"] == 0:
                 status = "Yet To Start"
 
-            elif meta["ch_qty"] >= meta["sho_qty"]:
+            elif agg["ch_qty"] >= agg["sho_qty"]:
                 status = "Completed"
 
             else:
                 status = "In Process"
 
             compiled_summary.append({
+
                 "mo": raw_mo,
 
                 "final_variant": family,
 
                 "component_type": component,
 
-                "qty_req": int(meta["sho_qty"]),
+                "qty_req": int(agg["sho_qty"]),
 
-                "sho_qty": meta["sho_qty"],
+                "sho_qty": agg["sho_qty"],
                 "sho_in": "-",
 
-                "tb_qty": meta["tb_qty"],
+                "tb_qty": agg["tb_qty"],
+
                 "tb_out": (
-                    str(meta["tb_out"])
-                    if meta["tb_out"]
+                    str(agg["tb_out"])
+                    if agg["tb_out"]
                     else "-"
                 ),
 
-                "ch_qty": meta["ch_qty"],
+                "ch_qty": agg["ch_qty"],
 
                 "ch_in": (
-                    str(meta["ch_in"])
-                    if meta["ch_in"]
+                    str(agg["ch_in"])
+                    if agg["ch_in"]
                     else "-"
                 ),
 
                 "ch_out": (
-                    str(meta["ch_out"])
-                    if meta["ch_out"]
+                    str(agg["ch_out"])
+                    if agg["ch_out"]
                     else "-"
                 ),
 
                 "status": status
             })
 
-        # SORTING
         compiled_summary.sort(
             key=lambda x: (
                 x["mo"],
@@ -660,6 +662,7 @@ threading.Thread(
     daemon=True
 ).start()
 
+
 # =========================================================
 # ROUTES
 # =========================================================
@@ -667,9 +670,10 @@ threading.Thread(
 def get_all_mos():
 
     if not LAST_REFRESH and not MASTER_CACHE:
+
         return {
             "status": "initializing",
-            "message": "TBE cache warming up...",
+            "message": "TBE engine warming up...",
             "data": []
         }
 
@@ -686,6 +690,7 @@ def get_flow(mo: str):
     search_mo = clean_mo(mo)
 
     if search_mo in FLOW_CACHE:
+
         return {
             "status": "success",
             "last_updated": str(LAST_REFRESH),
@@ -696,3 +701,4 @@ def get_flow(mo: str):
         status_code=404,
         detail=f"No flow found for MO {mo}"
     )
+```

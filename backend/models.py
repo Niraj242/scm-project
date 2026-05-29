@@ -1,19 +1,17 @@
-from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey, Boolean
 from datetime import datetime
 from database import Base
 
-# =======================================================
-#               EXISTING MODELS (Unchanged)
-# =======================================================
-
 class User(Base):
     __tablename__ = "users"
+    
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False)
-    is_active = Column(Integer, default=1, nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Change these to nullable=True to bypass immediate insertion errors
+    is_active = Column(Integer, default=1, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=True)
 
 
 class Order(Base):

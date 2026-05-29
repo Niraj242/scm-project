@@ -1,5 +1,3 @@
-# FINAL `TBE.js`
-
 import React, { useEffect, useState } from 'react';
 import './Traceability.css';
 
@@ -18,9 +16,6 @@ const TBE = () => {
     fetchSummaryDashboard();
   }, []);
 
-  // =====================================================
-  // FETCH SUMMARY
-  // =====================================================
   const fetchSummaryDashboard = async () => {
 
     try {
@@ -45,9 +40,6 @@ const TBE = () => {
     }
   };
 
-  // =====================================================
-  // DETAIL FLOW
-  // =====================================================
   const handleViewDetail = async (mo) => {
 
     try {
@@ -75,9 +67,6 @@ const TBE = () => {
     }
   };
 
-  // =====================================================
-  // FILTERING
-  // =====================================================
   const filteredData = summaryData.filter((item) => {
 
     const s = search.toLowerCase();
@@ -91,9 +80,6 @@ const TBE = () => {
     );
   });
 
-  // =====================================================
-  // SORTING
-  // =====================================================
   const sortedData = [...filteredData].sort((a, b) => {
 
     if (a.mo !== b.mo) {
@@ -111,9 +97,6 @@ const TBE = () => {
     );
   });
 
-  // =====================================================
-  // ROWSPAN HELPERS
-  // =====================================================
   const getMoRowSpan = (arr, idx) => {
 
     const currentMo = arr[idx].mo;
@@ -174,9 +157,6 @@ const TBE = () => {
   return (
     <div className="traceability-container">
 
-      {/* ===================================== */}
-      {/* HEADER */}
-      {/* ===================================== */}
       <div className="header-section">
 
         <div>
@@ -223,9 +203,6 @@ const TBE = () => {
 
       </div>
 
-      {/* ===================================== */}
-      {/* ERROR */}
-      {/* ===================================== */}
       {
         error && (
           <div className="error-box">
@@ -234,9 +211,6 @@ const TBE = () => {
         )
       }
 
-      {/* ===================================== */}
-      {/* LOADING */}
-      {/* ===================================== */}
       {
         loading && (
           <div className="loading-spinner">
@@ -245,9 +219,6 @@ const TBE = () => {
         )
       }
 
-      {/* ===================================== */}
-      {/* SUMMARY TABLE */}
-      {/* ===================================== */}
       {
         !loading
         &&
@@ -322,7 +293,6 @@ const TBE = () => {
 
                       <tr key={idx}>
 
-                        {/* MO */}
                         {
                           moSpan > 0 && (
 
@@ -344,7 +314,6 @@ const TBE = () => {
                           )
                         }
 
-                        {/* FAMILY */}
                         {
                           familySpan > 0 && (
 
@@ -358,21 +327,18 @@ const TBE = () => {
                           )
                         }
 
-                        {/* TYPE */}
                         <td>
                           <strong>
                             {row.component_type}
                           </strong>
                         </td>
 
-                        {/* TARGET */}
                         <td>
                           {Number(
                             row.qty_req || 0
                           ).toLocaleString()}
                         </td>
 
-                        {/* SHO */}
                         <td>
                           {Number(
                             row.sho_qty || 0
@@ -383,7 +349,6 @@ const TBE = () => {
                           {row.sho_in || '-'}
                         </td>
 
-                        {/* TB */}
                         <td>
                           {Number(
                             row.tb_qty || 0
@@ -394,7 +359,6 @@ const TBE = () => {
                           {row.tb_out || '-'}
                         </td>
 
-                        {/* CHANNEL */}
                         {
                           familySpan > 0 && (
                             <>
@@ -421,7 +385,6 @@ const TBE = () => {
                           )
                         }
 
-                        {/* STATUS */}
                         <td>
 
                           <span
@@ -447,9 +410,6 @@ const TBE = () => {
         )
       }
 
-      {/* ===================================== */}
-      {/* DETAIL FLOW */}
-      {/* ===================================== */}
       {
         !loading
         &&
@@ -529,4 +489,3 @@ const TBE = () => {
 };
 
 export default TBE;
-

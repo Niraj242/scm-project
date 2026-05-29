@@ -1,15 +1,17 @@
-import React, { useState, useEffect } from 'react';
+# FINAL `TBE.js`
+
+import React, { useEffect, useState } from 'react';
 import './Traceability.css';
 
 const API = 'https://scm-backend-pshv.onrender.com';
 
 const TBE = () => {
+
   const [summaryData, setSummaryData] = useState([]);
   const [selectedMoFlow, setSelectedMoFlow] = useState(null);
 
-  const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
-  const [isInitializing, setIsInitializing] = useState(false);
+  const [search, setSearch] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -20,75 +22,55 @@ const TBE = () => {
   // FETCH SUMMARY
   // =====================================================
   const fetchSummaryDashboard = async () => {
+
     try {
+
       setLoading(true);
-      setError('');
 
-      const res = await fetch(`${API}/traceability_all_mos`);
-
-      if (!res.ok) {
-        throw new Error('Network error pulling TBE records.');
-      }
+      const res = await fetch(
+        `${API}/traceability_all_mos`
+      );
 
       const json = await res.json();
 
-      if (json.status === 'initializing') {
-        setIsInitializing(true);
-
-        setTimeout(() => {
-          fetchSummaryDashboard();
-        }, 4000);
-
-      } else if (json.status === 'success') {
-        setIsInitializing(false);
-        setSummaryData(json.data || []);
-      }
+      setSummaryData(json.data || []);
 
     } catch (err) {
+
       setError(err.message);
 
     } finally {
+
       setLoading(false);
     }
   };
 
   // =====================================================
-  // FETCH DETAIL FLOW
+  // DETAIL FLOW
   // =====================================================
-  const handleViewDetail = async (moString) => {
-    if (!moString) return;
+  const handleViewDetail = async (mo) => {
 
     try {
+
       setLoading(true);
-      setError('');
 
       const res = await fetch(
-        `${API}/traceability_report/${moString.trim()}`
+        `${API}/traceability_report/${mo}`
       );
-
-      if (!res.ok) {
-        throw new Error(
-          'Could not load detailed route flow.'
-        );
-      }
 
       const json = await res.json();
 
-      if (json.status === 'success') {
-
-        const timeline =
-          json.data?.timeline || [];
-
-        setSelectedMoFlow({
-          mo: moString,
-          flow_data: timeline
-        });
-      }
+      setSelectedMoFlow({
+        mo,
+        flow_data: json.data.timeline || []
+      });
 
     } catch (err) {
+
       setError(err.message);
 
     } finally {
+
       setLoading(false);
     }
   };
@@ -96,57 +78,50 @@ const TBE = () => {
   // =====================================================
   // FILTERING
   // =====================================================
-  const filteredSummary = summaryData.filter((item) => {
+  const filteredData = summaryData.filter((item) => {
 
-    const searchLower = search.toLowerCase();
+    const s = search.toLowerCase();
 
     return (
-      (item.mo || '')
-        .toLowerCase()
-        .includes(searchLower)
-
+      item.mo?.toLowerCase().includes(s)
       ||
-
-      (item.final_variant || '')
-        .toLowerCase()
-        .includes(searchLower)
-
+      item.final_variant?.toLowerCase().includes(s)
       ||
-
-      (item.component_type || '')
-        .toLowerCase()
-        .includes(searchLower)
+      item.component_type?.toLowerCase().includes(s)
     );
   });
 
   // =====================================================
   // SORTING
   // =====================================================
-  const sortedSummary = [...filteredSummary].sort((a, b) => {
+  const sortedData = [...filteredData].sort((a, b) => {
 
     if (a.mo !== b.mo) {
-      return (a.mo || '').localeCompare(b.mo || '');
+      return a.mo.localeCompare(b.mo);
     }
 
     if (a.final_variant !== b.final_variant) {
-      return (a.final_variant || '')
-        .localeCompare(b.final_variant || '');
+      return a.final_variant.localeCompare(
+        b.final_variant
+      );
     }
 
-    return (a.component_type || '')
-      .localeCompare(b.component_type || '');
+    return a.component_type.localeCompare(
+      b.component_type
+    );
   });
 
   // =====================================================
-  // MO ROW SPAN
+  // ROWSPAN HELPERS
   // =====================================================
-  const getMoRowSpan = (dataArray, currentIndex) => {
+  const getMoRowSpan = (arr, idx) => {
 
-    const currentMo = dataArray[currentIndex].mo;
+    const currentMo = arr[idx].mo;
 
     if (
-      currentIndex > 0 &&
-      dataArray[currentIndex - 1].mo === currentMo
+      idx > 0
+      &&
+      arr[idx - 1].mo === currentMo
     ) {
       return 0;
     }
@@ -154,8 +129,9 @@ const TBE = () => {
     let span = 1;
 
     while (
-      currentIndex + span < dataArray.length &&
-      dataArray[currentIndex + span].mo === currentMo
+      idx + span < arr.length
+      &&
+      arr[idx + span].mo === currentMo
     ) {
       span++;
     }
@@ -163,21 +139,19 @@ const TBE = () => {
     return span;
   };
 
-  // =====================================================
-  // FAMILY ROW SPAN
-  // =====================================================
-  const getFamilyRowSpan = (dataArray, currentIndex) => {
+  const getFamilyRowSpan = (arr, idx) => {
 
-    const currentMo =
-      dataArray[currentIndex].mo;
+    const currentMo = arr[idx].mo;
 
     const currentFamily =
-      dataArray[currentIndex].final_variant;
+      arr[idx].final_variant;
 
     if (
-      currentIndex > 0 &&
-      dataArray[currentIndex - 1].mo === currentMo &&
-      dataArray[currentIndex - 1].final_variant === currentFamily
+      idx > 0
+      &&
+      arr[idx - 1].mo === currentMo
+      &&
+      arr[idx - 1].final_variant === currentFamily
     ) {
       return 0;
     }
@@ -185,9 +159,11 @@ const TBE = () => {
     let span = 1;
 
     while (
-      currentIndex + span < dataArray.length &&
-      dataArray[currentIndex + span].mo === currentMo &&
-      dataArray[currentIndex + span].final_variant === currentFamily
+      idx + span < arr.length
+      &&
+      arr[idx + span].mo === currentMo
+      &&
+      arr[idx + span].final_variant === currentFamily
     ) {
       span++;
     }
@@ -195,27 +171,26 @@ const TBE = () => {
     return span;
   };
 
-  // =====================================================
-  // RENDER
-  // =====================================================
   return (
     <div className="traceability-container">
 
-      {/* ========================================= */}
+      {/* ===================================== */}
       {/* HEADER */}
-      {/* ========================================= */}
+      {/* ===================================== */}
       <div className="header-section">
 
         <div>
+
           <h1>TBE Calibration Tracking</h1>
 
           <p className="sub-tag">
             {
               selectedMoFlow
-                ? `Detailed Route Flow / MO : ${selectedMoFlow.mo}`
+                ? `Detailed Flow / ${selectedMoFlow.mo}`
                 : 'Transit Buffer / Channel Synchronization Dashboard'
             }
           </p>
+
         </div>
 
         <div className="control-actions">
@@ -227,28 +202,30 @@ const TBE = () => {
                 className="back-btn"
                 onClick={() => setSelectedMoFlow(null)}
               >
-                ← Back to Summary Dashboard
+                ← Back
               </button>
 
             ) : (
 
               <input
                 className="search-box"
-                placeholder="Search MO / Family / IM / OM..."
+                placeholder="Search MO / Family / IM / OM"
                 value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                disabled={isInitializing}
+                onChange={(e) =>
+                  setSearch(e.target.value)
+                }
               />
 
             )
           }
 
         </div>
+
       </div>
 
-      {/* ========================================= */}
+      {/* ===================================== */}
       {/* ERROR */}
-      {/* ========================================= */}
+      {/* ===================================== */}
       {
         error && (
           <div className="error-box">
@@ -257,49 +234,26 @@ const TBE = () => {
         )
       }
 
-      {/* ========================================= */}
-      {/* INITIALIZING */}
-      {/* ========================================= */}
-      {
-        isInitializing && (
-          <div className="initializing-box">
-
-            <div className="spinner"></div>
-
-            <p>
-              <strong>
-                TBE backend engine warming up...
-              </strong>
-            </p>
-
-            <p className="sub-text">
-              Downloading and indexing production sheets...
-            </p>
-
-          </div>
-        )
-      }
-
-      {/* ========================================= */}
+      {/* ===================================== */}
       {/* LOADING */}
-      {/* ========================================= */}
+      {/* ===================================== */}
       {
-        loading &&
-        !isInitializing && (
+        loading && (
           <div className="loading-spinner">
-            Loading TBE pipeline cache...
+            Loading TBE Dashboard...
           </div>
         )
       }
 
-      {/* ========================================= */}
+      {/* ===================================== */}
       {/* SUMMARY TABLE */}
-      {/* ========================================= */}
+      {/* ===================================== */}
       {
-        !loading &&
-        !selectedMoFlow &&
-        !isInitializing && (
-
+        !loading
+        &&
+        !selectedMoFlow
+        &&
+        (
           <div className="table-wrapper">
 
             <table className="trace-table">
@@ -308,47 +262,33 @@ const TBE = () => {
 
                 <tr className="super-header">
 
-                  <th
-                    colSpan="4"
-                    className="meta-head"
-                  >
+                  <th colSpan="4" className="meta-head">
                     Order Metadata
                   </th>
 
-                  <th
-                    colSpan="2"
-                    className="sho-head"
-                  >
+                  <th colSpan="2" className="sho-head">
                     SHO Department
                   </th>
 
-                  <th
-                    colSpan="2"
-                    className="tb-head"
-                  >
+                  <th colSpan="2" className="tb-head">
                     Transit Buffer
                   </th>
 
-                  <th
-                    colSpan="3"
-                    className="ch-head"
-                  >
-                    Channel Section (Combined)
+                  <th colSpan="3" className="ch-head">
+                    Channel Section
                   </th>
 
-                  <th
-                    className="meta-head"
-                  >
-                    System Status
+                  <th className="meta-head">
+                    Status
                   </th>
 
                 </tr>
 
                 <tr className="sub-header">
 
-                  <th>MO Number</th>
-                  <th>Product Family</th>
-                  <th>Ring Type</th>
+                  <th>MO</th>
+                  <th>Bearing Family</th>
+                  <th>Type</th>
                   <th>Target Qty</th>
 
                   <th>Qty</th>
@@ -370,26 +310,22 @@ const TBE = () => {
               <tbody>
 
                 {
-                  sortedSummary.map((row, idx) => {
+                  sortedData.map((row, idx) => {
 
                     const moSpan =
-                      getMoRowSpan(sortedSummary, idx);
+                      getMoRowSpan(sortedData, idx);
 
                     const familySpan =
-                      getFamilyRowSpan(sortedSummary, idx);
+                      getFamilyRowSpan(sortedData, idx);
 
                     return (
 
-                      <tr
-                        key={idx}
-                        className="data-row"
-                      >
+                      <tr key={idx}>
 
-                        {/* ===================== */}
                         {/* MO */}
-                        {/* ===================== */}
                         {
                           moSpan > 0 && (
+
                             <td
                               rowSpan={moSpan}
                               className="merged-mo-cell"
@@ -408,99 +344,76 @@ const TBE = () => {
                           )
                         }
 
-                        {/* ===================== */}
                         {/* FAMILY */}
-                        {/* ===================== */}
                         {
                           familySpan > 0 && (
+
                             <td
                               rowSpan={familySpan}
                               className="merged-channel-cell fw-bold"
                             >
-                              {row.final_variant || '-'}
+                              {row.final_variant}
                             </td>
+
                           )
                         }
 
-                        {/* ===================== */}
-                        {/* COMPONENT */}
-                        {/* ===================== */}
-                        <td className="fw-bold">
-                          {row.component_type || '-'}
-                        </td>
-
-                        {/* ===================== */}
-                        {/* TARGET */}
-                        {/* ===================== */}
-                        <td className="qty-cell">
-                          {
-                            row.qty_req !== undefined &&
-                            row.qty_req !== null
-                              ? Number(row.qty_req).toLocaleString()
-                              : '-'
-                          }
-                        </td>
-
-                        {/* ===================== */}
-                        {/* SHO */}
-                        {/* ===================== */}
+                        {/* TYPE */}
                         <td>
-                          {
-                            row.sho_qty !== undefined &&
-                            row.sho_qty !== null
-                              ? Number(row.sho_qty).toLocaleString()
-                              : '-'
-                          }
+                          <strong>
+                            {row.component_type}
+                          </strong>
+                        </td>
+
+                        {/* TARGET */}
+                        <td>
+                          {Number(
+                            row.qty_req || 0
+                          ).toLocaleString()}
+                        </td>
+
+                        {/* SHO */}
+                        <td>
+                          {Number(
+                            row.sho_qty || 0
+                          ).toLocaleString()}
                         </td>
 
                         <td>
                           {row.sho_in || '-'}
                         </td>
 
-                        {/* ===================== */}
                         {/* TB */}
-                        {/* ===================== */}
                         <td>
-                          {
-                            row.tb_qty !== undefined &&
-                            row.tb_qty !== null
-                              ? Number(row.tb_qty).toLocaleString()
-                              : '-'
-                          }
+                          {Number(
+                            row.tb_qty || 0
+                          ).toLocaleString()}
                         </td>
 
                         <td>
                           {row.tb_out || '-'}
                         </td>
 
-                        {/* ===================== */}
                         {/* CHANNEL */}
-                        {/* ===================== */}
                         {
                           familySpan > 0 && (
                             <>
                               <td
                                 rowSpan={familySpan}
-                                className="merged-channel-cell"
                               >
-                                {
-                                  row.ch_qty !== undefined &&
-                                  row.ch_qty !== null
-                                    ? Number(row.ch_qty).toLocaleString()
-                                    : '-'
-                                }
+                                {Number(
+                                  row.ch_qty || 0
+                                ).toLocaleString()}
                               </td>
 
                               <td
                                 rowSpan={familySpan}
-                                className="merged-channel-cell"
                               >
                                 {row.ch_in || '-'}
                               </td>
 
                               <td
                                 rowSpan={familySpan}
-                                className="merged-channel-cell"
                               >
                                 {row.ch_out || '-'}
                               </td>
@@ -508,17 +421,15 @@ const TBE = () => {
                           )
                         }
 
-                        {/* ===================== */}
                         {/* STATUS */}
-                        {/* ===================== */}
                         <td>
 
                           <span
-                            className={`status-badge ${(row.status || '')
+                            className={`status-badge ${row.status
                               .toLowerCase()
-                              .replace(/\s+/g, '-')}`}
+                              .replace(/ /g, '-')}`}
                           >
-                            {row.status || '-'}
+                            {row.status}
                           </span>
 
                         </td>
@@ -526,22 +437,6 @@ const TBE = () => {
                       </tr>
                     );
                   })
-                }
-
-                {/* ================================= */}
-                {/* EMPTY */}
-                {/* ================================= */}
-                {
-                  sortedSummary.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan="12"
-                        className="empty-state"
-                      >
-                        No TBE tracking records found.
-                      </td>
-                    </tr>
-                  )
                 }
 
               </tbody>
@@ -552,13 +447,15 @@ const TBE = () => {
         )
       }
 
-      {/* ========================================= */}
+      {/* ===================================== */}
       {/* DETAIL FLOW */}
-      {/* ========================================= */}
+      {/* ===================================== */}
       {
-        !loading &&
-        selectedMoFlow && (
-
+        !loading
+        &&
+        selectedMoFlow
+        &&
+        (
           <div className="table-wrapper">
 
             <table className="trace-table">
@@ -567,7 +464,6 @@ const TBE = () => {
 
                 <tr className="sub-header">
 
-                  <th>MO</th>
                   <th>Department</th>
                   <th>Product</th>
                   <th>Channel</th>
@@ -583,65 +479,40 @@ const TBE = () => {
 
                 {
                   selectedMoFlow.flow_data.map(
-                    (row, index) => {
+                    (row, idx) => (
 
-                      return (
+                      <tr key={idx}>
 
-                        <tr
-                          key={index}
-                          className="data-row"
-                        >
+                        <td>
+                          {row.department}
+                        </td>
 
-                          {
-                            index === 0 && (
-                              <td
-                                rowSpan={
-                                  selectedMoFlow.flow_data.length
-                                }
-                                className="merged-mo-cell"
-                              >
-                                <strong>
-                                  {selectedMoFlow.mo}
-                                </strong>
-                              </td>
-                            )
-                          }
+                        <td>
+                          {row.product}
+                        </td>
 
-                          <td>
-                            {row.department || '-'}
-                          </td>
+                        <td>
+                          {row.channel}
+                        </td>
 
-                          <td>
-                            {row.product || '-'}
-                          </td>
+                        <td>
+                          {row.date}
+                        </td>
 
-                          <td>
-                            {row.channel || '-'}
-                          </td>
+                        <td>
+                          {Number(
+                            row.production || 0
+                          ).toLocaleString()}
+                        </td>
 
-                          <td>
-                            {row.date || '-'}
-                          </td>
+                        <td>
+                          {Number(
+                            row.cumulative || 0
+                          ).toLocaleString()}
+                        </td>
 
-                          <td>
-                            {
-                              row.production !== undefined
-                                ? Number(row.production).toLocaleString()
-                                : '-'
-                            }
-                          </td>
-
-                          <td>
-                            {
-                              row.cumulative !== undefined
-                                ? Number(row.cumulative).toLocaleString()
-                                : '-'
-                            }
-                          </td>
-
-                        </tr>
-                      );
-                    }
+                      </tr>
+                    )
                   )
                 }
 
@@ -658,3 +529,4 @@ const TBE = () => {
 };
 
 export default TBE;
+

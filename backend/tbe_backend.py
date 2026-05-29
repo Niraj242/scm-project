@@ -109,46 +109,46 @@ def process_tbe_dashboard_data():
                     mo_grp = get_mo_group(raw_mo)
                     target_qty_lookup[mo_grp] = target_qty_lookup.get(mo_grp, 0.0) + clean_nan(row.get(qty_col))
 
-        # RULE 2: ANCHOR CHANNELS
-        all_channels = {**trb_sheets, **dgbb_sheets}
-        for _, df in all_channels.items():
-            mo_col = "mo" if "mo" in df.columns else ("mo#" if "mo#" in df.columns else None)
-            type_col = next((c for c in ["type", "product", "product variant"] if c in df.columns), None)
-            channel_col = next((c for c in ["channel", "ch#", "channel no"] if c in df.columns), None)
-            if not mo_col or not type_col: continue
+        # RULE 2: ANCHOR CHANNELS (Fixed to avoid sheet dictionary clobbering)
+        for sheet_dict in [trb_sheets, dgbb_sheets]:
+            for _, df in sheet_dict.items():
+                mo_col = "mo" if "mo" in df.columns else ("mo#" if "mo#" in df.columns else None)
+                type_col = next((c for c in ["type", "product", "product variant"] if c in df.columns), None)
+                channel_col = next((c for c in ["channel", "ch#", "channel no"] if c in df.columns), None)
+                if not mo_col or not type_col: continue
 
-            for _, row in df.iterrows():
-                raw_mo = clean_mo(row.get(mo_col))
-                if not raw_mo: continue
-                
-                mo_group = get_mo_group(raw_mo)
-                variant_raw = normalize_text(row.get(type_col))
-                ring_type = extract_ring_type(variant_raw)
-                channel_id = clean_channel(row.get(channel_col)) if channel_col else ""
-                family_item = variant_raw.split('_')[0].split(' ')[0] if variant_raw else "Unknown Family"
-                
-                cum_production = clean_nan(row.get("cumulative production"))
-                production = clean_nan(row.get("production"))
-                row_date = parse_date_safe(row.get("date"))
+                for _, row in df.iterrows():
+                    raw_mo = clean_mo(row.get(mo_col))
+                    if not raw_mo: continue
+                    
+                    mo_group = get_mo_group(raw_mo)
+                    variant_raw = normalize_text(row.get(type_col))
+                    ring_type = extract_ring_type(variant_raw)
+                    channel_id = clean_channel(row.get(channel_col)) if channel_col else ""
+                    family_item = variant_raw.split('_')[0].split(' ')[0] if variant_raw else "Unknown Family"
+                    
+                    cum_production = clean_nan(row.get("cumulative production"))
+                    production = clean_nan(row.get("production"))
+                    row_date = parse_date_safe(row.get("date"))
 
-                agg_key = (mo_group, family_item, ring_type)
-                if agg_key not in tbe_aggregation:
-                    tbe_aggregation[agg_key] = {
-                        "mo_number": raw_mo, "mo_group": mo_group, "product_variant": family_item,
-                        "target_qty": target_qty_lookup.get(mo_group, 0), "ring_type": ring_type,
-                        "channel_id": channel_id, "sho_qty": 0.0, "sho_in_date": "-", 
-                        "tb_qty": 0.0, "tb_out_date": None, "max_cumulative": 0.0,
-                        "ch_in_date": None, "ch_out_date": None
-                    }
+                    agg_key = (mo_group, family_item, ring_type)
+                    if agg_key not in tbe_aggregation:
+                        tbe_aggregation[agg_key] = {
+                            "mo_number": raw_mo, "mo_group": mo_group, "product_variant": family_item,
+                            "target_qty": target_qty_lookup.get(mo_group, 0), "ring_type": ring_type,
+                            "channel_id": channel_id, "sho_qty": 0.0, "sho_in_date": "-", 
+                            "tb_qty": 0.0, "tb_out_date": None, "max_cumulative": 0.0,
+                            "ch_in_date": None, "ch_out_date": None
+                        }
 
-                meta = tbe_aggregation[agg_key]
-                if cum_production > meta["max_cumulative"]:
-                    meta["max_cumulative"] = cum_production
-                    if row_date: meta["ch_out_date"] = row_date
+                    meta = tbe_aggregation[agg_key]
+                    if cum_production > meta["max_cumulative"]:
+                        meta["max_cumulative"] = cum_production
+                        if row_date: meta["ch_out_date"] = row_date
 
-                if production > 0 and production == cum_production:
-                    if row_date:
-                        if meta["ch_in_date"] is None or row_date < meta["ch_in_date"]: meta["ch_in_date"] = row_date
+                    if production > 0 and production == cum_production:
+                        if row_date:
+                            if meta["ch_in_date"] is None or row_date < meta["ch_in_date"]: meta["ch_in_date"] = row_date
 
         # RULE 3: TRANSIT BUFFER (No of Rings)
         for _, df in transit_buffer_sheets.items():

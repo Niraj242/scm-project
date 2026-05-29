@@ -171,6 +171,19 @@ class DGBBMaster(Base):
     qty3 = Column(Float)
     normalized_mo = Column(String, index=True)
 
+class RingWeightTransitBuffer(Base):
+    __tablename__ = 'ringweight_transit_buffer'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    channel_no = Column(String, index=True, nullable=False)  # Maps to 'ch# / channel'
+    variant_name = Column(String, nullable=False)           # Stores the true bearing model/type
+    component_type = Column(String, nullable=False)         # "IM" or "OM" (derived from the variant)
+    no_of_rings = Column(Float, default=0.0)                # Quantity in transit
+    date = Column(Date, index=True, nullable=True)
+    
+    # The Bridge: This is populated by matching channel_no to TBEMaster/TRBMaster/DGBBMaster
+    normalized_mo = Column(String, index=True, nullable=True)
+
 class TraceabilityMaster(Base):
     __tablename__ = 'traceability_master'
     id = Column(Integer, primary_key=True, index=True)

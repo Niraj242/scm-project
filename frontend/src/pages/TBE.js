@@ -40,6 +40,7 @@ const TBE = () => {
   };
 
   const handleViewDetail = async (moString) => {
+    if (!moString) return;
     try {
       setLoading(true);
       setError('');
@@ -48,7 +49,7 @@ const TBE = () => {
       const json = await res.json();
       
       if (json.status === 'success') {
-        const flowArray = Array.isArray(json.data) ? json.data : (json.data.timeline || []);
+        const flowArray = json.data && json.data.timeline ? json.data.timeline : [];
         setSelectedMoFlow({
           mo: moString,
           flow_data: flowArray
@@ -59,13 +60,6 @@ const TBE = () => {
     } finally {
       setLoading(false);
     }
-  };
-
-  // STRIP OUT UNNECESSARY BACKEND TEXT
-  const cleanText = (text) => {
-    if (!text) return '-';
-    // Removes the ugly python aggregation string, leaving only the variant
-    return String(text).replace(/Combined Family Channel Grouping-([A-Za-z0-9-]+)/gi, '$1').replace(/Combined Family Channel Grouping-/gi, '').trim();
   };
 
   const filteredSummary = summaryData.filter(item => 
@@ -125,13 +119,13 @@ const TBE = () => {
         <div className="initializing-box">
           <div className="spinner"></div>
           <p><strong>System Backend is warming up...</strong></p>
-          <p className="sub-text">Downloading and parsing master excel configurations...</p>
+          <p className="sub-text">Downloading and parsing excel configurations...</p>
         </div>
       )}
 
       {loading && !isInitializing && <div className="loading-spinner">Querying Database Pipeline Cache...</div>}
 
-      {/* SUMMARY DASHBOARD */}
+      {/* VIEW 1: SUMMARY TABLE */}
       {!loading && !isInitializing && !selectedMoFlow && (
         <div className="table-wrapper">
           <table className="trace-table">
@@ -161,7 +155,6 @@ const TBE = () => {
             <tbody>
               {sortedSummary.map((row, idx) => {
                 const moSpan = getMoRowSpan(sortedSummary, idx);
-                
                 return (
                   <tr key={idx} className="data-row">
                     {moSpan > 0 && (
@@ -171,27 +164,22 @@ const TBE = () => {
                         </button>
                       </td>
                     )}
-
-                    {/* Meta Section - Utilizing cleanText to strip the long string */}
-                    <td className="fw-bold">{cleanText(row.final_variant)}</td>
+                    <td className="fw-bold">{row.final_variant || '-'}</td>
                     <td className="qty-cell">{row.qty_req && row.qty_req !== "-" ? Number(row.qty_req).toLocaleString() : '-'}</td>
-                    <td className="fw-bold">{cleanText(row.component_type)}</td>
+                    <td className="fw-bold">{row.component_type || '-'}</td>
                     
-                    {/* SHO & TB */}
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
                     <td>{row.sho_in || '-'}</td>
                     
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
                     <td>{row.tb_out || '-'}</td>
                     
-                    {/* Channel Section */}
                     <td className="fw-bold">{row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}</td>
                     <td>{row.ch_in || '-'}</td>
                     <td>{row.ch_out || '-'}</td>
                     
-                    {/* Status */}
                     <td>
-                      <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
+                      <span className={`status-badge ${(row.status || 'in-process').toLowerCase().replace(/\s+/g, '-')}`}>
                         {row.status || 'In Process'}
                       </span>
                     </td>
@@ -200,9 +188,7 @@ const TBE = () => {
               })}
               {sortedSummary.length === 0 && (
                 <tr>
-                  <td colSpan="12" className="empty-state">
-                    No matching TBE Tracking data located.
-                  </td>
+                  <td colSpan="12" className="empty-state">No matching TBE Tracking data located.</td>
                 </tr>
               )}
             </tbody>
@@ -210,7 +196,7 @@ const TBE = () => {
         </div>
       )}
 
-      {/* MO DRILLDOWN DETAILED FLOW */}
+      {/* VIEW 2: DRILLDOWN DETAILED TABLE */}
       {!loading && selectedMoFlow && selectedMoFlow.flow_data && (
         <div className="table-wrapper">
           <table className="trace-table">
@@ -219,10 +205,10 @@ const TBE = () => {
                 <th>MO Reference</th>
                 <th>Product Variant</th>
                 <th>Ring Type</th>
-                <th>SHO Qty Completed</th>
+                <th>SHO Qty</th>
                 <th>Transit Buffer Qty</th>
-                <th>Total Channel Qty</th>
-                <th>Execution Status</th>
+                <th>Channel Qty</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
@@ -235,15 +221,14 @@ const TBE = () => {
                         <strong>{selectedMoFlow.mo}</strong>
                       </td>
                     )}
-                    {/* Maps to both old and new backend keys to guarantee rendering */}
-                    <td>{cleanText(row.final_variant || row.product_variant)}</td>
-                    <td><strong>{cleanText(row.component_type || row.ring_type)}</strong></td>
+                    <td>{row.final_variant || '-'}</td>
+                    <td><strong>{row.component_type || '-'}</strong></td>
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : 0}</td>
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : 0}</td>
                     <td>{row.ch_qty ? Number(row.ch_qty).toLocaleString() : 0}</td>
                     <td>
-                      <span className={`status-badge ${(row.status || row.tracking_status || 'in-process').toLowerCase().replace(/\s+/g, '-')}`}>
-                        {row.status || row.tracking_status || '-'}
+                      <span className={`status-badge ${(row.status || 'in-process').toLowerCase().replace(/\s+/g, '-')}`}>
+                        {row.status || '-'}
                       </span>
                     </td>
                   </tr>
@@ -251,9 +236,7 @@ const TBE = () => {
               })}
               {selectedMoFlow.flow_data.length === 0 && (
                 <tr>
-                  <td colSpan="7" className="empty-state">
-                    Detailed sequence could not be found for this MO. (Check backend lookup keys)
-                  </td>
+                  <td colSpan="7" className="empty-state">No detailed item tracking rows found for this order allocation.</td>
                 </tr>
               )}
             </tbody>

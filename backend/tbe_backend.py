@@ -198,6 +198,13 @@ def process_tbe_dashboard_data():
             mo_flow_records[m_group]["timeline"].append(compiled_summary[-1])
 
         compiled_summary.sort(key=lambda x: (x["mo_number"], x["product_variant"]))
+
+        print("--- DEBUG INFO ---")
+        print(f"MO Sheets Loaded: {len(mo_sheets)}")
+        print(f"TRB Sheets Loaded: {len(trb_sheets)}")
+        print(f"Total Aggregated Records: {len(compiled_summary)}")
+        print("------------------")
+        
         
         MASTER_CACHE = compiled_summary
         FLOW_CACHE = mo_flow_records

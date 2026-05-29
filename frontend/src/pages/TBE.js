@@ -48,7 +48,6 @@ const TBE = () => {
       const json = await res.json();
       
       if (json.status === 'success') {
-        // FIXED: Checks if data is sent directly as an array or wrapped in a timeline object
         const flowArray = Array.isArray(json.data) ? json.data : (json.data.timeline || []);
         setSelectedMoFlow({
           mo: moString,
@@ -62,13 +61,18 @@ const TBE = () => {
     }
   };
 
-  // Filter using backend keys
+  // STRIP OUT UNNECESSARY BACKEND TEXT
+  const cleanText = (text) => {
+    if (!text) return '-';
+    // Removes the ugly python aggregation string, leaving only the variant
+    return String(text).replace(/Combined Family Channel Grouping-([A-Za-z0-9-]+)/gi, '$1').replace(/Combined Family Channel Grouping-/gi, '').trim();
+  };
+
   const filteredSummary = summaryData.filter(item => 
     (item.mo && String(item.mo).toLowerCase().includes(search.toLowerCase())) ||
     (item.final_variant && String(item.final_variant).toLowerCase().includes(search.toLowerCase()))
   );
 
-  // Sort by 'mo' and 'final_variant'
   const sortedSummary = [...filteredSummary].sort((a, b) => {
     if (a.mo !== b.mo) {
       return (a.mo || '').localeCompare(b.mo || '');
@@ -76,7 +80,6 @@ const TBE = () => {
     return String(a.final_variant || '').localeCompare(String(b.final_variant || ''));
   });
 
-  // Row Span Logic (ONLY for the first MO column to prevent HTML grid breaking)
   const getMoRowSpan = (dataArray, currentIndex) => {
     const currentMo = dataArray[currentIndex].mo;
     if (currentIndex > 0 && dataArray[currentIndex - 1].mo === currentMo) {
@@ -122,13 +125,13 @@ const TBE = () => {
         <div className="initializing-box">
           <div className="spinner"></div>
           <p><strong>System Backend is warming up...</strong></p>
-          <p className="sub-text">Downloading and parsing master excel configurations. Auto-refreshing in a few moments...</p>
+          <p className="sub-text">Downloading and parsing master excel configurations...</p>
         </div>
       )}
 
       {loading && !isInitializing && <div className="loading-spinner">Querying Database Pipeline Cache...</div>}
 
-      {/* VIEW BLOCK 1: MAIN SUMMARY DASHBOARD */}
+      {/* SUMMARY DASHBOARD */}
       {!loading && !isInitializing && !selectedMoFlow && (
         <div className="table-wrapper">
           <table className="trace-table">
@@ -161,7 +164,6 @@ const TBE = () => {
                 
                 return (
                   <tr key={idx} className="data-row">
-                    {/* Spanned MO Cell */}
                     {moSpan > 0 && (
                       <td rowSpan={moSpan} className="merged-mo-cell">
                         <button className="mo-link-btn" onClick={() => handleViewDetail(row.mo)}>
@@ -170,10 +172,10 @@ const TBE = () => {
                       </td>
                     )}
 
-                    {/* Meta Section */}
-                    <td className="fw-bold">{row.final_variant || '-'}</td>
+                    {/* Meta Section - Utilizing cleanText to strip the long string */}
+                    <td className="fw-bold">{cleanText(row.final_variant)}</td>
                     <td className="qty-cell">{row.qty_req && row.qty_req !== "-" ? Number(row.qty_req).toLocaleString() : '-'}</td>
-                    <td className="fw-bold">{row.component_type || '-'}</td>
+                    <td className="fw-bold">{cleanText(row.component_type)}</td>
                     
                     {/* SHO & TB */}
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
@@ -182,7 +184,7 @@ const TBE = () => {
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
                     <td>{row.tb_out || '-'}</td>
                     
-                    {/* FIXED: Standard Channel Cells (No complex RowSpans to break layout) */}
+                    {/* Channel Section */}
                     <td className="fw-bold">{row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}</td>
                     <td>{row.ch_in || '-'}</td>
                     <td>{row.ch_out || '-'}</td>
@@ -208,7 +210,7 @@ const TBE = () => {
         </div>
       )}
 
-      {/* VIEW BLOCK 2: TARGET DRILLDOWN DETAILED FLOW */}
+      {/* MO DRILLDOWN DETAILED FLOW */}
       {!loading && selectedMoFlow && selectedMoFlow.flow_data && (
         <div className="table-wrapper">
           <table className="trace-table">
@@ -233,19 +235,27 @@ const TBE = () => {
                         <strong>{selectedMoFlow.mo}</strong>
                       </td>
                     )}
-                    <td>{row.final_variant || '-'}</td>
-                    <td><strong>{row.component_type || '-'}</strong></td>
+                    {/* Maps to both old and new backend keys to guarantee rendering */}
+                    <td>{cleanText(row.final_variant || row.product_variant)}</td>
+                    <td><strong>{cleanText(row.component_type || row.ring_type)}</strong></td>
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : 0}</td>
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : 0}</td>
                     <td>{row.ch_qty ? Number(row.ch_qty).toLocaleString() : 0}</td>
                     <td>
-                      <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
-                        {row.status || '-'}
+                      <span className={`status-badge ${(row.status || row.tracking_status || 'in-process').toLowerCase().replace(/\s+/g, '-')}`}>
+                        {row.status || row.tracking_status || '-'}
                       </span>
                     </td>
                   </tr>
                 );
               })}
+              {selectedMoFlow.flow_data.length === 0 && (
+                <tr>
+                  <td colSpan="7" className="empty-state">
+                    Detailed sequence could not be found for this MO. (Check backend lookup keys)
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

@@ -33,6 +33,8 @@ def get_mo_group(clean_mo_str):
     return clean_mo_str
 
 def normalize_text(value):
+    # No longer stripping "IM/OM" or other tags here. 
+    # This keeps the exact name as it appears in your sheet.
     if pd.isna(value): return ""
     return str(value).strip().upper()
 
@@ -53,11 +55,6 @@ def parse_date_safe(value):
         parsed = pd.to_datetime(value, errors='coerce', dayfirst=True)
         return None if pd.isna(parsed) else parsed.date()
     except: return None
-
-def extract_ring_type(product_text):
-    text = normalize_text(product_text)
-    if "IM" in text or "IR" in text: return "IM"
-    return "OM"
 
 def download_excel(url):
     response = requests.get(url)
@@ -108,7 +105,7 @@ def process_tbe_dashboard_data():
                     target_qty_lookup[mo_grp] = target_qty_lookup.get(mo_grp, 0.0) + qty_val
                     target_qty_lookup[raw_mo] = target_qty_lookup.get(raw_mo, 0.0) + qty_val
 
-        # STEP 2: PROCESS TRB & DGBB MASTERS (Build Order Base & Channel Timeline)
+        # STEP 2: PROCESS TRB & DGBB MASTERS
         tbe_aggregation = {}
         channel_timeline = []
 
@@ -123,25 +120,20 @@ def process_tbe_dashboard_data():
                     raw_mo = clean_mo(row.get(mo_col))
                     if not raw_mo: continue
 
-                    variant_raw = normalize_text(row.get(type_col))
-                    comp_type = extract_ring_type(variant_raw)
-                    # Isolate exact family by stripping the IM/OM tags
-                    base_variant = variant_raw.replace("IM", "").replace("IR", "").replace("OM", "").replace("OR", "").strip()
-
+                    # USE EXACT PRODUCT NAME
+                    raw_product = normalize_text(row.get(type_col))
                     ch_id = clean_channel(row.get(channel_col)) if channel_col else ""
                     row_date = parse_date_safe(row.get("date"))
                     cum_production = clean_nan(row.get("cumulative production"))
 
-                    # Ensure MO + Family + Type exists in aggregation base
-                    agg_key = (raw_mo, base_variant, comp_type)
+                    # AGGREGATION KEY USES RAW PRODUCT NAME
+                    agg_key = (raw_mo, raw_product)
                     if agg_key not in tbe_aggregation:
                         tbe_aggregation[agg_key] = {
                             "mo": raw_mo,
                             "mo_group": get_mo_group(raw_mo),
-                            "final_variant": base_variant,
-                            "component_type": comp_type,
+                            "product_name": raw_product,
                             "qty_req": target_qty_lookup.get(raw_mo, target_qty_lookup.get(get_mo_group(raw_mo), 0.0)),
-                            "sho_qty": 0.0, "sho_in": None,
                             "tb_qty": 0.0, "tb_out": None,
                             "ch_qty": 0.0, "ch_in": None, "ch_out": None
                         }
@@ -154,17 +146,15 @@ def process_tbe_dashboard_data():
                             if meta["ch_in"] is None or row_date < meta["ch_in"]:
                                 meta["ch_in"] = row_date
 
-                    # Build a searchable timeline for the Transit Buffer to hook into
                     if ch_id and row_date:
                         channel_timeline.append({
                             "channel": ch_id,
                             "date": row_date,
                             "mo": raw_mo,
-                            "base_variant": base_variant,
-                            "comp_type": comp_type
+                            "product": raw_product
                         })
 
-        # STEP 3: MAP TRANSIT BUFFER USING CHANNEL + DATE PROXIMITY
+        # STEP 3: MAP TRANSIT BUFFER
         for _, df in transit_buffer_sheets.items():
             ch_col = next((c for c in ["ch#", "channel", "ch"] if c in df.columns), None)
             type_col = "type" if "type" in df.columns else None
@@ -174,26 +164,18 @@ def process_tbe_dashboard_data():
 
             for _, row in df.iterrows():
                 tb_channel = clean_channel(row.get(ch_col))
-                tb_type_raw = normalize_text(row.get(type_col))
-                tb_comp = extract_ring_type(tb_type_raw)
+                tb_product = normalize_text(row.get(type_col))
                 tb_date = parse_date_safe(row.get(date_col))
                 tb_qty = clean_nan(row.get(qty_col))
 
                 if not tb_channel or tb_qty <= 0: continue
 
-                # Look for matching channel and component type in the timeline
-                possible_matches = [x for x in channel_timeline if x["channel"] == tb_channel and x["comp_type"] == tb_comp]
+                # Match by Channel and Exact Product Name
+                possible_matches = [x for x in channel_timeline if x["channel"] == tb_channel and x["product"] == tb_product]
 
-                best_match = None
                 if possible_matches:
-                    if tb_date:
-                        # Find the master record with the closest date to the transit buffer date
-                        best_match = min(possible_matches, key=lambda x: abs((x["date"] - tb_date).days))
-                    else:
-                        best_match = possible_matches[-1] # fallback to most recent
-
-                if best_match:
-                    agg_key = (best_match["mo"], best_match["base_variant"], tb_comp)
+                    best_match = min(possible_matches, key=lambda x: abs((x["date"] - (tb_date or datetime.now().date())).days)) if tb_date else possible_matches[-1]
+                    agg_key = (best_match["mo"], best_match["product"])
                     if agg_key in tbe_aggregation:
                         tbe_aggregation[agg_key]["tb_qty"] += tb_qty
                         if tb_date:
@@ -201,44 +183,29 @@ def process_tbe_dashboard_data():
                             if not curr_out or tb_date > curr_out:
                                 tbe_aggregation[agg_key]["tb_out"] = tb_date
 
-        # STEP 4: OUTPUT CLEAN UNIFIED DATA AND PREPARE DRILLDOWN
+        # STEP 4: OUTPUT
         compiled_summary = []
         mo_flow_records = {}
 
         for _, meta in tbe_aggregation.items():
-            if meta["ch_qty"] == 0 and meta["tb_qty"] == 0:
-                tracking_status = "Yet to Start"
-            elif meta["ch_qty"] > 0 and meta["tb_qty"] == 0:
-                tracking_status = "Completed"
-            else:
-                tracking_status = "In Process"
-
             record = {
                 "mo": meta["mo"],
-                "final_variant": meta["final_variant"],
+                "product_name": meta["product_name"],
                 "qty_req": meta["qty_req"],
-                "component_type": meta["component_type"],
                 "sho_qty": meta["ch_qty"],
-                "sho_in": "-",
                 "tb_qty": meta["tb_qty"],
                 "tb_out": str(meta["tb_out"]) if meta["tb_out"] else "-",
                 "ch_qty": meta["ch_qty"],
                 "ch_in": str(meta["ch_in"]) if meta["ch_in"] else "-",
                 "ch_out": str(meta["ch_out"]) if meta["ch_out"] else "-",
-                "status": tracking_status
+                "status": "In Process" if meta["ch_qty"] > 0 and meta["tb_qty"] > 0 else "Completed"
             }
             compiled_summary.append(record)
-
-            # Double index to guarantee frontend click handler always matches
+            
             for lookup_key in [meta["mo"], meta["mo_group"]]:
-                if lookup_key and lookup_key != "-":
-                    if lookup_key not in mo_flow_records:
-                        mo_flow_records[lookup_key] = {"mo": meta["mo"], "timeline": []}
-                    if record not in mo_flow_records[lookup_key]["timeline"]:
-                        mo_flow_records[lookup_key]["timeline"].append(record)
+                if lookup_key not in mo_flow_records: mo_flow_records[lookup_key] = {"mo": meta["mo"], "timeline": []}
+                mo_flow_records[lookup_key]["timeline"].append(record)
 
-        compiled_summary.sort(key=lambda x: (x["mo"], x["final_variant"]))
-        
         MASTER_CACHE = compiled_summary
         FLOW_CACHE = mo_flow_records
         LAST_REFRESH = datetime.now()
@@ -247,29 +214,20 @@ def process_tbe_dashboard_data():
     finally: IS_UPDATING = False
 
 def background_refresh_loop():
-    process_tbe_dashboard_data()
     while True:
-        time.sleep(CACHE_DURATION_MINUTES * 60)
         process_tbe_dashboard_data()
+        time.sleep(CACHE_DURATION_MINUTES * 60)
 
-t = threading.Thread(target=background_refresh_loop, daemon=True)
-t.start()
+threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 @router.get("/traceability_all_mos")
 def get_all_mos():
-    if not LAST_REFRESH and not MASTER_CACHE:
-        return {"status": "initializing", "message": "Loading Data...", "data": []}
     return {"status": "success", "last_updated": str(LAST_REFRESH), "data": MASTER_CACHE}
 
 @router.get("/traceability_report/{mo}")
 def get_flow(mo: str):
-    # Safe lookup via standard clean values or groups
     search_mo = clean_mo(mo)
     search_grp = get_mo_group(search_mo)
-    
-    if search_mo in FLOW_CACHE:
-        return {"status": "success", "last_updated": str(LAST_REFRESH), "data": FLOW_CACHE[search_mo]}
-    elif search_grp in FLOW_CACHE:
-        return {"status": "success", "last_updated": str(LAST_REFRESH), "data": FLOW_CACHE[search_grp]}
-        
-    raise HTTPException(status_code=404, detail=f"Order allocation tracking details missing for reference: '{mo}'")
+    if search_mo in FLOW_CACHE: return {"status": "success", "data": FLOW_CACHE[search_mo]}
+    if search_grp in FLOW_CACHE: return {"status": "success", "data": FLOW_CACHE[search_grp]}
+    raise HTTPException(status_code=404, detail="Not found")

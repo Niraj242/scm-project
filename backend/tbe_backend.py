@@ -108,48 +108,63 @@ def process_tbe_dashboard_data():
                     target_qty_lookup[mo_grp] = target_qty_lookup.get(mo_grp, 0.0) + qty_val
                     target_qty_lookup[raw_mo] = target_qty_lookup.get(raw_mo, 0.0) + qty_val
 
-        # STEP 2: MAP CHANNEL ENTRIES TO VALID ORDERS (TRB & DGBB Masters)
-        channel_mapping = {}
+        # STEP 2: PROCESS TRB & DGBB MASTERS (Build Order Base & Channel Timeline)
+        tbe_aggregation = {}
+        channel_timeline = []
+
         for sheet_dict in [trb_sheets, dgbb_sheets]:
             for _, df in sheet_dict.items():
-                mo_col = "mo" if "mo" in df.columns else ("mo#" if "mo#" in df.columns else None)
+                mo_col = next((c for c in ["mo", "mo#"] if c in df.columns), None)
                 type_col = next((c for c in ["type", "product", "product variant"] if c in df.columns), None)
                 channel_col = next((c for c in ["channel", "ch#", "channel no"] if c in df.columns), None)
-                if not mo_col or not channel_col: continue
+                if not mo_col or not type_col: continue
 
                 for _, row in df.iterrows():
                     raw_mo = clean_mo(row.get(mo_col))
-                    channel_id = clean_channel(row.get(channel_col))
-                    if not raw_mo or not channel_id: continue
+                    if not raw_mo: continue
 
                     variant_raw = normalize_text(row.get(type_col))
-                    ring_type = extract_ring_type(variant_raw)
-                    
-                    cum_production = clean_nan(row.get("cumulative production"))
-                    production = clean_nan(row.get("production"))
+                    comp_type = extract_ring_type(variant_raw)
+                    # Isolate exact family by stripping the IM/OM tags
+                    base_variant = variant_raw.replace("IM", "").replace("IR", "").replace("OM", "").replace("OR", "").strip()
+
+                    ch_id = clean_channel(row.get(channel_col)) if channel_col else ""
                     row_date = parse_date_safe(row.get("date"))
+                    cum_production = clean_nan(row.get("cumulative production"))
 
-                    ch_key = (channel_id, ring_type)
-                    if ch_key not in channel_mapping:
-                        channel_mapping[ch_key] = {
-                            "mo_number": raw_mo,
+                    # Ensure MO + Family + Type exists in aggregation base
+                    agg_key = (raw_mo, base_variant, comp_type)
+                    if agg_key not in tbe_aggregation:
+                        tbe_aggregation[agg_key] = {
+                            "mo": raw_mo,
                             "mo_group": get_mo_group(raw_mo),
-                            "max_cumulative": 0.0,
-                            "ch_in_date": None,
-                            "ch_out_date": None
+                            "final_variant": base_variant,
+                            "component_type": comp_type,
+                            "qty_req": target_qty_lookup.get(raw_mo, target_qty_lookup.get(get_mo_group(raw_mo), 0.0)),
+                            "sho_qty": 0.0, "sho_in": None,
+                            "tb_qty": 0.0, "tb_out": None,
+                            "ch_qty": 0.0, "ch_in": None, "ch_out": None
                         }
-                    
-                    meta = channel_mapping[ch_key]
-                    if cum_production > meta["max_cumulative"]:
-                        meta["max_cumulative"] = cum_production
-                        if row_date: meta["ch_out_date"] = row_date
-                    if production > 0 and production == cum_production:
-                        if row_date:
-                            if meta["ch_in_date"] is None or row_date < meta["ch_in_date"]: 
-                                meta["ch_in_date"] = row_date
 
-        # STEP 3: USE TRANSIT BUFFER TO EXTRACT GENUINE BEARING VARIANTS
-        tbe_aggregation = {}
+                    meta = tbe_aggregation[agg_key]
+                    if cum_production > meta["ch_qty"]:
+                        meta["ch_qty"] = cum_production
+                        if row_date: 
+                            meta["ch_out"] = row_date
+                            if meta["ch_in"] is None or row_date < meta["ch_in"]:
+                                meta["ch_in"] = row_date
+
+                    # Build a searchable timeline for the Transit Buffer to hook into
+                    if ch_id and row_date:
+                        channel_timeline.append({
+                            "channel": ch_id,
+                            "date": row_date,
+                            "mo": raw_mo,
+                            "base_variant": base_variant,
+                            "comp_type": comp_type
+                        })
+
+        # STEP 3: MAP TRANSIT BUFFER USING CHANNEL + DATE PROXIMITY
         for _, df in transit_buffer_sheets.items():
             ch_col = next((c for c in ["ch#", "channel", "ch"] if c in df.columns), None)
             type_col = "type" if "type" in df.columns else None
@@ -160,52 +175,31 @@ def process_tbe_dashboard_data():
             for _, row in df.iterrows():
                 tb_channel = clean_channel(row.get(ch_col))
                 tb_type_raw = normalize_text(row.get(type_col))
-                row_ring_type = extract_ring_type(tb_type_raw)
-                
-                # Strip out junk grouping texts to isolate the exact bearing model
-                clean_variant = tb_type_raw.replace("COMBINED FAMILY CHANNEL GROUPING-", "").replace("COMBINED FAMILY CHANNEL GROUPING", "").strip()
-                if clean_variant in ["IM", "OM", ""] or "COMBINED" in clean_variant:
-                    clean_variant = row_ring_type
-
-                qty_tb = clean_nan(row.get(qty_col))
+                tb_comp = extract_ring_type(tb_type_raw)
                 tb_date = parse_date_safe(row.get(date_col))
+                tb_qty = clean_nan(row.get(qty_col))
 
-                # Link channel back to its associated Production Order metadata
-                ch_key = (tb_channel, row_ring_type)
-                ch_info = channel_mapping.get(ch_key)
-                
-                if ch_info:
-                    mo_number = ch_info["mo_number"]
-                    mo_group = ch_info["mo_group"]
-                    ch_qty = ch_info["max_cumulative"]
-                    ch_in = ch_info["ch_in_date"]
-                    ch_out = ch_info["ch_out_date"]
-                else:
-                    mo_number, mo_group, ch_qty, ch_in, ch_out = "-", "-", 0.0, None, None
+                if not tb_channel or tb_qty <= 0: continue
 
-                # Group together cleanly by Order and unique Variant Name
-                agg_key = (mo_number, clean_variant, row_ring_type)
-                if agg_key not in tbe_aggregation:
-                    tbe_aggregation[agg_key] = {
-                        "mo": mo_number,
-                        "mo_group": mo_group,
-                        "final_variant": clean_variant,
-                        "qty_req": target_qty_lookup.get(mo_number, target_qty_lookup.get(mo_group, "-")),
-                        "component_type": row_ring_type,
-                        "sho_qty": ch_qty, 
-                        "sho_in": "-",
-                        "tb_qty": 0.0,
-                        "tb_out": None,
-                        "ch_qty": ch_qty,
-                        "ch_in": ch_in,
-                        "ch_out": ch_out
-                    }
-                
-                meta = tbe_aggregation[agg_key]
-                meta["tb_qty"] += qty_tb
-                if tb_date:
-                    if meta["tb_out"] is None or tb_date > meta["tb_out"]:
-                        meta["tb_out"] = tb_date
+                # Look for matching channel and component type in the timeline
+                possible_matches = [x for x in channel_timeline if x["channel"] == tb_channel and x["comp_type"] == tb_comp]
+
+                best_match = None
+                if possible_matches:
+                    if tb_date:
+                        # Find the master record with the closest date to the transit buffer date
+                        best_match = min(possible_matches, key=lambda x: abs((x["date"] - tb_date).days))
+                    else:
+                        best_match = possible_matches[-1] # fallback to most recent
+
+                if best_match:
+                    agg_key = (best_match["mo"], best_match["base_variant"], tb_comp)
+                    if agg_key in tbe_aggregation:
+                        tbe_aggregation[agg_key]["tb_qty"] += tb_qty
+                        if tb_date:
+                            curr_out = tbe_aggregation[agg_key]["tb_out"]
+                            if not curr_out or tb_date > curr_out:
+                                tbe_aggregation[agg_key]["tb_out"] = tb_date
 
         # STEP 4: OUTPUT CLEAN UNIFIED DATA AND PREPARE DRILLDOWN
         compiled_summary = []

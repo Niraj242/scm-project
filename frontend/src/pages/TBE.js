@@ -86,6 +86,27 @@ const TBE = () => {
     return span;
   };
 
+  const getChannelRowSpan = (dataArray, currentIndex) => {
+    const currentMo = dataArray[currentIndex].mo;
+    const currentFamily = dataArray[currentIndex].final_variant; 
+    
+    if (currentIndex > 0 && 
+        dataArray[currentIndex - 1].mo === currentMo && 
+        dataArray[currentIndex - 1].final_variant === currentFamily) {
+      return 0; 
+    }
+    
+    let span = 1;
+    while (
+      currentIndex + span < dataArray.length && 
+      dataArray[currentIndex + span].mo === currentMo &&
+      dataArray[currentIndex + span].final_variant === currentFamily
+    ) {
+      span++;
+    }
+    return span;
+  };
+
   return (
     <div className="traceability-container">
       <div className="header-section">
@@ -155,6 +176,8 @@ const TBE = () => {
             <tbody>
               {sortedSummary.map((row, idx) => {
                 const moSpan = getMoRowSpan(sortedSummary, idx);
+                const channelSpan = getChannelRowSpan(sortedSummary, idx);
+                
                 return (
                   <tr key={idx} className="data-row">
                     {moSpan > 0 && (
@@ -174,9 +197,15 @@ const TBE = () => {
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
                     <td>{row.tb_out || '-'}</td>
                     
-                    <td className="fw-bold">{row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}</td>
-                    <td>{row.ch_in || '-'}</td>
-                    <td>{row.ch_out || '-'}</td>
+                    {channelSpan > 0 && (
+                      <>
+                        <td rowSpan={channelSpan} className="merged-channel-cell fw-bold">
+                          {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}
+                        </td>
+                        <td rowSpan={channelSpan} className="merged-channel-cell">{row.ch_in || '-'}</td>
+                        <td rowSpan={channelSpan} className="merged-channel-cell">{row.ch_out || '-'}</td>
+                      </>
+                    )}
                     
                     <td>
                       <span className={`status-badge ${(row.status || 'in-process').toLowerCase().replace(/\s+/g, '-')}`}>

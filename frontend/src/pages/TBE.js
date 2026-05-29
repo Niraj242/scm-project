@@ -65,8 +65,9 @@ const TBE = () => {
   };
 
   // 1. Filter the data based on search
+  // 1. Filter the data based on search
   const filteredSummary = summaryData.filter(item => 
-    (item.mo_number && item.mo_number.toLowerCase().includes(search.toLowerCase())) ||
+    (item.mo_number && String(item.mo_number).toLowerCase().includes(search.toLowerCase())) ||
     (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase()))
   );
 

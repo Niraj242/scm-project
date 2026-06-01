@@ -6,18 +6,22 @@ import threading
 import time
 import re
 import math
+import warnings
 from datetime import datetime
 from settings import settings
 
+# =========================================================
+# GLOBAL CONFIG & WARNING SUPPRESSION
+# =========================================================
 router = APIRouter()
 
-# =========================================================
-# GLOBAL CACHE & THREADING CONFIG
-# =========================================================
 MASTER_CACHE = []
 LAST_REFRESH = None
 IS_UPDATING = False
 CACHE_DURATION_MINUTES = 5
+
+# Suppress harmless openpyxl styling warnings from ERP exports
+warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # =========================================================
 # FUZZY MATCHING & ULTRA-SAFE CLEANING HELPERS
@@ -47,14 +51,19 @@ def normalize_text(value):
 def normalize_channel(value):
     """
     Forces channel names into clean alphanumeric strings.
-    Converts float variants like '4.0' or '04' uniformly to '4'.
+    Strips 'CH-' prefixes (e.g., 'CH-03' -> '3') and converts floats ('4.0' -> '4').
     """
     if pd.isna(value): return ""
     val_str = str(value).strip().upper()
+    
+    # Strip text prefixes to isolate the raw number
+    val_str = val_str.replace("CH-", "").replace("CH", "").replace("-", "").strip()
+    
     # Strip decimals if interpreted as a float
     if val_str.endswith(".0"):
         val_str = val_str[:-2]
-    # Strip leading zeros to ensure uniform join alignment
+        
+    # Strip leading zeros (e.g., '03' -> '3') to ensure uniform join alignment
     val_str = val_str.lstrip("0")
     return val_str if val_str else "0"
 
@@ -70,7 +79,12 @@ def parse_date_safe(value):
     try:
         if pd.isna(value) or str(value).strip().lower() in ["nan", "nat", "", "-"]: 
             return None
-        parsed = pd.to_datetime(value, errors='coerce', dayfirst=True)
+            
+        # Suppress the mixed-date warnings; prioritize DD/MM/YYYY
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            parsed = pd.to_datetime(value, errors='coerce', dayfirst=True)
+            
         if pd.isna(parsed): return None
         return parsed.date()
     except:
@@ -138,6 +152,7 @@ def process_tbe_data():
     print(f"[{datetime.now()}] STARTING TBE FUZZY-MATCH ENGAGEMENT ENGINE...")
 
     try:
+        # Load Sheets (Updated Variable Name)
         mo_sheets = load_excel_sheets(settings.MO_DATA_URL)
         ring_wt_sheets = load_excel_sheets(settings.RINGWT_TRANSITBUFFER_URL)
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
@@ -150,8 +165,10 @@ def process_tbe_data():
         channel_data = {}
 
         for sheet_name, df in all_channels.items():
-            ch_col = find_column(df, ["channel", "chan", "ch"])
-            type_col = find_column(df, ["type", "product", "variant", "item", "family"])
+            # Added exact targets based on sample data
+            ch_col = find_column(df, ["ch# no", "ch#", "channel_no", "channel grouping", "channel", "chan", "ch"])
+            type_col = find_column(df, ["type", "bearing family", "product", "variant", "item", "family"])
+            
             if not ch_col or not type_col: continue
 
             cum_col = find_column(df, ["cumulative", "cum"])
@@ -206,9 +223,10 @@ def process_tbe_data():
         ring_wt_aggregated = {}
         
         for sheet_name, df in ring_wt_sheets.items():
-            ch_col = find_column(df, ["channel", "chan", "ch"])
-            type_col = find_column(df, ["type", "product", "variant", "item", "family"])
-            qty_col = find_column(df, ["qty", "quantity"])
+            # Added exact targets based on sample data
+            ch_col = find_column(df, ["ch# no", "ch#", "channel_no", "channel grouping", "channel", "chan", "ch"])
+            type_col = find_column(df, ["type", "bearing family", "product", "variant", "item", "family"])
+            qty_col = find_column(df, ["qty", "quantity", "no of rings", "net wt"])
             date_col = find_column(df, ["date", "challan"])
             
             if not ch_col or not type_col: continue
@@ -251,7 +269,7 @@ def process_tbe_data():
 
             compiled_summary.append({
                 "mo_number": mo_info["mo"],
-                "product_variant": family,  # Strictly Outputs exact derived bearing family
+                "product_variant": family,
                 "target_qty": int(mo_info["target"]) if mo_info["target"] > 0 else "",
                 "ring_type": comp_type,
                 "sho_qty": rw_data["qty"],

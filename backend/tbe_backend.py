@@ -98,10 +98,11 @@ def parse_family_and_type(prod_text):
     return (clean if clean else text), component
 
 def find_column(df, patterns):
-    for col in df.columns:
-        col_clean = str(col).strip().lower()
-        for pattern in patterns:
-            if pattern in col_clean:
+    # FIXED: Reversing the loop prioritizes patterns over column order.
+    # It now ensures it looks for "No of Rings" across all columns before falling back to generic "qty".
+    for pattern in patterns:
+        for col in df.columns:
+            if pattern in str(col).strip().lower():
                 return col
     return None
 
@@ -212,7 +213,6 @@ def process_tbe_data():
             if not ch_col or not type_col: continue
 
             cum_col = find_column(df, ["cumulative", "cum"])
-            prod_col = find_column(df, ["production", "prod"])
             date_col = find_column(df, ["date"])
 
             for _, row in df.iterrows():
@@ -222,7 +222,6 @@ def process_tbe_data():
                 if not channel_num or not family or family == "UNKNOWN_FAMILY": continue
 
                 cumulative = clean_nan(extract_val(row, cum_col)) if cum_col else 0.0
-                production = clean_nan(extract_val(row, prod_col)) if prod_col else 0.0
                 date_val = parse_date_safe(extract_val(row, date_col)) if date_col else None
 
                 c_key = (channel_num, family)
@@ -233,10 +232,17 @@ def process_tbe_data():
                 if cumulative > c_meta["max_cum"]:
                     c_meta["max_cum"] = cumulative
                 
+                # FIXED: Simple Min/Max tracking for strict start and end dates (Point 6)
                 if date_val:
-                    if production > 0 and production == cumulative:
-                        c_meta["in_date"] = min(c_meta["in_date"], date_val) if c_meta["in_date"] else date_val
-                    c_meta["out_date"] = max(c_meta["out_date"], date_val) if c_meta["out_date"] else date_val
+                    if c_meta["in_date"]:
+                        c_meta["in_date"] = min(c_meta["in_date"], date_val) 
+                    else:
+                        c_meta["in_date"] = date_val
+                        
+                    if c_meta["out_date"]:
+                        c_meta["out_date"] = max(c_meta["out_date"], date_val)
+                    else:
+                        c_meta["out_date"] = date_val
 
         # ---------------------------------------------------------
         # 2. PARSE MASTER GROUND TRUTH MO DATA MAPS
@@ -269,10 +275,17 @@ def process_tbe_data():
             
             ch_col = find_column(df, ["ch# no", "ch#", "channel_no", "channel grouping", "channel", "chan", "ch"])
             type_col = find_column(df, ["type", "bearing family", "product", "variant", "item", "family"])
-            qty_col = find_column(df, ["qty", "quantity", "no of rings", "net wt"])
+            
+            # FIXED: "No Of Rings" is strictly prioritized, "Net Wt" has been removed as a fallback.
+            qty_col = find_column(df, ["no of rings", "quantity", "qty"])
             date_col = find_column(df, ["date", "challan"])
             
             if not ch_col or not type_col: continue
+            
+            # FIXED: Drop duplicates to stop double shift entries (Point 5)
+            # Will drop based on combinations of Channel, Type, and Date to flatten the list
+            if date_col:
+                df = df.drop_duplicates(subset=[ch_col, type_col, date_col])
             
             for _, row in df.iterrows():
                 channel_num = normalize_channel(extract_val(row, ch_col))
@@ -301,6 +314,8 @@ def process_tbe_data():
         
         for (channel_num, family, comp_type), rw_data in ring_wt_aggregated.items():
             c_key = (channel_num, family)
+            # Fetch channel info directly based on channel and family combination
+            # This automatically copies the single channel total into both IM and OM rows based on comp_type loops! (Point 4 & 7)
             ch_info = channel_data.get(c_key, {"max_cum": None, "in_date": None, "out_date": None})
             mo_info = mo_dict.get(family, {"mo": "", "target": 0.0})
             
@@ -315,11 +330,11 @@ def process_tbe_data():
                 "product_variant": family,
                 "target_qty": int(mo_info["target"]) if mo_info["target"] > 0 else "",
                 "ring_type": comp_type,
-                "sho_qty": rw_data["qty"],
+                "sho_qty": rw_data["qty"] if rw_data["qty"] > 0 else "", 
                 "sho_in": "",
-                "tb_qty": rw_data["qty"],
+                "tb_qty": rw_data["qty"] if rw_data["qty"] > 0 else "",
                 "tb_out": str(rw_data["max_date"]) if rw_data["max_date"] else "-",
-                "ch_qty": int(ch_info["max_cum"]) if ch_info["max_cum"] is not None else "",
+                "ch_qty": int(ch_info["max_cum"]) if ch_info["max_cum"] is not None and ch_info["max_cum"] > 0 else "",
                 "ch_in": str(ch_info["in_date"]) if ch_info["in_date"] else "-",
                 "ch_out": str(ch_info["out_date"]) if ch_info["out_date"] else "-",
                 "status": calc_status,

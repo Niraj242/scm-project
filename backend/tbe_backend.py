@@ -19,7 +19,7 @@ INITIALIZED = False
 CACHE_DURATION_MINUTES = 5
 
 # =========================================================
-# ADVANCED RESILIENT HELPERS
+# FIXED RESILIENT HELPERS (NO COLUMN HIJACKING)
 # =========================================================
 def repair_sheet_headers(df):
     if df.empty:
@@ -44,6 +44,25 @@ def repair_sheet_headers(df):
             return repaired_df.reset_index(drop=True)
             
     return df
+
+def find_column(df, patterns):
+    cols_map = {str(c).strip().lower().replace(" ", "").replace("#", "").replace("_", ""): c for c in df.columns}
+    
+    # PASS 1: Strict Exact Matching (Prevents 'ch' from matching 'description')
+    for pattern in patterns:
+        norm_p = pattern.lower().replace(" ", "").replace("#", "").replace("_", "")
+        if norm_p in cols_map:
+            return cols_map[norm_p]
+            
+    # PASS 2: Safe Substring Fallback (Only for long descriptive strings)
+    for pattern in patterns:
+        norm_p = pattern.lower().replace(" ", "").replace("#", "").replace("_", "")
+        if len(norm_p) <= 2: 
+            continue  # Skip short tokens like 'ch', 'mo', 'id' to prevent false positives
+        for normalized_target, original_col in cols_map.items():
+            if norm_p in normalized_target or normalized_target in norm_p:
+                return original_col
+    return None
 
 def normalize_channel(value):
     if pd.isna(value): 
@@ -76,17 +95,6 @@ def parse_family_and_type(prod_text):
             clean = clean[:-len(s)]
             
     return clean.strip(" -_"), r_type
-
-def find_column(df, patterns):
-    cols_map = {str(c).strip().lower().replace(" ", "").replace("#", "").replace("_", ""): c for c in df.columns}
-    for pattern in patterns:
-        norm_p = pattern.lower().replace(" ", "").replace("#", "").replace("_", "")
-        if norm_p in cols_map:
-            return cols_map[norm_p]
-        for normalized_target, original_col in cols_map.items():
-            if norm_p in normalized_target or normalized_target in norm_p:
-                return original_col
-    return None
 
 def clean_nan(value):
     try:
@@ -121,7 +129,7 @@ def load_excel_sheets(url):
         return {}
 
 # =========================================================
-# CORE BACKGROUND DATA REFRESH LOGIC
+# CORE BACKGROUND DATA REFRESH LOGIC (FLAT & RAW)
 # =========================================================
 def process_tbe_data():
     global MASTER_CACHE, LAST_REFRESH, IS_UPDATING, INITIALIZED
@@ -129,7 +137,7 @@ def process_tbe_data():
         return
     
     IS_UPDATING = True
-    print(f"🔄 [{datetime.now().strftime('%H:%M:%S')}] Running Flat Row TBE Pipeline...")
+    print(f"🔄 [{datetime.now().strftime('%H:%M:%S')}] Running Direct Flat Row TBE Pipeline...")
 
     try:
         from settings import settings
@@ -145,7 +153,7 @@ def process_tbe_data():
             if df.empty or sheet_name in ['Pivot Table 1', 'Pivot Table 2', 'PIC List', 'List']: 
                 continue
             
-            c_col = find_column(df, ["ch", "channel", "channelno", "channelnum", "chref", "machineno", "line", "mo"])
+            c_col = find_column(df, ["channel", "channelno", "channelnum", "ch", "chref", "machineno", "line", "mo"])
             type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "itemdescription", "desc", "family"])
             d_col = find_column(df, ["date", "day", "txndate", "timestamp"])
             
@@ -177,14 +185,14 @@ def process_tbe_data():
         df_ch_prod = pd.DataFrame(channel_production_records)
 
         # ---------------------------------------------------------
-        # STEP 2: PARSE TRANSIT BUFFER RECORDS (KEEP ALL ROWS FLAT)
+        # STEP 2: PARSE TRANSIT BUFFER RECORDS (1:1 UNTOUCHED ROWS)
         # ---------------------------------------------------------
         raw_ring_data = []
         for sheet_name, df in ring_wt_sheets.items():
             if df.empty: 
                 continue
             
-            c_col = find_column(df, ["ch", "channel", "channelno", "channelnum", "chref", "machineno", "mo", "line"])
+            c_col = find_column(df, ["channel", "channelno", "channelnum", "ch", "chref", "machineno", "mo", "line"])
             f_col = find_column(df, ["type", "variant", "product", "item", "itemdescription", "desc", "family", "part"])
             q_col = find_column(df, ["noofrings", "quantity", "qty", "rings", "totalqtyrecd", "recdqty", "production", "total"])
             d_col = find_column(df, ["date", "day", "txndate", "timestamp"])
@@ -210,13 +218,13 @@ def process_tbe_data():
 
         df_rings = pd.DataFrame(raw_ring_data)
         if df_rings.empty:
-            print("⚠️ Pipeline Warning: No records found in Transit Buffer.")
+            print("⚠️ Pipeline Warning: No valid items extracted from Transit Buffer.")
             MASTER_CACHE = []
             LAST_REFRESH = datetime.now()
             return
 
         # ---------------------------------------------------------
-        # STEP 3: MAP PRODUCTION DIRECTLY TO EACH TRANSIT BUFFER ROW
+        # STEP 3: DIRECT 1:1 MAP PRODUCTION TO TRANSIT ROWS
         # ---------------------------------------------------------
         compiled_summary = []
         
@@ -231,11 +239,16 @@ def process_tbe_data():
             ch_min_date = None
             ch_max_date = None
             
-            # Look for production matches on the same channel, variant, and exact date
+            # Grab production on the same channel/variant within ±7 days of this record to catch shift latencies
             if not df_ch_prod.empty:
-                mask = (df_ch_prod["ch"] == ch) & (df_ch_prod["fam"] == fam) & (df_ch_prod["date"] == dt)
+                mask = (df_ch_prod["ch"] == ch) & (df_ch_prod["fam"] == fam)
                 matched_prod = df_ch_prod[mask]
                 
+                if not matched_prod.empty and dt:
+                    date_mask = (matched_prod["date"] >= (dt - pd.Timedelta(days=7))) & \
+                                (matched_prod["date"] <= (dt + pd.Timedelta(days=7)))
+                    matched_prod = matched_prod[date_mask]
+                    
                 if not matched_prod.empty:
                     ch_qty = matched_prod["qty"].sum()
                     ch_min_date = matched_prod["date"].min()
@@ -262,11 +275,10 @@ def process_tbe_data():
                 "status": calc_status
             })
 
-        # Keep everything neatly sorted by channel, item variant, and chronological date
         compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"], x["sho_in"]))
         MASTER_CACHE = compiled_summary
         LAST_REFRESH = datetime.now()
-        print(f"✅ [Engine Complete] Successfully processed {len(MASTER_CACHE)} un-grouped flat rows.")
+        print(f"✅ [Engine Complete] Successfully processed {len(MASTER_CACHE)} raw flat rows.")
 
     except Exception as e:
         print(f"❌ CRITICAL RUNTIME EXCEPTION IN LIVE AGGREGATION: {str(e)}")

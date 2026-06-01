@@ -5,59 +5,63 @@ import io
 import threading
 import time
 import warnings
+import math
 from datetime import datetime
 from settings import settings
 
-# =========================================================
-# GLOBAL CONFIG & WARNING SUPPRESSION
-# =========================================================
 router = APIRouter()
 
+# =========================================================
+# GLOBAL CACHE & THREADING CONFIG
+# =========================================================
 MASTER_CACHE = []
 LAST_REFRESH = None
 IS_UPDATING = False
 CACHE_DURATION_MINUTES = 5
 
-# Suppress harmless openpyxl styling warnings from ERP exports
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # =========================================================
-# FUZZY MATCHING & DATA CLEANING HELPERS
+# SECURITY, CLEANING & PARSING HELPERS (From Traceability)
 # =========================================================
-def find_column(df, patterns):
-    for col in df.columns:
-        col_clean = str(col).strip().lower()
-        for pattern in patterns:
-            if pattern in col_clean:
-                return col
-    return None
-
-def fix_excel_headers(df):
-    """Scans the first 15 rows to bypass titles and find actual table headers."""
-    # Check if headers are already correct
-    if find_column(df, ["type", "variant", "bearing family"]) and find_column(df, ["ch#", "channel", "chan", "ch"]):
-        return df
-        
-    # Scan down to find the real header row
-    for i in range(min(15, len(df))):
-        row_str = " ".join([str(val).lower() for val in df.iloc[i].values if pd.notna(val)])
-        if "type" in row_str and ("ch#" in row_str or "ch" in row_str or "chan" in row_str):
-            new_header = df.iloc[i].astype(str).str.strip().str.lower()
-            df = df.iloc[i+1:].reset_index(drop=True)
-            df.columns = new_header
-            return df
-            
-    return df
-
 def clean_mo(value):
-    if pd.isna(value): return ""
-    val = str(value).strip().upper().replace(" ", "").split('.')[0]
-    if val in ["NAN", "-", "...", ""] or len(val) < 4: return ""
+    if pd.isna(value):
+        return None
+    val = str(value).strip().upper().replace(" ", "").replace(".0", "")
+    if val in ["NAN", "-", "...", ""] or len(val) < 4:
+        return None
     return val
 
 def normalize_text(value):
-    if pd.isna(value): return ""
-    return str(value).strip().upper()
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+def clean_nan(value):
+    """Aggressive NaN cleaner to prevent frontend JSON crashes."""
+    try:
+        if pd.isna(value) or str(value).strip().lower() in ['nan', '-', '...', '']:
+            return 0.0
+        f_val = float(value)
+        if math.isnan(f_val):
+            return 0.0
+        return f_val
+    except:
+        return 0.0
+
+def parse_date_safe(value):
+    """Safely parses dates and ensures NaT does not break JSON."""
+    try:
+        if pd.isna(value) or str(value).strip().lower() in ["nan", "nat", "", "-"]:
+            return None
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            parsed = pd.to_datetime(value, errors='coerce', dayfirst=True)
+        if pd.isna(parsed):
+            return None
+        return parsed.date()
+    except:
+        return None
 
 def normalize_channel(value):
     if pd.isna(value): return ""
@@ -68,37 +72,12 @@ def normalize_channel(value):
     val_str = val_str.lstrip("0")
     return val_str if val_str else "0"
 
-def clean_nan(value):
-    try:
-        if pd.isna(value) or str(value).strip().lower() in ['nan', '-', '...', '']: 
-            return 0.0
-        return float(value)
-    except:
-        return 0.0
-
-def parse_date_safe(value):
-    try:
-        if pd.isna(value) or str(value).strip().lower() in ["nan", "nat", "", "-"]: 
-            return None
-        # Suppress the mixed-date warnings; prioritize DD/MM/YYYY
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=UserWarning)
-            parsed = pd.to_datetime(value, errors='coerce', dayfirst=True)
-        if pd.isna(parsed): return None
-        return parsed.date()
-    except:
-        return None
-
 def parse_family_and_type(prod_text):
-    text = normalize_text(prod_text)
+    text = normalize_text(prod_text).upper()
     if not text: 
         return "UNKNOWN_FAMILY", "Assembly"
         
-    component = "Assembly"
-    if "IM" in text or "IR" in text:
-        component = "IM"
-    elif "OM" in text or "OR" in text:
-        component = "OM"
+    component = "IM" if "IM" in text or "IR" in text else ("OM" if "OM" in text or "OR" in text else "Assembly")
         
     clean = text
     for pfx in ["IM-", "OM-", "IR-", "OR-", "IM", "OM", "IR", "OR"]:
@@ -113,13 +92,39 @@ def parse_family_and_type(prod_text):
     clean = clean.strip(" -_")
     return (clean if clean else text), component
 
+def find_column(df, patterns):
+    for col in df.columns:
+        col_clean = str(col).strip().lower()
+        for pattern in patterns:
+            if pattern in col_clean:
+                return col
+    return None
+
+def fix_excel_headers(df):
+    """Scans rows to bypass titles and find actual table headers."""
+    if find_column(df, ["type", "variant", "bearing family"]) and find_column(df, ["ch#", "channel", "chan", "ch"]):
+        return df
+    
+    for i in range(min(15, len(df))):
+        row_str = " ".join([str(val).lower() for val in df.iloc[i].values if pd.notna(val)])
+        if "type" in row_str and ("ch#" in row_str or "ch" in row_str or "chan" in row_str):
+            new_header = df.iloc[i].astype(str).str.strip().str.lower()
+            df = df.iloc[i+1:].reset_index(drop=True)
+            df.columns = new_header
+            return df
+    return df
+
+# =========================================================
+# FILE DOWNLOAD LOGIC (From Traceability + Diagnostics)
+# =========================================================
 def download_excel(url):
     response = requests.get(url)
-    if response.status_code != 200: 
-        raise Exception(f"Failed downloading excel from {url}")
+    if response.status_code != 200:
+        raise Exception(f"Failed HTTP {response.status_code} downloading excel from {url}")
     return io.BytesIO(response.content)
 
 def load_excel_sheets(url):
+    print(f"Attempting to load: {url}")
     try:
         excel_data = download_excel(url)
         xls = pd.ExcelFile(excel_data)
@@ -129,10 +134,12 @@ def load_excel_sheets(url):
                 df = pd.read_excel(xls, sheet_name=sheet)
                 df.columns = [str(c).strip().lower() for c in df.columns]
                 sheets[sheet] = df
-            except:
-                pass
+            except Exception as e:
+                print(f"⚠️ Error reading sheet [{sheet}]: {str(e)}")
+        print(f"✅ SUCCESS: Loaded {len(sheets)} sheets from {url}")
         return sheets
-    except:
+    except Exception as e:
+        print(f"❌ CRITICAL DOWNLOAD FAILURE for {url}: {str(e)}")
         return {}
 
 # =========================================================
@@ -141,16 +148,29 @@ def load_excel_sheets(url):
 def process_tbe_data():
     global MASTER_CACHE, LAST_REFRESH, IS_UPDATING
     
-    if IS_UPDATING: return
+    if IS_UPDATING:
+        return
+    
     IS_UPDATING = True
-    print(f"[{datetime.now()}] STARTING TBE DATA SYNCHRONIZATION...")
+    print(f"[{datetime.now()}] STARTING TBE EXCEL CACHE REFRESH...")
 
     try:
-        # Load Sheets using settings
         mo_sheets = load_excel_sheets(settings.MO_DATA_URL)
         ring_wt_sheets = load_excel_sheets(settings.RINGWT_TRANSITBUFFER_URL)
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
         dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
+
+        # DIAGNOSTIC CHECK
+        print("\n--- DIAGNOSTIC DATA CHECK ---")
+        print(f"MO Sheets Found: {bool(mo_sheets)}")
+        print(f"Ring Wt Sheets Found: {bool(ring_wt_sheets)}")
+        print(f"TRB Sheets Found: {bool(trb_sheets)}")
+        print(f"DGBB Sheets Found: {bool(dgbb_sheets)}")
+        print("-----------------------------\n")
+
+        if not ring_wt_sheets:
+            print("🚨 ABORTING TBE PARSE: ring_wt_sheets failed to download or parse. Cannot build matrix.")
+            return
 
         # ---------------------------------------------------------
         # 1. PARSE CHANNELS (TRB & DGBB MASTER DATA)
@@ -174,7 +194,7 @@ def process_tbe_data():
                 channel_num = normalize_channel(row.get(ch_col))
                 prod_str = row.get(type_col)
                 family, _ = parse_family_and_type(prod_str)
-                if not channel_num or not family: continue
+                if not channel_num or not family or family == "UNKNOWN_FAMILY": continue
 
                 cumulative = clean_nan(row.get(cum_col)) if cum_col else 0.0
                 production = clean_nan(row.get(prod_col)) if prod_col else 0.0
@@ -233,7 +253,7 @@ def process_tbe_data():
                 channel_num = normalize_channel(row.get(ch_col))
                 prod_str = row.get(type_col)
                 family, comp_type = parse_family_and_type(prod_str)
-                if not channel_num or not family: continue
+                if not channel_num or not family or family == "UNKNOWN_FAMILY": continue
 
                 qty = clean_nan(row.get(qty_col)) if qty_col else 0.0
                 date_val = parse_date_safe(row.get(date_col)) if date_col else None
@@ -288,10 +308,11 @@ def process_tbe_data():
         print(f"[{datetime.now()}] SUCCESS: TBE MATRIX SYNCHRONIZED. ROWS PROCESSED: {len(MASTER_CACHE)}")
 
     except Exception as e:
-        print(f"CRITICAL TRANSIT BLOCK DATA PARSER ERROR: {str(e)}")
+        print(f"CRITICAL TBE DATA THREAD ERROR: {str(e)}")
     finally:
         IS_UPDATING = False
 
+# Background Daemon initialization
 def background_refresh_loop():
     process_tbe_data()
     while True:
@@ -301,6 +322,9 @@ def background_refresh_loop():
 t = threading.Thread(target=background_refresh_loop, daemon=True)
 t.start()
 
+# =========================================================
+# ROUTER API SERVICE ENDPOINTS
+# =========================================================
 @router.get("/tbe_all_mos")
 def get_tbe_data():
     if not LAST_REFRESH and not MASTER_CACHE:
@@ -311,5 +335,6 @@ def get_tbe_data():
         }
     return {
         "status": "success",
+        "last_updated": str(LAST_REFRESH),
         "data": MASTER_CACHE
     }

@@ -15,7 +15,7 @@ const TBE = () => {
   useEffect(() => {
     fetchTBEDashboard();
     
-    // Cleanup any lingering timers on unmount
+    // Cleanup any lingering timers on unmount to prevent memory leaks
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
@@ -87,12 +87,10 @@ const TBE = () => {
   const getChannelRowSpan = (dataArray, currentIndex) => {
     const currentMo = dataArray[currentIndex].mo_number;
     const currentFamily = dataArray[currentIndex].product_variant;
-    const currentChannel = dataArray[currentIndex].channel_ref;
-    
+    // Assuming channel blocks are grouped by MO + Family
     if (currentIndex > 0 && 
         dataArray[currentIndex - 1].mo_number === currentMo &&
-        dataArray[currentIndex - 1].product_variant === currentFamily &&
-        dataArray[currentIndex - 1].channel_ref === currentChannel) {
+        dataArray[currentIndex - 1].product_variant === currentFamily) {
       return 0; 
     }
     
@@ -100,8 +98,7 @@ const TBE = () => {
     while (
       currentIndex + span < dataArray.length && 
       dataArray[currentIndex + span].mo_number === currentMo &&
-      dataArray[currentIndex + span].product_variant === currentFamily &&
-      dataArray[currentIndex + span].channel_ref === currentChannel
+      dataArray[currentIndex + span].product_variant === currentFamily
     ) {
       span++;
     }

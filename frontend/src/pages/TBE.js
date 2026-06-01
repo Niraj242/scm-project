@@ -63,7 +63,7 @@ const TBE = () => {
     return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
   });
 
-  // 3. Grid Row Span Calculations: Primary Channel Axis
+  // 3. Grid Row Span Calculations: Primary Channel Axis (Keeps the UI visually clean)
   const getChannelRowSpan = (dataArray, currentIndex) => {
     const currentRef = dataArray[currentIndex].channel_ref;
     if (!currentRef) return 1;
@@ -72,28 +72,6 @@ const TBE = () => {
     }
     let span = 1;
     while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef) {
-      span++;
-    }
-    return span;
-  };
-
-  // 4. Grid Row Span Calculations: Merged Structural Quantities Column Blocks
-  const getChannelBlockRowSpan = (dataArray, currentIndex) => {
-    const currentRef = dataArray[currentIndex].channel_ref;
-    const currentFamily = dataArray[currentIndex].product_variant;
-    
-    if (currentIndex > 0 && 
-        dataArray[currentIndex - 1].channel_ref === currentRef &&
-        dataArray[currentIndex - 1].product_variant === currentFamily) {
-      return 0; 
-    }
-    
-    let span = 1;
-    while (
-      currentIndex + span < dataArray.length && 
-      dataArray[currentIndex + span].channel_ref === currentRef &&
-      dataArray[currentIndex + span].product_variant === currentFamily
-    ) {
       span++;
     }
     return span;
@@ -161,11 +139,11 @@ const TBE = () => {
             <tbody>
               {sortedSummary.map((row, idx) => {
                 const channelSpan = getChannelRowSpan(sortedSummary, idx);
-                const channelBlockSpan = getChannelBlockRowSpan(sortedSummary, idx);
                 const uniqueKey = `${row.channel_ref || 'b'}-${row.product_variant || 'b'}-${row.ring_type || 'b'}-${idx}`;
                 
                 return (
                   <tr key={uniqueKey} className="data-row">
+                    {/* Only the Channel name spans multiple rows now */}
                     {channelSpan > 0 && (
                       <td rowSpan={channelSpan} className="merged-mo-cell fw-bold">
                         {row.channel_ref || '-'}
@@ -175,23 +153,21 @@ const TBE = () => {
                     <td className="fw-bold text-primary">{row.product_variant}</td>
                     <td className="fw-bold">{row.ring_type}</td>
                     
-                    <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
+                    <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
                     <td>{row.sho_in || '-'}</td>
                     
-                    <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
+                    <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
                     <td>{row.tb_out || '-'}</td>
                     
-                    {channelBlockSpan > 0 && (
-                      <>
-                        <td rowSpan={channelBlockSpan} className="merged-channel-cell fw-bold">
-                          {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
-                        </td>
-                        <td rowSpan={channelBlockSpan} className="merged-channel-cell">{row.ch_in || '-'}</td>
-                        <td rowSpan={channelBlockSpan} className="merged-channel-cell">{row.ch_out || '-'}</td>
-                      </>
-                    )}
+                    {/* Channel quantities are now mapped line-by-line so IM/OM totals don't get hidden */}
+                    <td className="merged-channel-cell fw-bold text-success">
+                      {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
+                    </td>
+                    <td className="merged-channel-cell">{row.ch_in || '-'}</td>
+                    <td className="merged-channel-cell">{row.ch_out || '-'}</td>
                     
                     <td>
+                      {/* Dynamically generates classes like: "channel-only", "completed", "in-process" */}
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
                         {row.status || 'In Process'}
                       </span>

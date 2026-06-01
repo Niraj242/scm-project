@@ -116,37 +116,34 @@ def fix_excel_headers(df):
 # SAFELINK DOWNLOAD LOGIC WITH TIMEOUTS
 # =========================================================
 def download_excel(url):
-    # Spoof a real browser to bypass Google's automated anti-bot/scraping filters
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Cache-Control": "no-cache"
     }
     
-    print(f"🔄 Requesting workbook download from destination: {url}")
-    
-    # Keeping the 90-second timeout for the large 22MB compilation step
     response = requests.get(url, headers=headers, timeout=90)
     
     if response.status_code != 200:
+        # DIAGNOSTIC: Print out the firewall's response to see what company filter is blocking you
+        print(f"🚨 FIREWALL INTERCEPTED REQUEST! Status Code: {response.status_code}")
+        print(f"Server Response Snippet: {response.text[:500]}")
         raise Exception(f"HTTP {response.status_code}")
         
     return io.BytesIO(response.content)
 
-
 def load_csv_or_excel(url):
-    print(f"🔄 Requesting workbook download from destination: {url}")
     try:
-        # Re-using the browser-spoofed download function
         excel_data = download_excel(url)
         
-        # If the URL targets a raw CSV stream, process it instantly
-        if "format=csv" in url:
+        # Process the raw "Publish to Web" CSV stream
+        if "output=csv" in url or "format=csv" in url:
             df = pd.read_csv(excel_data)
             df.columns = [str(c).strip().lower() for c in df.columns]
-            print("✅ Raw CSV data stream parsed successfully.")
-            return {"Sheet1": df} # Wrap in dict to preserve downstream loop structure
+            print("✅ Published Web CSV data stream extracted successfully.")
+            return {"Sheet1": df} 
             
-        # Fallback for standard Excel workbooks
+        # Fallback for standard Excel URLs
         xls = pd.ExcelFile(excel_data)
         sheets = {}
         for sheet in xls.sheet_names:
@@ -157,6 +154,7 @@ def load_csv_or_excel(url):
     except Exception as e:
         print(f"❌ CRITICAL DOWNLOAD FAILURE: {str(e)}")
         return {}
+
 
 
 # =========================================================

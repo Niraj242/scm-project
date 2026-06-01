@@ -117,7 +117,7 @@ def fix_excel_headers(df):
 # =========================================================
 def download_excel(url):
     # Added explicit 15-second timeout to prevent terminal hanging
-    response = requests.get(url, timeout=15)
+    response = requests.get(url, timeout=90)
     if response.status_code != 200:
         raise Exception(f"HTTP {response.status_code}")
     return io.BytesIO(response.content)

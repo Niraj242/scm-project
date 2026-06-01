@@ -1,11 +1,9 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 import pandas as pd
 import requests
 import io
 import threading
 import time
-import re
-import math
 import warnings
 from datetime import datetime
 from settings import settings
@@ -24,19 +22,32 @@ CACHE_DURATION_MINUTES = 5
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # =========================================================
-# FUZZY MATCHING & ULTRA-SAFE CLEANING HELPERS
+# FUZZY MATCHING & DATA CLEANING HELPERS
 # =========================================================
 def find_column(df, patterns):
-    """
-    Fuzzy searches dataframe columns for loose keyword matches.
-    Prevents crashing/skipping if headers have minor label updates.
-    """
     for col in df.columns:
         col_clean = str(col).strip().lower()
         for pattern in patterns:
             if pattern in col_clean:
                 return col
     return None
+
+def fix_excel_headers(df):
+    """Scans the first 15 rows to bypass titles and find actual table headers."""
+    # Check if headers are already correct
+    if find_column(df, ["type", "variant", "bearing family"]) and find_column(df, ["ch#", "channel", "chan", "ch"]):
+        return df
+        
+    # Scan down to find the real header row
+    for i in range(min(15, len(df))):
+        row_str = " ".join([str(val).lower() for val in df.iloc[i].values if pd.notna(val)])
+        if "type" in row_str and ("ch#" in row_str or "ch" in row_str or "chan" in row_str):
+            new_header = df.iloc[i].astype(str).str.strip().str.lower()
+            df = df.iloc[i+1:].reset_index(drop=True)
+            df.columns = new_header
+            return df
+            
+    return df
 
 def clean_mo(value):
     if pd.isna(value): return ""
@@ -49,21 +60,11 @@ def normalize_text(value):
     return str(value).strip().upper()
 
 def normalize_channel(value):
-    """
-    Forces channel names into clean alphanumeric strings.
-    Strips 'CH-' prefixes (e.g., 'CH-03' -> '3') and converts floats ('4.0' -> '4').
-    """
     if pd.isna(value): return ""
     val_str = str(value).strip().upper()
-    
-    # Strip text prefixes to isolate the raw number
     val_str = val_str.replace("CH-", "").replace("CH", "").replace("-", "").strip()
-    
-    # Strip decimals if interpreted as a float
     if val_str.endswith(".0"):
         val_str = val_str[:-2]
-        
-    # Strip leading zeros (e.g., '03' -> '3') to ensure uniform join alignment
     val_str = val_str.lstrip("0")
     return val_str if val_str else "0"
 
@@ -79,22 +80,16 @@ def parse_date_safe(value):
     try:
         if pd.isna(value) or str(value).strip().lower() in ["nan", "nat", "", "-"]: 
             return None
-            
         # Suppress the mixed-date warnings; prioritize DD/MM/YYYY
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=UserWarning)
             parsed = pd.to_datetime(value, errors='coerce', dayfirst=True)
-            
         if pd.isna(parsed): return None
         return parsed.date()
     except:
         return None
 
 def parse_family_and_type(prod_text):
-    """
-    Isolates exact bearing family name from the component text.
-    Handles prefixes and suffixes safely without corrupting base model strings.
-    """
     text = normalize_text(prod_text)
     if not text: 
         return "UNKNOWN_FAMILY", "Assembly"
@@ -106,7 +101,6 @@ def parse_family_and_type(prod_text):
         component = "OM"
         
     clean = text
-    # Strip component structural markers cleanly from boundary targets
     for pfx in ["IM-", "OM-", "IR-", "OR-", "IM", "OM", "IR", "OR"]:
         if clean.startswith(pfx):
             clean = clean[len(pfx):]
@@ -149,10 +143,10 @@ def process_tbe_data():
     
     if IS_UPDATING: return
     IS_UPDATING = True
-    print(f"[{datetime.now()}] STARTING TBE FUZZY-MATCH ENGAGEMENT ENGINE...")
+    print(f"[{datetime.now()}] STARTING TBE DATA SYNCHRONIZATION...")
 
     try:
-        # Load Sheets (Updated Variable Name)
+        # Load Sheets using settings
         mo_sheets = load_excel_sheets(settings.MO_DATA_URL)
         ring_wt_sheets = load_excel_sheets(settings.RINGWT_TRANSITBUFFER_URL)
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
@@ -165,7 +159,8 @@ def process_tbe_data():
         channel_data = {}
 
         for sheet_name, df in all_channels.items():
-            # Added exact targets based on sample data
+            df = fix_excel_headers(df)
+            
             ch_col = find_column(df, ["ch# no", "ch#", "channel_no", "channel grouping", "channel", "chan", "ch"])
             type_col = find_column(df, ["type", "bearing family", "product", "variant", "item", "family"])
             
@@ -203,6 +198,8 @@ def process_tbe_data():
         # ---------------------------------------------------------
         mo_dict = {}
         for sheet_name, df in mo_sheets.items():
+            df = fix_excel_headers(df)
+            
             mo_col = find_column(df, ["mo#", "mo number", "mo_num", "mo"])
             prod_col = find_column(df, ["finalvariant", "product", "variant", "type", "item"])
             qty_col = find_column(df, ["qty req", "target qty", "quantity", "qty"])
@@ -223,7 +220,8 @@ def process_tbe_data():
         ring_wt_aggregated = {}
         
         for sheet_name, df in ring_wt_sheets.items():
-            # Added exact targets based on sample data
+            df = fix_excel_headers(df)
+            
             ch_col = find_column(df, ["ch# no", "ch#", "channel_no", "channel grouping", "channel", "chan", "ch"])
             type_col = find_column(df, ["type", "bearing family", "product", "variant", "item", "family"])
             qty_col = find_column(df, ["qty", "quantity", "no of rings", "net wt"])
@@ -262,9 +260,9 @@ def process_tbe_data():
             mo_info = mo_dict.get(family, {"mo": "", "target": 0.0})
             
             calc_status = "In Process"
-            if ch_info["max_cum"] and ch_info["max_cum"] >= rw_data["qty"] and rw_data["qty"] > 0:
+            if ch_info["max_cum"] is not None and ch_info["max_cum"] >= rw_data["qty"] and rw_data["qty"] > 0:
                 calc_status = "Completed"
-            elif rw_data["qty"] == 0 and not ch_info["max_cum"]:
+            elif rw_data["qty"] == 0 and ch_info["max_cum"] in (None, 0):
                 calc_status = "Yet to Start"
 
             compiled_summary.append({
@@ -283,7 +281,6 @@ def process_tbe_data():
                 "channel_ref": channel_num
             })
 
-        # Final Sort Arrangement
         compiled_summary.sort(key=lambda x: (x["mo_number"], x["product_variant"], x["ring_type"]))
         
         MASTER_CACHE = compiled_summary

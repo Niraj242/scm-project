@@ -116,11 +116,22 @@ def fix_excel_headers(df):
 # SAFELINK DOWNLOAD LOGIC WITH TIMEOUTS
 # =========================================================
 def download_excel(url):
-    # Added explicit 15-second timeout to prevent terminal hanging
-    response = requests.get(url, timeout=90)
+    # Spoof a real browser to bypass Google's automated anti-bot/scraping filters
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+    }
+    
+    print(f"🔄 Requesting workbook download from destination: {url}")
+    
+    # Keeping the 90-second timeout for the large 22MB compilation step
+    response = requests.get(url, headers=headers, timeout=90)
+    
     if response.status_code != 200:
         raise Exception(f"HTTP {response.status_code}")
+        
     return io.BytesIO(response.content)
+
 
 def load_excel_sheets(url):
     print(f"🔄 Requesting workbook download from destination: {url}")

@@ -25,6 +25,12 @@ warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 # =========================================================
 # CLEANING & PARSING HELPERS
 # =========================================================
+def extract_val(row, col):
+    """Ensures we always get a single scalar value, preventing ambiguous Series errors."""
+    if not col: return None
+    val = row.get(col)
+    return val.iloc[0] if isinstance(val, pd.Series) else val
+
 def clean_mo(value):
     if pd.isna(value):
         return None
@@ -101,7 +107,7 @@ def find_column(df, patterns):
 
 def fix_excel_headers(df):
     if find_column(df, ["type", "variant", "bearing family"]) and find_column(df, ["ch#", "channel", "chan", "ch"]):
-        return df
+        return df.loc[:, ~df.columns.duplicated()]
     
     for i in range(min(15, len(df))):
         row_str = " ".join([str(val).lower() for val in df.iloc[i].values if pd.notna(val)])
@@ -109,8 +115,8 @@ def fix_excel_headers(df):
             new_header = df.iloc[i].astype(str).str.strip().str.lower()
             df = df.iloc[i+1:].reset_index(drop=True)
             df.columns = new_header
-            return df
-    return df
+            return df.loc[:, ~df.columns.duplicated()]
+    return df.loc[:, ~df.columns.duplicated()]
 
 # =========================================================
 # NETWORK EXTRACTION (WITH BROWSER SPOOFING & TIMEOUTS)
@@ -140,6 +146,7 @@ def load_excel_sheets(url):
         if "output=csv" in url or "format=csv" in url:
             df = pd.read_csv(excel_data)
             df.columns = [str(c).strip().lower() for c in df.columns]
+            df = df.loc[:, ~df.columns.duplicated()]
             print("✅ Web CSV data stream extracted successfully.")
             return {"Sheet1": df} 
             
@@ -150,6 +157,7 @@ def load_excel_sheets(url):
             try:
                 df = pd.read_excel(xls, sheet_name=sheet)
                 df.columns = [str(c).strip().lower() for c in df.columns]
+                df = df.loc[:, ~df.columns.duplicated()]
                 sheets[sheet] = df
             except Exception as e:
                 print(f"⚠️ Error parsing sheet [{sheet}]: {str(e)}")
@@ -208,14 +216,14 @@ def process_tbe_data():
             date_col = find_column(df, ["date"])
 
             for _, row in df.iterrows():
-                channel_num = normalize_channel(row.get(ch_col))
-                prod_str = row.get(type_col)
+                channel_num = normalize_channel(extract_val(row, ch_col))
+                prod_str = extract_val(row, type_col)
                 family, _ = parse_family_and_type(prod_str)
                 if not channel_num or not family or family == "UNKNOWN_FAMILY": continue
 
-                cumulative = clean_nan(row.get(cum_col)) if cum_col else 0.0
-                production = clean_nan(row.get(prod_col)) if prod_col else 0.0
-                date_val = parse_date_safe(row.get(date_col)) if date_col else None
+                cumulative = clean_nan(extract_val(row, cum_col)) if cum_col else 0.0
+                production = clean_nan(extract_val(row, prod_col)) if prod_col else 0.0
+                date_val = parse_date_safe(extract_val(row, date_col)) if date_col else None
 
                 c_key = (channel_num, family)
                 if c_key not in channel_data:
@@ -243,10 +251,10 @@ def process_tbe_data():
             if not mo_col or not prod_col: continue
 
             for _, row in df.iterrows():
-                mo_num = clean_mo(row.get(mo_col))
-                prod_val = row.get(prod_col)
+                mo_num = clean_mo(extract_val(row, mo_col))
+                prod_val = extract_val(row, prod_col)
                 family, _ = parse_family_and_type(prod_val)
-                target = clean_nan(row.get(qty_col)) if qty_col else 0.0
+                target = clean_nan(extract_val(row, qty_col)) if qty_col else 0.0
                 
                 if family and mo_num:
                     mo_dict[family] = {"mo": mo_num, "target": target}
@@ -267,13 +275,13 @@ def process_tbe_data():
             if not ch_col or not type_col: continue
             
             for _, row in df.iterrows():
-                channel_num = normalize_channel(row.get(ch_col))
-                prod_str = row.get(type_col)
+                channel_num = normalize_channel(extract_val(row, ch_col))
+                prod_str = extract_val(row, type_col)
                 family, comp_type = parse_family_and_type(prod_str)
                 if not channel_num or not family or family == "UNKNOWN_FAMILY": continue
 
-                qty = clean_nan(row.get(qty_col)) if qty_col else 0.0
-                date_val = parse_date_safe(row.get(date_col)) if date_col else None
+                qty = clean_nan(extract_val(row, qty_col)) if qty_col else 0.0
+                date_val = parse_date_safe(extract_val(row, date_col)) if date_col else None
 
                 r_key = (channel_num, family, comp_type)
                 if r_key not in ring_wt_aggregated:

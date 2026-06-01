@@ -4,7 +4,6 @@ import requests
 import io
 import threading
 import time
-import math
 import re
 from datetime import datetime
 
@@ -18,14 +17,15 @@ CACHE_DURATION_MINUTES = 5
 
 def repair_sheet_headers(df):
     if df.empty: return df
-    targets = {"mo", "ch", "type", "qty", "quantity", "rings", "date", "channel", "production", "weight", "item", "line", "part"}
+    # Expanded to catch more potential column names in the Transit sheet
+    targets = {"mo", "ch", "type", "qty", "quantity", "rings", "date", "channel", "production", "weight", "item", "line", "part", "model", "brg"}
     current_cols = [str(c).strip().lower().replace(" ", "") for c in df.columns]
     
     if sum(1 for t in targets if any(t in c for c in current_cols)) >= 2:
         if not any("unnamed:" in str(c).lower() for c in df.columns[:2]):
             return df
             
-    for idx in range(min(10, len(df))):
+    for idx in range(min(15, len(df))): # Look deeper for headers
         row_vals = [str(val).strip().lower().replace(" ", "") for val in df.iloc[idx].dropna()]
         match_count = sum(1 for t in targets if any(t in v for v in row_vals))
         
@@ -63,33 +63,24 @@ def normalize_channel(value):
     cleaned = val_str.lstrip("0")
     return cleaned if cleaned else "0"
 
-def parse_family_and_type(prod_text):
+def parse_family(prod_text):
     text = str(prod_text).strip().upper()
-    if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN", "Assembly"
+    if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN"
     
-    # Identify IM/OM
-    r_type = "IM" if any(x in text for x in ["IM", "IR"]) else ("OM" if any(x in text for x in ["OM", "OR"]) else "Assembly")
-    
-    # EXACT REGEX EXTRACTOR FOR BEARING FAMILY (Solves the 6310-22/VA3871/C3 F7 grouping issue)
-    # This searches the string for a block of 3 to 5 digits and makes that the absolute family name.
+    # Strictly extracts the 3 to 5 digit bearing family (e.g. 6205, 6304)
     match = re.search(r'(\d{3,5})', text)
     if match:
-        base_family = match.group(1) # E.g., Extracts "6310" or "6312" from the mess
-    else:
-        # Fallback just in case there are no numbers at all
-        base_family = text.split()[0].split('-')[0]
-            
-    return base_family, r_type
+        return match.group(1)
+    return text.split()[0].split('-')[0]
 
 def clean_nan(value):
-    try:
-        if pd.isna(value): return 0.0
-        # Fixes the quantity math issue by stripping out commas in spreadsheet strings
-        val_str = str(value).replace(',', '').strip()
-        if val_str.lower() in ['nan', '-', '...', '']: return 0.0
-        return float(val_str)
-    except:
-        return 0.0
+    if pd.isna(value): return 0.0
+    val_str = str(value)
+    # BULLETPROOF NUMBER EXTRACTOR: Ignores text like "pcs", commas, etc.
+    match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val_str.replace(',', ''))
+    if match:
+        return float(match.group())
+    return 0.0
 
 def parse_date_safe(value):
     try:
@@ -107,7 +98,7 @@ def load_excel_sheets(url):
         xls = pd.ExcelFile(io.BytesIO(resp.content))
         return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
     except Exception as e:
-        print(f"⚠️ Sheet stream down: {str(e)}")
+        print(f"⚠️ Sheet stream error: {str(e)}")
         return {}
 
 def process_tbe_data():
@@ -126,7 +117,7 @@ def process_tbe_data():
             if df.empty or sheet_name in ['Pivot Table 1', 'Pivot Table 2', 'PIC List', 'List']: continue
             
             c_col = find_column(df, ["channel", "channelno", "machineno", "line", "mo", "ch"])
-            type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family"])
+            type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
             d_col = find_column(df, ["date", "day", "txndate"])
             prod_col = find_column(df, ["production", "prodqty", "shiftproduction", "qty", "cumulative"])
 
@@ -139,18 +130,19 @@ def process_tbe_data():
                 prod_str = str(row.get(type_col)).strip().upper()
                 if prod_str in ["", "NAN"]: continue
                 
-                base_family, r_type = parse_family_and_type(prod_str)
+                base_family = parse_family(prod_str)
                 qty = clean_nan(row.get(prod_col))
                 dt = parse_date_safe(row.get(d_col))
 
                 if qty > 0:
-                    ch_list.append({"ch": ch, "fam": base_family, "type": r_type, "qty": qty, "date": dt})
+                    ch_list.append({"ch": ch, "fam": base_family, "qty": qty, "date": dt})
 
-        df_ch_grouped = pd.DataFrame(ch_list).groupby(["ch", "fam", "type"]).agg(
+        # GROUP PURELY BY CHANNEL AND FAMILY NOW (No more IM/OM split)
+        df_ch_grouped = pd.DataFrame(ch_list).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
             ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
             ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
-        ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "type", "ch_qty", "ch_min_date", "ch_max_date"])
+        ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date"])
 
         # --- STEP 2: TRANSIT BUFFER (ringwt) ---
         tb_list = []
@@ -158,9 +150,9 @@ def process_tbe_data():
             if df.empty: continue
             
             c_col = find_column(df, ["channelref", "channel", "channelno", "machineno", "mo", "line", "ch"])
-            f_col = find_column(df, ["ringfamily", "family", "type", "variant", "product", "item", "desc", "part"])
+            f_col = find_column(df, ["ringfamily", "family", "type", "variant", "product", "item", "desc", "part", "model", "brg"])
             q_col = find_column(df, ["qty", "quantity", "noofrings", "rings", "totalqtyrecd", "recdqty"])
-            d_col = find_column(df, ["date", "indate", "outdate", "day", "txndate"])
+            d_col = find_column(df, ["date", "indate", "outdate", "day", "txndate", "dispatchdate"])
 
             if not f_col or not q_col: continue
 
@@ -171,18 +163,19 @@ def process_tbe_data():
                 prod_text = str(row.get(f_col)).strip().upper()
                 if prod_text in ["", "NAN"]: continue
                 
-                base_family, r_type = parse_family_and_type(prod_text)
+                base_family = parse_family(prod_text)
                 qty = clean_nan(row.get(q_col))
                 dt = parse_date_safe(row.get(d_col))
 
                 if qty > 0:
-                    tb_list.append({"ch": ch, "fam": base_family, "type": r_type, "qty": qty, "date": dt})
+                    tb_list.append({"ch": ch, "fam": base_family, "qty": qty, "date": dt})
 
-        df_tb_grouped = pd.DataFrame(tb_list).groupby(["ch", "fam", "type"]).agg(
+        # GROUP PURELY BY CHANNEL AND FAMILY
+        df_tb_grouped = pd.DataFrame(tb_list).groupby(["ch", "fam"]).agg(
             tb_qty=('qty', 'sum'),
             tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
             tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
-        ).reset_index() if tb_list else pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
+        ).reset_index() if tb_list else pd.DataFrame(columns=["ch", "fam", "tb_qty", "tb_min_date", "tb_max_date"])
 
         # --- STEP 3: OUTER JOIN ---
         if df_tb_grouped.empty and df_ch_grouped.empty:
@@ -190,11 +183,11 @@ def process_tbe_data():
             LAST_REFRESH = datetime.now()
             return
 
-        merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam", "type"], how="outer")
+        merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
         
         compiled_summary = []
         for _, row in merged.iterrows():
-            ch, fam, r_type = row["ch"], row["fam"], row["type"]
+            ch, fam = row["ch"], row["fam"]
             tb_qty, ch_qty = clean_nan(row.get("tb_qty")), clean_nan(row.get("ch_qty"))
             tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
             ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
@@ -207,7 +200,6 @@ def process_tbe_data():
             compiled_summary.append({
                 "channel_ref": ch,
                 "product_variant": fam,
-                "ring_type": r_type,
                 "sho_qty": tb_qty, 
                 "sho_in": str(tb_min) if pd.notna(tb_min) and tb_min else "-",
                 "tb_qty": tb_qty,
@@ -218,7 +210,8 @@ def process_tbe_data():
                 "status": calc_status
             })
 
-        compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
+        # Sort purely by channel then family
+        compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"]))
         MASTER_CACHE = compiled_summary
         LAST_REFRESH = datetime.now()
 

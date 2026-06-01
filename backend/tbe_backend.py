@@ -132,29 +132,30 @@ def download_excel(url):
         
     return io.BytesIO(response.content)
 
-def load_csv_or_excel(url):
+def load_excel_sheets(url):
+    # Kept the original name so your other sheets don't crash!
     try:
         excel_data = download_excel(url)
         
-        # Process the raw "Publish to Web" CSV stream
+        # Smart detection: Process if the URL targets a "Publish to Web" CSV stream
         if "output=csv" in url or "format=csv" in url:
             df = pd.read_csv(excel_data)
             df.columns = [str(c).strip().lower() for c in df.columns]
-            print("✅ Published Web CSV data stream extracted successfully.")
+            print("✅ CSV data stream extracted successfully.")
             return {"Sheet1": df} 
             
-        # Fallback for standard Excel URLs
+        # Standard processing for Excel workbooks
         xls = pd.ExcelFile(excel_data)
         sheets = {}
         for sheet in xls.sheet_names:
             df = pd.read_excel(xls, sheet_name=sheet)
             df.columns = [str(c).strip().lower() for c in df.columns]
             sheets[sheet] = df
+        print(f"✅ Workbook parsed successfully. Found {len(sheets)} sheets.")
         return sheets
     except Exception as e:
         print(f"❌ CRITICAL DOWNLOAD FAILURE: {str(e)}")
         return {}
-
 
 
 # =========================================================

@@ -52,7 +52,8 @@ const TBE = () => {
   const filteredSummary = summaryData.filter(item => {
     const matchesSearch = 
       (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
-      (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase()));
+      (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase())) ||
+      (item.mo_ref && String(item.mo_ref).toLowerCase().includes(search.toLowerCase()));
 
     let matchesDate = true;
     if (startDate || endDate) {
@@ -73,6 +74,7 @@ const TBE = () => {
     return matchesSearch && matchesDate;
   });
 
+  // Sort Logic: Channel -> Family -> Ring Type
   const sortedSummary = [...filteredSummary].sort((a, b) => {
     if (a.channel_ref !== b.channel_ref) {
       return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
@@ -83,6 +85,7 @@ const TBE = () => {
     return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
   });
 
+  // Span Calculation for Channel Column
   const getChannelRowSpan = (dataArray, currentIndex) => {
     const currentRef = dataArray[currentIndex].channel_ref;
     if (!currentRef) return 1;
@@ -94,6 +97,7 @@ const TBE = () => {
     return span;
   };
 
+  // Span Calculation for Family and MO Columns
   const getFamilyRowSpan = (dataArray, currentIndex) => {
     const currentRef = dataArray[currentIndex].channel_ref;
     const currentFam = dataArray[currentIndex].product_variant;
@@ -144,7 +148,7 @@ const TBE = () => {
           
           <input
             className="search-box"
-            placeholder="Search Channel or Ring Family..."
+            placeholder="Search Channel, MO, or Family..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             disabled={isInitializing}
@@ -168,7 +172,7 @@ const TBE = () => {
           <table className="trace-table">
             <thead>
               <tr className="super-header">
-                <th colSpan="3" className="meta-head">Connection Mapping</th>
+                <th colSpan="4" className="meta-head">Connection Mapping</th>
                 <th colSpan="2" className="sho-head">SHO Department (Split)</th>
                 <th colSpan="2" className="tb-head">Transit Buffer (Split)</th>
                 <th colSpan="3" className="ch-head">Channel Section (Combined Rollup)</th>
@@ -176,6 +180,7 @@ const TBE = () => {
               </tr>
               <tr className="sub-header">
                 <th>Channel Ref</th>
+                <th>MO</th>
                 <th>Ring Family</th>
                 <th>Ring Type</th>
                 <th>Qty</th>
@@ -196,25 +201,39 @@ const TBE = () => {
                 
                 return (
                   <tr key={uniqueKey} className="data-row">
+                    {/* Channel Column */}
                     {channelSpan > 0 && (
                       <td rowSpan={channelSpan} className="merged-mo-cell fw-bold">
                         {row.channel_ref || '-'}
                       </td>
                     )}
+                    
+                    {/* MO Column */}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{fontSize: '0.9em'}}>
+                        {row.mo_ref || '-'}
+                      </td>
+                    )}
+
+                    {/* Ring Family Column */}
                     {familySpan > 0 && (
                       <td rowSpan={familySpan} className="fw-bold text-primary">
                         {row.product_variant}
                       </td>
                     )}
                     
+                    {/* Ring Type Column (Unique per row) */}
                     <td className="fw-bold">{row.ring_type}</td>
                     
+                    {/* SHO Split */}
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
                     <td>{row.sho_in || '-'}</td>
                     
+                    {/* TB Split */}
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
                     <td>{row.tb_out || '-'}</td>
                     
+                    {/* Channel Section (Merged by Family) */}
                     {familySpan > 0 && (
                       <td rowSpan={familySpan} className="merged-channel-cell fw-bold text-success">
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
@@ -227,6 +246,7 @@ const TBE = () => {
                       <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_out || '-'}</td>
                     )}
                     
+                    {/* Status Tracker */}
                     <td>
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
                         {row.status || 'In Process'}
@@ -237,7 +257,7 @@ const TBE = () => {
               })}
               {sortedSummary.length === 0 && (
                 <tr>
-                  <td colSpan="11" className="empty-state">
+                  <td colSpan="12" className="empty-state">
                     No records found matching the current search criteria or date range.
                   </td>
                 </tr>

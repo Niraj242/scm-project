@@ -62,27 +62,27 @@ def normalize_channel(value):
     cleaned = val_str.lstrip("0")
     return cleaned if cleaned else "0"
 
+# Extracts ONLY the family number (used for Channel matching)
+def parse_family(prod_text):
+    text = str(prod_text).strip().upper()
+    if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN"
+    match = re.search(r'(\d{3,5})', text)
+    if match: return match.group(1)
+    return text.split()[0].split('-')[0]
+
+# Extracts Family AND Ring Type (used for SHO/Transit Buffer)
 def parse_family_and_type(prod_text):
     text = str(prod_text).strip().upper()
     if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN", "ASSEMBLY"
-    
-    # Restored IM/OM Split
     r_type = "IM" if any(x in text for x in ["IM", "IR"]) else ("OM" if any(x in text for x in ["OM", "OR"]) else "ASSEMBLY")
-    
-    match = re.search(r'(\d{3,5})', text)
-    if match:
-        base_family = match.group(1)
-    else:
-        base_family = text.split()[0].split('-')[0]
-            
+    base_family = parse_family(text)
     return base_family, r_type
 
 def clean_nan(value):
     if pd.isna(value): return 0.0
     val_str = str(value)
     match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val_str.replace(',', ''))
-    if match:
-        return float(match.group())
+    if match: return float(match.group())
     return 0.0
 
 def parse_date_safe(value):
@@ -114,7 +114,7 @@ def process_tbe_data():
         ring_wt_sheets = load_excel_sheets(settings.RINGWT_TRANSITBUFFER_URL)
         channel_master_sheets = {**load_excel_sheets(settings.TRB_MASTER_URL), **load_excel_sheets(settings.DGBB_MASTER_URL)}
 
-        # --- STEP 1: CHANNEL SHEETS ---
+        # --- STEP 1: CHANNEL SHEETS (Common Rollup) ---
         ch_list = []
         for sheet_name, df in channel_master_sheets.items():
             if df.empty or sheet_name in ['Pivot Table 1', 'Pivot Table 2', 'PIC List', 'List']: continue
@@ -124,7 +124,7 @@ def process_tbe_data():
             d_col = find_column(df, ["date", "day", "txndate"])
             prod_col = find_column(df, ["production", "prodqty", "shiftproduction", "qty", "quantity", "cumulative"])
 
-            if not type_col: continue # REMOVED strict prod_col check to stop dropping rows
+            if not type_col: continue 
 
             for _, row in df.iterrows():
                 ch = normalize_channel(row.get(c_col)) if c_col else normalize_channel(sheet_name)
@@ -133,31 +133,30 @@ def process_tbe_data():
                 prod_str = str(row.get(type_col)).strip().upper()
                 if prod_str in ["", "NAN"]: continue
                 
-                base_family, r_type = parse_family_and_type(prod_str)
+                base_family = parse_family(prod_str)
                 qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
                 dt = parse_date_safe(row.get(d_col))
 
-                # REMOVED `if qty > 0:` FILTER. KEEP EVERYTHING.
-                ch_list.append({"ch": ch, "fam": base_family, "type": r_type, "qty": qty, "date": dt})
+                ch_list.append({"ch": ch, "fam": base_family, "qty": qty, "date": dt})
 
-        df_ch_grouped = pd.DataFrame(ch_list).groupby(["ch", "fam", "type"]).agg(
+        # Group purely by Channel and Family
+        df_ch_grouped = pd.DataFrame(ch_list).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
             ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
             ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
-        ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "type", "ch_qty", "ch_min_date", "ch_max_date"])
+        ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date"])
 
-        # --- STEP 2: TRANSIT BUFFER (ringwt) ---
+        # --- STEP 2: TRANSIT BUFFER (Split IM/OM) ---
         tb_list = []
         for sheet_name, df in ring_wt_sheets.items():
             if df.empty: continue
             
             c_col = find_column(df, ["channelref", "channel", "channelno", "machineno", "mo", "line", "ch", "machine"])
-            # MASSIVELY EXPANDED FAMILY & QTY COLUMN SEARCH
             f_col = find_column(df, ["ringfamily", "family", "type", "variant", "product", "item", "desc", "description", "part", "model", "brg", "bearing", "component", "size"])
             q_col = find_column(df, ["qty", "quantity", "noofrings", "rings", "totalqtyrecd", "recdqty", "total", "count", "amount", "nos"])
             d_col = find_column(df, ["date", "indate", "outdate", "day", "txndate", "dispatchdate"])
 
-            if not f_col: continue # REMOVED strict q_col check
+            if not f_col: continue 
 
             for _, row in df.iterrows():
                 ch = normalize_channel(row.get(c_col)) if c_col else normalize_channel(sheet_name)
@@ -170,33 +169,35 @@ def process_tbe_data():
                 qty = clean_nan(row.get(q_col)) if q_col else 0.0
                 dt = parse_date_safe(row.get(d_col))
 
-                # REMOVED `if qty > 0:` FILTER. KEEP EVERYTHING.
                 tb_list.append({"ch": ch, "fam": base_family, "type": r_type, "qty": qty, "date": dt})
 
+        # Group by Channel, Family, AND Type (preserves IM vs OM rows)
         df_tb_grouped = pd.DataFrame(tb_list).groupby(["ch", "fam", "type"]).agg(
             tb_qty=('qty', 'sum'),
             tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
             tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
         ).reset_index() if tb_list else pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
 
-        # --- STEP 3: OUTER JOIN ---
+        # --- STEP 3: MERGE (Broadcast Channel Data to IM and OM) ---
         if df_tb_grouped.empty and df_ch_grouped.empty:
             MASTER_CACHE = []
             LAST_REFRESH = datetime.now()
             return
 
-        # Merges EXACTLY matching on Channel, Family, AND Type.
-        merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam", "type"], how="outer")
+        # Merging purely on Channel and Family. This forces the Channel data to map to BOTH the IM and OM rows.
+        merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
         
         compiled_summary = []
         for _, row in merged.iterrows():
-            ch, fam, r_type = row["ch"], row["fam"], row["type"]
+            ch, fam = row["ch"], row["fam"]
+            r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
+            
             tb_qty, ch_qty = clean_nan(row.get("tb_qty")), clean_nan(row.get("ch_qty"))
             tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
             ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
 
             if tb_qty == 0 and ch_qty > 0: calc_status = "Channel Only"
-            elif tb_qty > 0 and ch_qty == 0: calc_status = "Yet to Start"
+            elif tb_qty > 0 and ch_qty == 0: calc_status = "Missing Channel Data"
             elif ch_qty >= tb_qty and tb_qty > 0: calc_status = "Completed"
             else: calc_status = "In Process"
 
@@ -214,7 +215,6 @@ def process_tbe_data():
                 "status": calc_status
             })
 
-        # SORTS PERFECTLY: Channel -> Family -> Ring Type (Keeps IM/OM grouped together)
         compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
         MASTER_CACHE = compiled_summary
         LAST_REFRESH = datetime.now()

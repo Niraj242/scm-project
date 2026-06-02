@@ -39,28 +39,29 @@ const TBE = () => {
         setSummaryData(json.data || []);
       }
     } catch (err) {
-      setIsInitializing(false); // Kill loop spinner if fetch fails
+      setIsInitializing(false);
       setError(err.message);
     } finally {
       setLoading(false);
     }
   };
 
-  // 1. Live Filter Calculations
   const filteredSummary = summaryData.filter(item => 
     (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
     (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase()))
   );
 
-  // 2. Exact Grid Alignment Sorting Layout (Channel -> Ring Family Grouping)
+  // Sorting restored to keep IM/OM together
   const sortedSummary = [...filteredSummary].sort((a, b) => {
     if (a.channel_ref !== b.channel_ref) {
       return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
     }
-    return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
+    if (a.product_variant !== b.product_variant) {
+      return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
+    }
+    return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
   });
 
-  // 3. Grid Row Span Calculations: Primary Channel Axis (Keeps the UI visually clean)
   const getChannelRowSpan = (dataArray, currentIndex) => {
     const currentRef = dataArray[currentIndex].channel_ref;
     if (!currentRef) return 1;
@@ -102,7 +103,7 @@ const TBE = () => {
         <div className="initializing-box">
           <div className="spinner"></div>
           <p><strong>Compiling Remote Workbook Matrix Caches...</strong></p>
-          <p className="sub-text">Normalizing fuzzy column variants, scanning tab titles, and parsing 7-day windows...</p>
+          <p className="sub-text">Normalizing fuzzy column variants, scanning tab titles, and parsing windows...</p>
         </div>
       )}
 
@@ -113,8 +114,7 @@ const TBE = () => {
           <table className="trace-table">
             <thead>
               <tr className="super-header">
-                {/* colSpan updated from 3 to 2 to mirror column removal */}
-                <th colSpan="2" className="meta-head">Connection Mapping</th>
+                <th colSpan="3" className="meta-head">Connection Mapping</th>
                 <th colSpan="2" className="sho-head">SHO Department</th>
                 <th colSpan="2" className="tb-head">Transit Buffer</th>
                 <th colSpan="3" className="ch-head">Channel Section (Combined Rollup)</th>
@@ -123,6 +123,7 @@ const TBE = () => {
               <tr className="sub-header">
                 <th>Channel Ref</th>
                 <th>Ring Family</th>
+                <th>Ring Type</th>
                 <th>Qty</th>
                 <th>In Date</th>
                 <th>Qty</th>
@@ -136,7 +137,7 @@ const TBE = () => {
             <tbody>
               {sortedSummary.map((row, idx) => {
                 const channelSpan = getChannelRowSpan(sortedSummary, idx);
-                const uniqueKey = `${row.channel_ref || 'b'}-${row.product_variant || 'b'}-${idx}`;
+                const uniqueKey = `${row.channel_ref || 'b'}-${row.product_variant || 'b'}-${row.ring_type || 'b'}-${idx}`;
                 
                 return (
                   <tr key={uniqueKey} className="data-row">
@@ -147,6 +148,7 @@ const TBE = () => {
                     )}
 
                     <td className="fw-bold text-primary">{row.product_variant}</td>
+                    <td className="fw-bold">{row.ring_type}</td>
                     
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
                     <td>{row.sho_in || '-'}</td>
@@ -170,8 +172,7 @@ const TBE = () => {
               })}
               {sortedSummary.length === 0 && (
                 <tr>
-                  {/* colSpan updated from 11 to 10 for grid symmetry */}
-                  <td colSpan="10" className="empty-state">
+                  <td colSpan="11" className="empty-state">
                     No active spreadsheet records parsed matching the required structural properties.
                   </td>
                 </tr>

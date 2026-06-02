@@ -48,13 +48,9 @@ def find_column(df, patterns):
 def normalize_channel(value, force_t_prefix=False):
     if pd.isna(value): return ""
     val_str = str(value).strip().upper()
-    
     is_explicit_t = val_str.startswith("T")
-    
-    # Strip known non-essential prefixes
     val_str = re.sub(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)', '', val_str).strip()
     
-    # Strip T temporarily to handle leading zeros safely
     if val_str.startswith("T"):
         is_explicit_t = True
         val_str = val_str[1:]
@@ -65,7 +61,6 @@ def normalize_channel(value, force_t_prefix=False):
     cleaned = val_str.lstrip("0")
     if not cleaned: cleaned = "0"
     
-    # Re-apply T if it was explicitly there (T05 -> T5) or if it's forced by the TRB master sheet
     if force_t_prefix or is_explicit_t:
         return f"T{cleaned}"
     return cleaned
@@ -78,11 +73,9 @@ def parse_family_and_type(prod_text):
     if any(x in text for x in ["IM", "IR", "INNER"]): r_type = "IM"
     elif any(x in text for x in ["OM", "OR", "OUTER"]): r_type = "OM"
     
-    # Extract baseline digits
     match = re.search(r'(\d{3,5})', text)
     base = match.group(1) if match else text.split()[0].split('-')[0]
     
-    # Aggressively attach BT/BB variants
     if "BT" in text.split() or text.startswith("BT") or "-BT" in text or " BT" in text:
         base = f"BT-{base}"
     elif "BB" in text.split() or text.startswith("BB") or "-BB" in text or " BB" in text:
@@ -91,13 +84,13 @@ def parse_family_and_type(prod_text):
     return base, r_type
 
 def clean_nan(value):
-    if pd.isna(value): return 0
+    if pd.isna(value): return 0.0
     val_str = str(value)
     match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val_str.replace(',', ''))
     if match: 
-        # Round up to the next highest integer
-        return math.ceil(float(match.group()))
-    return 0
+        # Return exact float here. We round up later after summing.
+        return float(match.group())
+    return 0.0
 
 def parse_date_safe(value):
     try:
@@ -108,12 +101,19 @@ def parse_date_safe(value):
     except:
         return None
 
-def load_excel_sheets(url):
+def load_excel_sheets(url, sheet_filter_regex=None):
     try:
         resp = requests.get(url, timeout=30)
         if resp.status_code != 200: return {}
         xls = pd.ExcelFile(io.BytesIO(resp.content))
-        return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
+        
+        valid_sheets = xls.sheet_names
+        
+        # SPEED OPTIMIZATION: Only parse sheets that match the whitelist
+        if sheet_filter_regex:
+            valid_sheets = [s for s in valid_sheets if re.match(sheet_filter_regex, str(s).strip().upper())]
+            
+        return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in valid_sheets}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
         return {}
@@ -123,15 +123,8 @@ def process_master_sheets(sheets_dict, is_trb):
     for sheet_name, df in sheets_dict.items():
         if df.empty: continue
         
-        # STRICT WHITELIST: Only execute mapping for sheets starting with T or CH followed by digits
-        clean_name = str(sheet_name).strip().upper()
-        if not re.match(r'^(T|CH)[-\s]*\d+', clean_name):
-            continue
-            
-        # Separate MO searches from the baseline channel aliases
         ch_col = find_column(df, ["channelno", "channel", "machineno", "line", "ch"])
         mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
-        
         type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
         d_col = find_column(df, ["date", "day", "txndate"])
         prod_col = find_column(df, ["production", "prodqty", "shiftproduction", "qty", "quantity"])
@@ -150,10 +143,13 @@ def process_master_sheets(sheets_dict, is_trb):
             if prod_str in ["", "NAN"]: continue
             
             base_family, _ = parse_family_and_type(prod_str)
-            qty = clean_nan(row.get(prod_col)) if prod_col else 0
+            qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
             dt = parse_date_safe(row.get(d_col))
 
-            ch_list.append({"ch": ch, "fam": base_family, "mo": mo_val, "qty": qty, "date": dt})
+            ch_list.append({
+                "ch": ch, "fam": base_family, "mo": mo_val, "qty": qty, "date": dt, 
+                "raw_variant": prod_str, "source": "Channel Production"
+            })
     return ch_list
 
 def process_tbe_data():
@@ -163,9 +159,10 @@ def process_tbe_data():
 
     try:
         from settings import settings
+        # Pass the strict Regex whitelist to skip parsing heavy pivot tables
+        trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL, r'^(T|CH)[-\s]*\d+')
+        dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL, r'^(T|CH)[-\s]*\d+')
         ring_wt_sheets = load_excel_sheets(settings.RINGWT_TRANSITBUFFER_URL)
-        trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
-        dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
 
         # --- STEP 1: PARSE SOURCE CHANNELS ---
         ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
@@ -185,14 +182,7 @@ def process_tbe_data():
             c_col = find_column(df, ["ch#no", "ch# no", "channelref", "channel", "machineno"])
             f_col = find_column(df, ["type", "ringfamily", "family", "variant", "product"])
             d_col = find_column(df, ["date", "indate", "outdate", "day"])
-            
-            q_col = None
-            for c in df.columns:
-                if str(c).lower().replace(" ", "").replace("#", "") == "noofrings":
-                    q_col = c
-                    break
-            if not q_col: q_col = find_column(df, ["qty", "quantity", "total"])
-            
+            q_col = find_column(df, ["noofrings", "qty", "quantity", "total"])
             if not f_col: continue 
 
             for _, row in df.iterrows():
@@ -204,10 +194,13 @@ def process_tbe_data():
                 if prod_text in ["", "NAN"]: continue
                 
                 base_family, r_type = parse_family_and_type(prod_text)
-                qty = clean_nan(row.get(q_col)) if q_col else 0
+                qty = clean_nan(row.get(q_col)) if q_col else 0.0
                 dt = parse_date_safe(row.get(d_col))
 
-                tb_list.append({"ch": ch, "fam": base_family, "type": r_type, "qty": qty, "date": dt})
+                tb_list.append({
+                    "ch": ch, "fam": base_family, "type": r_type, "qty": qty, "date": dt,
+                    "raw_variant": prod_text, "source": "Transit Buffer"
+                })
 
         df_tb_grouped = pd.DataFrame(tb_list).groupby(["ch", "fam", "type"]).agg(
             tb_qty=('qty', 'sum'),
@@ -215,21 +208,35 @@ def process_tbe_data():
             tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
         ).reset_index() if tb_list else pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
 
-        # --- STEP 3: MATRIX RELATIONSHIP MERGE ---
+        # --- STEP 3: PREPARE DETAILS MAPPING ---
+        tb_details_map = {}
+        for item in tb_list:
+            k = (item["ch"], item["fam"], item["type"])
+            if k not in tb_details_map: tb_details_map[k] = []
+            tb_details_map[k].append(item)
+
+        ch_details_map = {}
+        for item in ch_list:
+            k = (item["ch"], item["fam"])
+            if k not in ch_details_map: ch_details_map[k] = []
+            ch_details_map[k].append(item)
+
+        # --- STEP 4: MATRIX RELATIONSHIP MERGE ---
         if df_tb_grouped.empty and df_ch_grouped.empty:
             MASTER_CACHE = []
             LAST_REFRESH = datetime.now()
             return
 
         merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
-        
         compiled_summary = []
+
         for _, row in merged.iterrows():
             ch, fam = row["ch"], row["fam"]
             r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
             
-            tb_qty = row.get("tb_qty", 0)
-            ch_qty = row.get("ch_qty", 0)
+            # Apply CEIL only on the final summed float values
+            tb_qty = math.ceil(row.get("tb_qty", 0.0))
+            ch_qty = math.ceil(row.get("ch_qty", 0.0))
             if pd.isna(tb_qty): tb_qty = 0
             if pd.isna(ch_qty): ch_qty = 0
 
@@ -241,6 +248,18 @@ def process_tbe_data():
             elif tb_qty > 0 and ch_qty == 0: calc_status = "Missing Channel Data"
             elif ch_qty >= tb_qty and tb_qty > 0: calc_status = "Completed"
             else: calc_status = "In Process"
+
+            # Attach detailed breakdown
+            d_tb = tb_details_map.get((ch, fam, r_type), [])
+            d_ch = ch_details_map.get((ch, fam), [])
+            combined_details = []
+            
+            for d in d_tb:
+                combined_details.append({"variant": d["raw_variant"], "qty": round(d["qty"], 2), "date": str(d["date"]) if d["date"] else "-", "source": d["source"], "mo": "-"})
+            for d in d_ch:
+                combined_details.append({"variant": d["raw_variant"], "qty": round(d["qty"], 2), "date": str(d["date"]) if d["date"] else "-", "source": d["source"], "mo": d.get("mo", "-")})
+            
+            combined_details.sort(key=lambda x: x["date"], reverse=True)
 
             compiled_summary.append({
                 "channel_ref": ch,
@@ -254,7 +273,8 @@ def process_tbe_data():
                 "ch_qty": int(ch_qty),
                 "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
                 "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-",
-                "status": calc_status
+                "status": calc_status,
+                "details": combined_details
             })
 
         compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
@@ -273,7 +293,6 @@ def background_refresh_loop():
         time.sleep(CACHE_DURATION_MINUTES * 60)
         process_tbe_data()
 
-# Fire up automated daemon cache loop
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 @router.get("/tbe_all_mos")
@@ -281,4 +300,3 @@ def get_tbe_dashboard():
     if not INITIALIZED:
         return {"status": "initializing", "message": "Compiling data matrices...", "data": []}
     return {"status": "success", "last_updated": str(LAST_REFRESH), "data": MASTER_CACHE}
-    

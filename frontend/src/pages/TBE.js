@@ -11,8 +11,9 @@ const TBE = () => {
   const [loading, setLoading] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState('');
-  const [expandedRows, setExpandedRows] = useState(new Set()); // Tracks open rows
   
+  // MODIFIED: State for controlling the Raw Data details modal
+  const [selectedDetails, setSelectedDetails] = useState(null);
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -26,6 +27,7 @@ const TBE = () => {
     try {
       if (!isInitializing) setLoading(true);
       setError('');
+
       const res = await fetch(`${API}/tbe_all_mos`);
       if (!res.ok) throw new Error(`Server returned status code: ${res.status}`);
       
@@ -48,16 +50,6 @@ const TBE = () => {
     }
   };
 
-  const toggleRow = (key) => {
-    const newExpanded = new Set(expandedRows);
-    if (newExpanded.has(key)) {
-      newExpanded.delete(key);
-    } else {
-      newExpanded.add(key);
-    }
-    setExpandedRows(newExpanded);
-  };
-
   const filteredSummary = summaryData.filter(item => {
     const matchesSearch = 
       (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
@@ -67,6 +59,7 @@ const TBE = () => {
     let matchesDate = true;
     if (startDate || endDate) {
       const dates = [item.sho_in, item.tb_out, item.ch_in, item.ch_out].filter(d => d && d !== '-');
+      
       if (dates.length === 0) {
         matchesDate = false; 
       } else {
@@ -82,8 +75,12 @@ const TBE = () => {
   });
 
   const sortedSummary = [...filteredSummary].sort((a, b) => {
-    if (a.channel_ref !== b.channel_ref) return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
-    if (a.product_variant !== b.product_variant) return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
+    if (a.channel_ref !== b.channel_ref) {
+      return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
+    }
+    if (a.product_variant !== b.product_variant) {
+      return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
+    }
     return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
   });
 
@@ -92,7 +89,9 @@ const TBE = () => {
     if (!currentRef) return 1;
     if (currentIndex > 0 && dataArray[currentIndex - 1].channel_ref === currentRef) return 0; 
     let span = 1;
-    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef) span++;
+    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef) {
+      span++;
+    }
     return span;
   };
 
@@ -100,9 +99,18 @@ const TBE = () => {
     const currentRef = dataArray[currentIndex].channel_ref;
     const currentFam = dataArray[currentIndex].product_variant;
     if (!currentRef || !currentFam) return 1;
-    if (currentIndex > 0 && dataArray[currentIndex - 1].channel_ref === currentRef && dataArray[currentIndex - 1].product_variant === currentFam) return 0; 
+    
+    if (currentIndex > 0 && 
+        dataArray[currentIndex - 1].channel_ref === currentRef &&
+        dataArray[currentIndex - 1].product_variant === currentFam) {
+      return 0; 
+    }
     let span = 1;
-    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef && dataArray[currentIndex + span].product_variant === currentFam) span++;
+    while (currentIndex + span < dataArray.length && 
+           dataArray[currentIndex + span].channel_ref === currentRef &&
+           dataArray[currentIndex + span].product_variant === currentFam) {
+      span++;
+    }
     return span;
   };
 
@@ -115,13 +123,33 @@ const TBE = () => {
         </div>
         
         <div className="control-actions">
-          <input type="date" className="search-box" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          <input 
+            type="date" 
+            className="search-box" 
+            title="Start Date"
+            value={startDate} 
+            onChange={(e) => setStartDate(e.target.value)} 
+          />
           <span style={{margin: '0 5px', color: '#fff'}}>to</span>
-          <input type="date" className="search-box" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
+          <input 
+            type="date" 
+            className="search-box" 
+            title="End Date"
+            value={endDate} 
+            onChange={(e) => setEndDate(e.target.value)} 
+          />
+
           <button className="back-btn" style={{margin: '0 10px'}} onClick={fetchTBEDashboard} disabled={loading}>
             {loading ? 'Refreshing...' : '🔄 Reload'}
           </button>
-          <input className="search-box" placeholder="Search Channel, MO, or Family..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={isInitializing}/>
+          
+          <input
+            className="search-box"
+            placeholder="Search Channel, MO, or Family..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            disabled={isInitializing}
+          />
         </div>
       </div>
 
@@ -167,85 +195,122 @@ const TBE = () => {
                 const channelSpan = getChannelRowSpan(sortedSummary, idx);
                 const familySpan = getFamilyRowSpan(sortedSummary, idx);
                 const uniqueKey = `${row.channel_ref || 'b'}-${row.product_variant || 'b'}-${row.ring_type || 'b'}-${idx}`;
-                const isExpanded = expandedRows.has(uniqueKey);
                 
                 return (
-                  <React.Fragment key={uniqueKey}>
-                    <tr className="data-row">
-                      {channelSpan > 0 && (
-                        <td rowSpan={channelSpan} className="merged-mo-cell fw-bold">{row.channel_ref || '-'}</td>
-                      )}
-                      
-                      {familySpan > 0 && (
-                        <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{fontSize: '0.9em'}}>{row.mo_ref || '-'}</td>
-                      )}
-
-                      {familySpan > 0 && (
-                        <td rowSpan={familySpan} className="fw-bold text-primary clickable-cell" onClick={() => toggleRow(uniqueKey)} title="Click to view raw variant data">
-                          {isExpanded ? '▼ ' : '▶ '} {row.product_variant}
-                        </td>
-                      )}
-                      
-                      <td className="fw-bold">{row.ring_type}</td>
-                      <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
-                      <td>{row.sho_in || '-'}</td>
-                      <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
-                      <td>{row.tb_out || '-'}</td>
-                      
-                      {familySpan > 0 && (
-                        <td rowSpan={familySpan} className="merged-channel-cell fw-bold text-success">
-                          {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
-                        </td>
-                      )}
-                      {familySpan > 0 && <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_in || '-'}</td>}
-                      {familySpan > 0 && <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_out || '-'}</td>}
-                      
-                      <td>
-                        <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
-                          {row.status || 'In Process'}
-                        </span>
+                  <tr key={uniqueKey} className="data-row">
+                    {channelSpan > 0 && (
+                      <td rowSpan={channelSpan} className="merged-mo-cell fw-bold">
+                        {row.channel_ref || '-'}
                       </td>
-                    </tr>
-                    
-                    {/* EXPANDED DETAILS TABLE */}
-                    {isExpanded && row.details && row.details.length > 0 && (
-                      <tr className="detail-row">
-                        <td colSpan="12" style={{padding: '15px', backgroundColor: '#fdfdfd'}}>
-                          <div style={{maxWidth: '800px', margin: '0 auto'}}>
-                            <h5 style={{margin: '0 0 10px 0', color: '#555'}}>Raw Variant Log for {row.product_variant} ({row.ring_type})</h5>
-                            <table className="sub-table">
-                              <thead>
-                                <tr>
-                                  <th>Raw Variant Name</th>
-                                  <th>Date</th>
-                                  <th>Exact Qty</th>
-                                  <th>MO</th>
-                                  <th>Source Sheet</th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {row.details.map((det, dIdx) => (
-                                  <tr key={dIdx}>
-                                    <td>{det.variant}</td>
-                                    <td>{det.date}</td>
-                                    <td>{det.qty}</td>
-                                    <td>{det.mo}</td>
-                                    <td><span className="badge-source">{det.source}</span></td>
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        </td>
-                      </tr>
                     )}
-                  </React.Fragment>
+                    
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{fontSize: '0.9em'}}>
+                        {row.mo_ref || '-'}
+                      </td>
+                    )}
+
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="fw-bold text-primary">
+                        {row.product_variant}
+                      </td>
+                    )}
+                    
+                    {/* MODIFIED: Clickable element triggers Modal with raw logs */}
+                    <td 
+                      className="fw-bold text-primary" 
+                      style={{ cursor: 'pointer', textDecoration: 'underline' }}
+                      title="Click to view detailed variant logs"
+                      onClick={() => {
+                        setSelectedDetails({
+                          title: `${row.channel_ref || 'General'} | ${row.product_variant} | ${row.ring_type}`,
+                          details: row.details || []
+                        });
+                      }}
+                    >
+                      {row.ring_type} ↗
+                    </td>
+                    
+                    <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
+                    <td>{row.sho_in || '-'}</td>
+                    
+                    <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
+                    <td>{row.tb_out || '-'}</td>
+                    
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-channel-cell fw-bold text-success">
+                        {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
+                      </td>
+                    )}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_in || '-'}</td>
+                    )}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_out || '-'}</td>
+                    )}
+                    
+                    <td>
+                      <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
+                        {row.status || 'In Process'}
+                      </span>
+                    </td>
+                  </tr>
                 );
               })}
+              {sortedSummary.length === 0 && (
+                <tr>
+                  <td colSpan="12" className="empty-state">
+                    No records found matching the current search criteria or date range.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
       )}
+
+      {/* MODIFIED: Drill-Down Details Modal Component */}
+      {selectedDetails && (
+        <div className="modal-overlay" onClick={() => setSelectedDetails(null)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Raw Entry Logs: {selectedDetails.title}</h2>
+              <button className="close-btn" onClick={() => setSelectedDetails(null)}>&times;</button>
+            </div>
+            <div className="modal-body">
+              {selectedDetails.details.length > 0 ? (
+                <table className="details-table">
+                  <thead>
+                    <tr>
+                      <th>Source Category</th>
+                      <th>Raw Variant String</th>
+                      <th>Production Date</th>
+                      <th>Quantity Logged</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedDetails.details.map((item, i) => (
+                      <tr key={i}>
+                        <td>
+                          <span className={`status-badge ${item.source.includes('Channel') ? 'completed' : 'pending'}`}>
+                            {item.source}
+                          </span>
+                        </td>
+                        <td className="fw-bold">{item.variant}</td>
+                        <td>{item.date}</td>
+                        <td>{Math.ceil(item.qty).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : (
+                <p className="empty-state" style={{padding: '20px'}}>No individual raw entries logged for this specific combination.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };

@@ -1,4 +1,6 @@
-/* Container & Headers */
+/* =========================================================
+   CONTAINER & HEADERS
+   ========================================================= */
 .traceability-container {
   padding: 24px;
   background-color: #f8fafc;
@@ -26,7 +28,9 @@
   margin: 0;
 }
 
-/* Controls */
+/* =========================================================
+   CONTROL ACTIONS
+   ========================================================= */
 .search-box {
   padding: 10px 16px;
   border: 1px solid #cbd5e1;
@@ -34,7 +38,7 @@
   width: 260px;
   font-size: 14px;
   outline: none;
-  transition: border-color 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s;
 }
 
 .search-box:focus {
@@ -57,23 +61,25 @@
   background-color: #e2e8f0;
 }
 
-/* Table Styling - The Fixes are Here */
+/* =========================================================
+   TABLE ARCHITECTURE (GRID MATRIX)
+   ========================================================= */
 .table-wrapper {
   background: #ffffff;
   border-radius: 8px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   overflow-x: auto;
+  margin-bottom: 32px;
 }
 
 .trace-table {
   width: 100%;
-  border-collapse: collapse; /* CRITICAL: Fixes double-thick borders */
+  border-collapse: collapse; /* Prevents double-thick border visual bugs */
   text-align: center;
   font-size: 13px;
   color: #334155;
 }
 
-/* Ensures every cell has exactly a 1px border */
 .trace-table th, 
 .trace-table td {
   border: 1px solid #e2e8f0;
@@ -81,14 +87,14 @@
   vertical-align: middle;
 }
 
-/* Super Headers */
+/* Super Column Headers */
 .super-header th {
   color: #ffffff;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-size: 12px;
-  border: 1px solid #ffffff20; /* Subtle interior borders for super header */
+  border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
 .meta-head { background-color: #1e293b; } /* Slate 800 */
@@ -96,22 +102,22 @@
 .tb-head   { background-color: #7c2d12; } /* Orange 900 */
 .ch-head   { background-color: #065f46; } /* Emerald 800 */
 
-/* Sub Headers */
+/* Sub Row Headers */
 .sub-header th {
   background-color: #f8fafc;
   color: #475569;
   font-weight: 600;
 }
 
-/* Data Rows */
+/* Row Hover Interaction */
 .data-row:hover td {
   background-color: #f8fafc;
 }
 
-/* Merged Cells */
+/* Spanned Cells Lock overrides */
 .merged-mo-cell, 
 .merged-channel-cell {
-  background-color: #ffffff !important; /* Overrides hover so spanned cells don't flicker */
+  background-color: #ffffff !important; 
 }
 
 .mo-link-btn {
@@ -121,13 +127,14 @@
   font-weight: 700;
   cursor: pointer;
   text-decoration: underline;
+  padding: 0;
 }
 
 .mo-link-btn:hover {
   color: #1d4ed8;
 }
 
-/* Typography Helpers */
+/* Typography Utilities */
 .fw-bold {
   font-weight: 700;
   color: #0f172a;
@@ -138,7 +145,9 @@
   color: #334155;
 }
 
-/* Status Badges */
+/* =========================================================
+   STATUS BADGES SYSTEM
+   ========================================================= */
 .status-badge {
   display: inline-block;
   padding: 4px 12px;
@@ -146,6 +155,8 @@
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
 }
 
 .status-badge.completed {
@@ -160,7 +171,24 @@
   color: #854d0e;
 }
 
-/* States */
+.status-badge.running {
+  background-color: #e0f2fe;
+  color: #0369a1;
+}
+
+.status-badge.allocated {
+  background-color: #f1f5f9;
+  color: #475569;
+}
+
+.status-badge.in-transit {
+  background-color: #ffedd5;
+  color: #c2410c;
+}
+
+/* =========================================================
+   ANIMATIONS, SPINNING & APP STATES
+   ========================================================= */
 .empty-state {
   text-align: center;
   padding: 40px !important;
@@ -191,7 +219,33 @@
   border-radius: 8px;
   text-align: center;
   margin-bottom: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
 }
 
-.initializing-box strong { color: #1e3a8a; }
-.initializing-box .sub-text { color: #3b82f6; font-size: 14px; margin-top: 8px; }
+.initializing-box strong { 
+  color: #1e3a8a; 
+}
+
+.initializing-box .sub-text { 
+  color: #3b82f6; 
+  font-size: 14px; 
+  margin-top: 8px; 
+}
+
+/* Pure CSS Engine Hardware Spinner */
+.spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid #bfdbfe;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  margin-bottom: 12px;
+  animation: spin-kf 0.8s linear infinite;
+}
+
+@keyframes spin-kf {
+  to { transform: rotate(360deg); }
+}

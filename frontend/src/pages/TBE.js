@@ -12,8 +12,11 @@ const TBE = () => {
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState('');
   
-  // MODIFIED: State for controlling the Raw Data details modal
-  const [selectedDetails, setSelectedDetails] = useState(null);
+  // Drilldown Breakout States
+  const [selectedFamily, setSelectedFamily] = useState(null); // format: { ch, fam }
+  const [detailData, setDetailData] = useState([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+
   const timerRef = useRef(null);
 
   useEffect(() => {
@@ -22,6 +25,31 @@ const TBE = () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
   }, []);
+
+  // Fetch variant breakdown metrics whenever a Ring Family cell is triggered
+  useEffect(() => {
+    if (!selectedFamily) {
+      setDetailData([]);
+      return;
+    }
+
+    const fetchVariantDetails = async () => {
+      try {
+        setDetailLoading(true);
+        const url = `${API}/tbe_variant_details?ch=${encodeURIComponent(selectedFamily.ch)}&fam=${encodeURIComponent(selectedFamily.fam)}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error("Could not retrieve variant logs.");
+        const json = await res.json();
+        setDetailData(json.data || []);
+      } catch (err) {
+        console.error(err.message);
+      } finally {
+        setDetailLoading(false);
+      }
+    };
+
+    fetchVariantDetails();
+  }, [selectedFamily]);
 
   const fetchTBEDashboard = async () => {
     try {
@@ -50,6 +78,7 @@ const TBE = () => {
     }
   };
 
+  // Filter Logic: Text Search + Date Range
   const filteredSummary = summaryData.filter(item => {
     const matchesSearch = 
       (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
@@ -71,9 +100,11 @@ const TBE = () => {
         });
       }
     }
+
     return matchesSearch && matchesDate;
   });
 
+  // Sort Logic: Channel -> Family -> Ring Type
   const sortedSummary = [...filteredSummary].sort((a, b) => {
     if (a.channel_ref !== b.channel_ref) {
       return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
@@ -84,6 +115,7 @@ const TBE = () => {
     return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
   });
 
+  // Span Calculation for Channel Column
   const getChannelRowSpan = (dataArray, currentIndex) => {
     const currentRef = dataArray[currentIndex].channel_ref;
     if (!currentRef) return 1;
@@ -95,6 +127,7 @@ const TBE = () => {
     return span;
   };
 
+  // Span Calculation for Family and MO Columns
   const getFamilyRowSpan = (dataArray, currentIndex) => {
     const currentRef = dataArray[currentIndex].channel_ref;
     const currentFam = dataArray[currentIndex].product_variant;
@@ -130,7 +163,7 @@ const TBE = () => {
             value={startDate} 
             onChange={(e) => setStartDate(e.target.value)} 
           />
-          <span style={{margin: '0 5px', color: '#fff'}}>to</span>
+          <span style={{margin: '0 5px', color: '#64748b'}}>to</span>
           <input 
             type="date" 
             className="search-box" 
@@ -198,45 +231,44 @@ const TBE = () => {
                 
                 return (
                   <tr key={uniqueKey} className="data-row">
+                    {/* Channel Column */}
                     {channelSpan > 0 && (
                       <td rowSpan={channelSpan} className="merged-mo-cell fw-bold">
                         {row.channel_ref || '-'}
                       </td>
                     )}
                     
+                    {/* MO Column */}
                     {familySpan > 0 && (
                       <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{fontSize: '0.9em'}}>
                         {row.mo_ref || '-'}
                       </td>
                     )}
 
+                    {/* Ring Family Column - Interactive Cell Hook */}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="fw-bold text-primary">
+                      <td 
+                        rowSpan={familySpan} 
+                        className="fw-bold text-primary clickable-family-cell"
+                        title="Click to view variant breakdown table"
+                        onClick={() => setSelectedFamily({ ch: row.channel_ref, fam: row.product_variant })}
+                      >
                         {row.product_variant}
                       </td>
                     )}
                     
-                    {/* MODIFIED: Clickable element triggers Modal with raw logs */}
-                    <td 
-                      className="fw-bold text-primary" 
-                      style={{ cursor: 'pointer', textDecoration: 'underline' }}
-                      title="Click to view detailed variant logs"
-                      onClick={() => {
-                        setSelectedDetails({
-                          title: `${row.channel_ref || 'General'} | ${row.product_variant} | ${row.ring_type}`,
-                          details: row.details || []
-                        });
-                      }}
-                    >
-                      {row.ring_type} ↗
-                    </td>
+                    {/* Ring Type Column */}
+                    <td className="fw-bold">{row.ring_type}</td>
                     
+                    {/* SHO Split */}
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
                     <td>{row.sho_in || '-'}</td>
                     
+                    {/* TB Split */}
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
                     <td>{row.tb_out || '-'}</td>
                     
+                    {/* Channel Section */}
                     {familySpan > 0 && (
                       <td rowSpan={familySpan} className="merged-channel-cell fw-bold text-success">
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
@@ -249,6 +281,7 @@ const TBE = () => {
                       <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_out || '-'}</td>
                     )}
                     
+                    {/* Status Tracker */}
                     <td>
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
                         {row.status || 'In Process'}
@@ -269,48 +302,53 @@ const TBE = () => {
         </div>
       )}
 
-      {/* MODIFIED: Drill-Down Details Modal Component */}
-      {selectedDetails && (
-        <div className="modal-overlay" onClick={() => setSelectedDetails(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
+      {/* Drilldown Sub-Variant Modal Component Area */}
+      {selectedFamily && (
+        <div className="modal-overlay" onClick={() => setSelectedFamily(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
-              <h2>Raw Entry Logs: {selectedDetails.title}</h2>
-              <button className="close-btn" onClick={() => setSelectedDetails(null)}>&times;</button>
+              <div>
+                <h3>Variant Breakdown Matrix</h3>
+                <p className="modal-subheading">Family Group: <strong>{selectedFamily.fam}</strong> | Channel: <strong>{selectedFamily.ch}</strong></p>
+              </div>
+              <button className="close-modal-btn" onClick={() => setSelectedFamily(null)}>&times;</button>
             </div>
             <div className="modal-body">
-              {selectedDetails.details.length > 0 ? (
-                <table className="details-table">
-                  <thead>
-                    <tr>
-                      <th>Source Category</th>
-                      <th>Raw Variant String</th>
-                      <th>Production Date</th>
-                      <th>Quantity Logged</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {selectedDetails.details.map((item, i) => (
-                      <tr key={i}>
-                        <td>
-                          <span className={`status-badge ${item.source.includes('Channel') ? 'completed' : 'pending'}`}>
-                            {item.source}
-                          </span>
-                        </td>
-                        <td className="fw-bold">{item.variant}</td>
-                        <td>{item.date}</td>
-                        <td>{Math.ceil(item.qty).toLocaleString()}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              {detailLoading ? (
+                <div className="detail-loading-box">
+                  <div className="spinner"></div>
+                  <p>Querying breakdown registries...</p>
+                </div>
+              ) : detailData.length === 0 ? (
+                <div className="empty-state">No independent component logs identified for this variant string.</div>
               ) : (
-                <p className="empty-state" style={{padding: '20px'}}>No individual raw entries logged for this specific combination.</p>
+                <div className="modal-table-wrapper">
+                  <table className="detail-variant-table">
+                    <thead>
+                      <tr>
+                        <th style={{textAlign: 'left'}}>Variant Specification Name</th>
+                        <th>SHO Qty</th>
+                        <th>Transit Buffer Qty</th>
+                        <th>Channel Section Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailData.map((vRow, vIdx) => (
+                        <tr key={vIdx}>
+                          <td className="text-start fw-bold" style={{color: '#1e293b'}}>{vRow.variant}</td>
+                          <td>{Number(vRow.sho_qty).toLocaleString()}</td>
+                          <td>{Number(vRow.tb_qty).toLocaleString()}</td>
+                          <td className="text-success fw-bold">{Number(vRow.ch_qty).toLocaleString()}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
           </div>
         </div>
       )}
-
     </div>
   );
 };

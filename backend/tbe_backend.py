@@ -252,7 +252,6 @@ def process_tbe_data():
             ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
             mo_list = row.get("mo_list", "")
 
-            # Precise addition first, round up once at the end
             final_tb_qty = math.ceil(tb_qty)
             final_ch_qty = math.ceil(ch_qty)
 
@@ -302,76 +301,76 @@ def get_tbe_dashboard():
 @router.get("/tbe_variant_details")
 def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
     """
-    Requirement 2 & 4: Generates sequential rows grouped by Variant and Department.
-    Finds the first production (In Date) and last production (Out Date) for each registry.
+    Generates sequential rows grouped by Variant and Department.
+    SHO and TB display the grouped MO. Channel Section maps the EXACT single MO.
     """
     ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
     
-    # Extract unique MO context for this scope block
+    # Grouped MO fallback string for SHO and TB
     found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_filtered if r.get("mo")])))
     mo_reference = ", ".join(found_mos) if found_mos else "-"
     if mo_reference != "-" and ch:
-        mo_display = f"{mo_reference} (Ch: {ch})"
+        mo_group_display = f"{mo_reference} (Ch: {ch})"
     else:
-        mo_display = f"Ch: {ch}" if ch else mo_reference
+        mo_group_display = f"Ch: {ch}" if ch else mo_reference
 
-    # Processing maps for sequential flat stacking
     sho_map = {}
     tb_map = {}
     ch_map = {}
 
-    # Gather SHO & Transit Buffer entries
+    # Gather SHO & Transit Buffer entries (Grouped by Variant only)
     for r in tb_filtered:
         raw_v = r["variant"]
         norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
         if not norm_key: continue
         
-        # Populate SHO Registry Map
         if norm_key not in sho_map:
             sho_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
         sho_map[norm_key]["qty"] += r["qty"]
         if r["date"]: sho_map[norm_key]["dates"].append(r["date"])
 
-        # Populate Transit Buffer Registry Map
         if norm_key not in tb_map:
             tb_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
         tb_map[norm_key]["qty"] += r["qty"]
         if r["date"]: tb_map[norm_key]["dates"].append(r["date"])
 
-    # Gather Channel Section entries
+    # Gather Channel Section entries (Grouped by Variant AND Exact MO)
     for r in ch_filtered:
         raw_v = r["variant"]
-        norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
-        if not norm_key: continue
+        raw_mo = str(r.get("mo", "")).strip()
+        norm_v = str(raw_v).upper().replace("-", "").replace(" ", "")
+        if not norm_v: continue
+        
+        norm_key = (norm_v, raw_mo)  # Tuple as dictionary key
         
         if norm_key not in ch_map:
-            ch_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
+            ch_map[norm_key] = {"label": raw_v, "exact_mo": raw_mo, "qty": 0.0, "dates": []}
         ch_map[norm_key]["qty"] += r["qty"]
         if r["date"]: ch_map[norm_key]["dates"].append(r["date"])
 
     sequential_rows = []
 
-    # Compile flat entries for SHO
+    # Compile SHO
     for k, data in sho_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
-            "mo_ref": mo_display,
+            "mo_ref": mo_group_display,
             "department": "SHO Department",
             "variant": data["label"],
             "in_date": in_d,
-            "out_date": "-",  # Tailored to match your sample layout format rules
+            "out_date": "-",  
             "qty": math.ceil(data["qty"]),
             "status": "Allocated"
         })
 
-    # Compile flat entries for Transit Buffer
+    # Compile Transit Buffer
     for k, data in tb_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
-            "mo_ref": mo_display,
+            "mo_ref": mo_group_display,
             "department": "Transit Buffer",
             "variant": data["label"],
             "in_date": "-",
@@ -380,12 +379,23 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
             "status": "In Transit"
         })
 
-    # Compile flat entries for Channel Section
+    # Compile Channel Section (Exact MO Split)
     for k, data in ch_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"
+        
+        exact_mo = data["exact_mo"]
+        if exact_mo and ch:
+            ch_mo_display = f"{exact_mo} (Ch: {ch})"
+        elif exact_mo:
+            ch_mo_display = exact_mo
+        elif ch:
+            ch_mo_display = f"Ch: {ch}"
+        else:
+            ch_mo_display = "-"
+
         sequential_rows.append({
-            "mo_ref": mo_display,
+            "mo_ref": ch_mo_display,
             "department": "Channel Section",
             "variant": data["label"],
             "in_date": in_d,

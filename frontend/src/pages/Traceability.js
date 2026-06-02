@@ -60,14 +60,11 @@ const Traceability = () => {
     }
   };
 
-  // 1. Filter the data based on search
   const filteredSummary = summaryData.filter(item => 
     (item.mo && item.mo.toLowerCase().includes(search.toLowerCase())) ||
     (item.base_product && String(item.base_product).toLowerCase().includes(search.toLowerCase()))
   );
 
-  // 2. SORT the data by MO, AND THEN by Product Variant. 
-  // This ensures identical product variants sit next to each other so RowSpan works perfectly.
   const sortedSummary = [...filteredSummary].sort((a, b) => {
     if (a.mo !== b.mo) {
       return (a.mo || '').localeCompare(b.mo || '');
@@ -75,11 +72,10 @@ const Traceability = () => {
     return String(a.base_product || '').localeCompare(String(b.base_product || ''));
   });
 
-  // 3. Row Span Logic for MO Column
   const getMoRowSpan = (dataArray, currentIndex) => {
     const currentMo = dataArray[currentIndex].mo;
     if (currentIndex > 0 && dataArray[currentIndex - 1].mo === currentMo) {
-      return 0; // Already spanned from a row above
+      return 0;
     }
     let span = 1;
     while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].mo === currentMo) {
@@ -88,16 +84,14 @@ const Traceability = () => {
     return span;
   };
 
-  // 4. NEW: Row Span Logic for Channel Column (Only groups identical families inside the same MO)
   const getChannelRowSpan = (dataArray, currentIndex) => {
     const currentMo = dataArray[currentIndex].mo;
     const currentFamily = dataArray[currentIndex].base_product;
     
-    // Check if previous row was exactly the same MO + Variant
     if (currentIndex > 0 && 
         dataArray[currentIndex - 1].mo === currentMo && 
         dataArray[currentIndex - 1].base_product === currentFamily) {
-      return 0; // Already spanned from a row above
+      return 0; 
     }
     
     let span = 1;
@@ -117,7 +111,7 @@ const Traceability = () => {
         <div>
           <h1>MO Traceability Tracking</h1>
           <p className="sub-tag">
-            {selectedMoFlow ? `Detailed Route Flow / Order: ${selectedMoFlow.mo}` : "Production Order Global KPI Summary Dashboard"}
+            {selectedMoFlow ? `Detailed Route Flow / Order Group: ${selectedMoFlow.mo}` : "Production Order Global KPI Summary Dashboard"}
           </p>
         </div>
         
@@ -167,20 +161,13 @@ const Traceability = () => {
                 <th>Product Variant</th>
                 <th>Target Qty</th>
                 <th>Ring Type</th>
-                
-                {/* SHO - Out Date Removed */}
                 <th>Qty</th>
                 <th>In Date</th>
-                
-                {/* TB - In Date Removed */}
                 <th>Qty</th>
                 <th>Out Date</th>
-                
-                {/* Channel Section */}
                 <th>Qty</th>
                 <th>In Date</th>
                 <th>Out Date</th>
-                
                 <th>Tracking Status</th>
               </tr>
             </thead>
@@ -191,7 +178,6 @@ const Traceability = () => {
                 
                 return (
                   <tr key={idx} className="data-row">
-                    {/* Spanned MO Cell */}
                     {moSpan > 0 && (
                       <td rowSpan={moSpan} className="merged-mo-cell">
                         <button className="mo-link-btn" onClick={() => handleViewDetail(row.mo)}>
@@ -200,21 +186,16 @@ const Traceability = () => {
                       </td>
                     )}
 
-                    {/* IM/OM Separation */}
                     <td className="fw-bold">{row.base_product}</td>
                     <td className="qty-cell">{row.qty_req > 0 ? Number(row.qty_req).toLocaleString() : '-'}</td>
                     <td className="fw-bold">{row.component_type}</td>
                     
-                    {/* SHO & TB */}
                     <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
                     <td>{row.sho_in || '-'}</td>
-                    {/* sho_out removed */}
                     
                     <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
-                    {/* tb_in removed */}
                     <td>{row.tb_out || '-'}</td>
                     
-                    {/* Merged Channel Section (Spans ONLY matching Base Products) */}
                     {channelSpan > 0 && (
                       <>
                         <td rowSpan={channelSpan} className="merged-channel-cell fw-bold">
@@ -225,7 +206,6 @@ const Traceability = () => {
                       </>
                     )}
                     
-                    {/* Status */}
                     <td>
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
                         {row.status || 'In Process'}
@@ -246,38 +226,33 @@ const Traceability = () => {
         </div>
       )}
 
-      {/* VIEW BLOCK 2: TARGET DRILLDOWN DETAILED FLOW */}
+      {/* VIEW BLOCK 2: REDESIGNED TARGET MO SECTOR ROUTE DETAILED FLOW */}
       {!loading && selectedMoFlow && selectedMoFlow.flow_data && (
         <div className="table-wrapper">
           <table className="trace-table">
             <thead>
               <tr className="sub-header">
                 <th>MO Reference</th>
-                <th>Department / Specific Location</th>
+                <th>Department / Routing Location</th>
                 <th>Product / Part Sub Variant</th>
                 <th>In Date</th>
                 <th>Out Date</th>
-                <th>Qty In</th>
-                <th>Qty Out</th>
+                <th>Production Qty</th>
                 <th>Execution Status</th>
               </tr>
             </thead>
             <tbody>
               {selectedMoFlow.flow_data.map((row, index) => {
-                const isFirstRow = index === 0;
                 return (
                   <tr key={index} className="data-row">
-                    {isFirstRow && (
-                      <td rowSpan={selectedMoFlow.flow_data.length} className="merged-mo-cell">
-                        <strong>{selectedMoFlow.mo}</strong>
-                      </td>
-                    )}
-                    <td>{row.department}</td>
+                    <td className="fw-bold" style={{ color: '#0284c7' }}>{row.mo_ref}</td>
+                    <td className="fw-bold">{row.department}</td>
                     <td>{row.product || '-'}</td>
                     <td>{row.in_date || '-'}</td>
                     <td>{row.out_date || '-'}</td>
-                    <td>{row.qty_in ? Number(row.qty_in).toLocaleString() : 0}</td>
-                    <td>{row.qty_out ? Number(row.qty_out).toLocaleString() : 0}</td>
+                    <td className="qty-cell fw-bold">
+                      {row.qty ? Number(row.qty).toLocaleString() : 0}
+                    </td>
                     <td>
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
                         {row.status || '-'}
@@ -286,6 +261,13 @@ const Traceability = () => {
                   </tr>
                 );
               })}
+              {selectedMoFlow.flow_data.length === 0 && (
+                <tr>
+                  <td colSpan="7" className="empty-state">
+                    No fine-grained movement records registered for this sequence.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

@@ -5,6 +5,7 @@ import io
 import threading
 import time
 import re
+import math
 from datetime import datetime
 
 router = APIRouter()
@@ -48,50 +49,55 @@ def normalize_channel(value, force_t_prefix=False):
     if pd.isna(value): return ""
     val_str = str(value).strip().upper()
     
-    for prefix in ["CH-", "CH.", "CH", "CHANNEL-", "CHANNEL", "SHEET-", "SHEET"]:
-        if val_str.startswith(prefix): val_str = val_str[len(prefix):].strip()
+    is_explicit_t = val_str.startswith("T")
+    
+    # Strip known non-essential prefixes
+    val_str = re.sub(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)', '', val_str).strip()
+    
+    # Strip T temporarily to handle leading zeros
+    if val_str.startswith("T"):
+        is_explicit_t = True
+        val_str = val_str[1:]
         
-    val_str = val_str.replace("-", "").replace(" ", "").strip()
+    val_str = val_str.replace("-", "").replace(" ", "")
     if val_str.endswith(".0"): val_str = val_str[:-2]
     
-    cleaned = val_str.lstrip("0") if val_str.lstrip("0") else "0"
+    cleaned = val_str.lstrip("0")
+    if not cleaned: cleaned = "0"
     
-    if force_t_prefix and not cleaned.startswith("T"):
+    # Re-apply T if it was explicitly there (T05) or if it's forced by the TRB master sheet
+    if force_t_prefix or is_explicit_t:
         return f"T{cleaned}"
     return cleaned
-
-# Extracts Family and prepends BT/BB to force separation
-def parse_family(prod_text):
-    text = str(prod_text).strip().upper()
-    if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN"
-    
-    match = re.search(r'(\d{3,5})', text)
-    base = match.group(1) if match else text.split()[0].split('-')[0]
-    
-    if re.search(r'\bBT\b', text) or text.startswith("BT"):
-        base = f"BT-{base}"
-    elif re.search(r'\bBB\b', text) or text.startswith("BB"):
-        base = f"BB-{base}"
-        
-    return base
 
 def parse_family_and_type(prod_text):
     text = str(prod_text).strip().upper()
     if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN", "ASSEMBLY"
     
     r_type = "ASSEMBLY"
-    if any(x in text for x in ["IM", "IR"]): r_type = "IM"
-    elif any(x in text for x in ["OM", "OR"]): r_type = "OM"
+    if any(x in text for x in ["IM", "IR", "INNER"]): r_type = "IM"
+    elif any(x in text for x in ["OM", "OR", "OUTER"]): r_type = "OM"
     
-    base_family = parse_family(text)
-    return base_family, r_type
+    # Extract baseline digits
+    match = re.search(r'(\d{3,5})', text)
+    base = match.group(1) if match else text.split()[0].split('-')[0]
+    
+    # Aggressively attach BT/BB
+    if "BT" in text.split() or text.startswith("BT") or "-BT" in text or " BT" in text:
+        base = f"BT-{base}"
+    elif "BB" in text.split() or text.startswith("BB") or "-BB" in text or " BB" in text:
+        base = f"BB-{base}"
+        
+    return base, r_type
 
 def clean_nan(value):
-    if pd.isna(value): return 0.0
+    if pd.isna(value): return 0
     val_str = str(value)
     match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val_str.replace(',', ''))
-    if match: return float(match.group())
-    return 0.0
+    if match: 
+        # Round up to nearest higher integer as requested
+        return math.ceil(float(match.group()))
+    return 0
 
 def parse_date_safe(value):
     try:
@@ -116,7 +122,10 @@ def process_master_sheets(sheets_dict, is_trb):
     for sheet_name, df in sheets_dict.items():
         if df.empty or sheet_name in ['Pivot Table 1', 'Pivot Table 2', 'PIC List', 'List']: continue
         
-        c_col = find_column(df, ["channel", "channelno", "machineno", "line", "mo", "ch"])
+        # MO separated from Channel synonyms to prevent M0QQ hijacking the channel cell
+        ch_col = find_column(df, ["channelno", "channel", "machineno", "line", "ch"])
+        mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
+        
         type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
         d_col = find_column(df, ["date", "day", "txndate"])
         prod_col = find_column(df, ["production", "prodqty", "shiftproduction", "qty", "quantity"])
@@ -124,18 +133,21 @@ def process_master_sheets(sheets_dict, is_trb):
         if not type_col: continue 
 
         for _, row in df.iterrows():
-            c_val = row.get(c_col) if c_col else sheet_name
+            c_val = row.get(ch_col) if ch_col else sheet_name
             ch = normalize_channel(c_val, force_t_prefix=is_trb)
             if not ch or ch == "0": ch = normalize_channel(sheet_name, force_t_prefix=is_trb)
+            
+            mo_val = str(row.get(mo_col)).strip() if mo_col else ""
+            if mo_val.upper() in ["NAN", "NONE"]: mo_val = ""
             
             prod_str = str(row.get(type_col)).strip().upper()
             if prod_str in ["", "NAN"]: continue
             
-            base_family = parse_family(prod_str)
-            qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
+            base_family, _ = parse_family_and_type(prod_str)
+            qty = clean_nan(row.get(prod_col)) if prod_col else 0
             dt = parse_date_safe(row.get(d_col))
 
-            ch_list.append({"ch": ch, "fam": base_family, "qty": qty, "date": dt})
+            ch_list.append({"ch": ch, "fam": base_family, "mo": mo_val, "qty": qty, "date": dt})
     return ch_list
 
 def process_tbe_data():
@@ -149,16 +161,17 @@ def process_tbe_data():
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
         dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
 
-        # --- STEP 1: CHANNEL SHEETS (Apply TRB prefix logic) ---
+        # --- STEP 1: CHANNEL SHEETS ---
         ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
 
         df_ch_grouped = pd.DataFrame(ch_list).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
             ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
-        ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date"])
+            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None)),
+            mo_list=('mo', lambda x: ", ".join(sorted(set([i for i in x if i]))))
+        ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
 
-        # --- STEP 2: TRANSIT BUFFER (Lock onto No Of Rings strictly) ---
+        # --- STEP 2: TRANSIT BUFFER ---
         tb_list = []
         for sheet_name, df in ring_wt_sheets.items():
             if df.empty: continue
@@ -167,7 +180,6 @@ def process_tbe_data():
             f_col = find_column(df, ["type", "ringfamily", "family", "variant", "product"])
             d_col = find_column(df, ["date", "indate", "outdate", "day"])
             
-            # STRICT lock onto No Of Rings to avoid fetching Ring Wt
             q_col = None
             for c in df.columns:
                 if str(c).lower().replace(" ", "").replace("#", "") == "noofrings":
@@ -178,7 +190,6 @@ def process_tbe_data():
             if not f_col: continue 
 
             for _, row in df.iterrows():
-                # We do not force T prefix here, assuming Transit sheet natively has the correct T notation if required
                 c_val = row.get(c_col) if c_col else sheet_name
                 ch = normalize_channel(c_val, force_t_prefix=False) 
                 if not ch or ch == "0": ch = normalize_channel(sheet_name, force_t_prefix=False)
@@ -187,7 +198,7 @@ def process_tbe_data():
                 if prod_text in ["", "NAN"]: continue
                 
                 base_family, r_type = parse_family_and_type(prod_text)
-                qty = clean_nan(row.get(q_col)) if q_col else 0.0
+                qty = clean_nan(row.get(q_col)) if q_col else 0
                 dt = parse_date_safe(row.get(d_col))
 
                 tb_list.append({"ch": ch, "fam": base_family, "type": r_type, "qty": qty, "date": dt})
@@ -211,9 +222,14 @@ def process_tbe_data():
             ch, fam = row["ch"], row["fam"]
             r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
             
-            tb_qty, ch_qty = clean_nan(row.get("tb_qty")), clean_nan(row.get("ch_qty"))
+            tb_qty = row.get("tb_qty", 0)
+            ch_qty = row.get("ch_qty", 0)
+            if pd.isna(tb_qty): tb_qty = 0
+            if pd.isna(ch_qty): ch_qty = 0
+
             tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
             ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
+            mo_list = row.get("mo_list", "")
 
             if tb_qty == 0 and ch_qty > 0: calc_status = "Channel Only"
             elif tb_qty > 0 and ch_qty == 0: calc_status = "Missing Channel Data"
@@ -222,13 +238,14 @@ def process_tbe_data():
 
             compiled_summary.append({
                 "channel_ref": ch,
+                "mo_ref": mo_list if pd.notna(mo_list) else "",
                 "product_variant": fam,
                 "ring_type": r_type,
-                "sho_qty": tb_qty, 
+                "sho_qty": int(tb_qty), 
                 "sho_in": str(tb_min) if pd.notna(tb_min) and tb_min else "-",
-                "tb_qty": tb_qty,
+                "tb_qty": int(tb_qty),
                 "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
-                "ch_qty": ch_qty,
+                "ch_qty": int(ch_qty),
                 "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
                 "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-",
                 "status": calc_status

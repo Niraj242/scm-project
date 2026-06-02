@@ -54,7 +54,7 @@ def normalize_channel(value, force_t_prefix=False):
     # Strip known non-essential prefixes
     val_str = re.sub(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)', '', val_str).strip()
     
-    # Strip T temporarily to handle leading zeros
+    # Strip T temporarily to handle leading zeros safely
     if val_str.startswith("T"):
         is_explicit_t = True
         val_str = val_str[1:]
@@ -65,7 +65,7 @@ def normalize_channel(value, force_t_prefix=False):
     cleaned = val_str.lstrip("0")
     if not cleaned: cleaned = "0"
     
-    # Re-apply T if it was explicitly there (T05) or if it's forced by the TRB master sheet
+    # Re-apply T if it was explicitly there (T05 -> T5) or if it's forced by the TRB master sheet
     if force_t_prefix or is_explicit_t:
         return f"T{cleaned}"
     return cleaned
@@ -82,7 +82,7 @@ def parse_family_and_type(prod_text):
     match = re.search(r'(\d{3,5})', text)
     base = match.group(1) if match else text.split()[0].split('-')[0]
     
-    # Aggressively attach BT/BB
+    # Aggressively attach BT/BB variants
     if "BT" in text.split() or text.startswith("BT") or "-BT" in text or " BT" in text:
         base = f"BT-{base}"
     elif "BB" in text.split() or text.startswith("BB") or "-BB" in text or " BB" in text:
@@ -95,7 +95,7 @@ def clean_nan(value):
     val_str = str(value)
     match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val_str.replace(',', ''))
     if match: 
-        # Round up to nearest higher integer as requested
+        # Round up to the next highest integer
         return math.ceil(float(match.group()))
     return 0
 
@@ -115,14 +115,20 @@ def load_excel_sheets(url):
         xls = pd.ExcelFile(io.BytesIO(resp.content))
         return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
     except Exception as e:
+        print(f"⚠️ Error reading workbook stream: {e}")
         return {}
 
 def process_master_sheets(sheets_dict, is_trb):
     ch_list = []
     for sheet_name, df in sheets_dict.items():
-        if df.empty or sheet_name in ['Pivot Table 1', 'Pivot Table 2', 'PIC List', 'List']: continue
+        if df.empty: continue
         
-        # MO separated from Channel synonyms to prevent M0QQ hijacking the channel cell
+        # STRICT WHITELIST: Only execute mapping for sheets starting with T or CH followed by digits
+        clean_name = str(sheet_name).strip().upper()
+        if not re.match(r'^(T|CH)[-\s]*\d+', clean_name):
+            continue
+            
+        # Separate MO searches from the baseline channel aliases
         ch_col = find_column(df, ["channelno", "channel", "machineno", "line", "ch"])
         mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
         
@@ -161,7 +167,7 @@ def process_tbe_data():
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
         dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
 
-        # --- STEP 1: CHANNEL SHEETS ---
+        # --- STEP 1: PARSE SOURCE CHANNELS ---
         ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
 
         df_ch_grouped = pd.DataFrame(ch_list).groupby(["ch", "fam"]).agg(
@@ -171,7 +177,7 @@ def process_tbe_data():
             mo_list=('mo', lambda x: ", ".join(sorted(set([i for i in x if i]))))
         ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
 
-        # --- STEP 2: TRANSIT BUFFER ---
+        # --- STEP 2: PARSE TRANSIT BUFFER DEPENDENCIES ---
         tb_list = []
         for sheet_name, df in ring_wt_sheets.items():
             if df.empty: continue
@@ -209,7 +215,7 @@ def process_tbe_data():
             tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
         ).reset_index() if tb_list else pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
 
-        # --- STEP 3: MERGE ---
+        # --- STEP 3: MATRIX RELATIONSHIP MERGE ---
         if df_tb_grouped.empty and df_ch_grouped.empty:
             MASTER_CACHE = []
             LAST_REFRESH = datetime.now()
@@ -256,7 +262,7 @@ def process_tbe_data():
         LAST_REFRESH = datetime.now()
 
     except Exception as e:
-        print(f"❌ ERROR: {str(e)}")
+        print(f"❌ COMPILATION FAULT: {str(e)}")
     finally:
         INITIALIZED = True 
         IS_UPDATING = False
@@ -267,10 +273,12 @@ def background_refresh_loop():
         time.sleep(CACHE_DURATION_MINUTES * 60)
         process_tbe_data()
 
+# Fire up automated daemon cache loop
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 @router.get("/tbe_all_mos")
 def get_tbe_dashboard():
     if not INITIALIZED:
-        return {"status": "initializing", "message": "Loading...", "data": []}
+        return {"status": "initializing", "message": "Compiling data matrices...", "data": []}
     return {"status": "success", "last_updated": str(LAST_REFRESH), "data": MASTER_CACHE}
+    

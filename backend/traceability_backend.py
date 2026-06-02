@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 import pandas as pd
 import requests
 import io
@@ -12,37 +12,32 @@ from settings import settings
 router = APIRouter()
 
 # =========================================================
-# GLOBAL CACHE & THREADING CONFIG
+# GLOBAL CACHE, DATA ENGINE & THREADING STORAGE
 # =========================================================
 MASTER_CACHE = []
-FLOW_CACHE = {}
 LAST_REFRESH = None
 IS_UPDATING = False
+INITIALIZED = False
 CACHE_DURATION_MINUTES = 5
 
+# High-speed memory tables for fine-grained drilldown rendering
+GLOBAL_JW_RECORDS = []
+GLOBAL_CH_RECORDS = []
+
+HTTP_SESSION = requests.Session()
+
 # =========================================================
-# SECURITY, CLEANING & PARSING HELPERS
+# UTILITY CLEANERS & LOGIC HELPERS
 # =========================================================
 def clean_mo(value):
-    """
-    Cleans the MO and aggressively filters out Excel junk rows.
-    Returns None if the row is invalid noise like "..." or empty.
-    """
     if pd.isna(value):
         return None
-        
     val = str(value).strip().upper().replace(" ", "").replace(".0", "")
-    
-    # Drop junk PO entries and human errors
     if val in ["NAN", "-", "...", ""] or len(val) < 4:
         return None
-        
     return val
 
 def get_mo_group(clean_mo_str):
-    """
-    Extracts the first 4 characters to group matching MOs together.
-    """
     if clean_mo_str and len(clean_mo_str) >= 4:
         return clean_mo_str[:4]
     return clean_mo_str
@@ -53,24 +48,15 @@ def normalize_text(value):
     return str(value).strip()
 
 def clean_nan(value):
-    """
-    Aggressive NaN cleaner. Prevents float('nan') from escaping 
-    into JSON and causing white-screen frontend crashes.
-    """
     try:
         if pd.isna(value) or str(value).strip().lower() in ['nan', '-', '...', '']:
             return 0.0
         f_val = float(value)
-        if math.isnan(f_val):
-            return 0.0
-        return f_val
+        return 0.0 if math.isnan(f_val) else f_val
     except:
         return 0.0
 
 def parse_date_safe(value):
-    """
-    Safely parses dates and ensures NaT (Not a Time) does not break JSON.
-    """
     try:
         if pd.isna(value) or str(value).strip().lower() in ["nan", "nat", "", "-"]:
             return None
@@ -82,26 +68,17 @@ def parse_date_safe(value):
         return None
 
 def parse_product_details(prod_text):
-    """
-    Extracts component type but skips the 4-digit product matching 
-    as requested, passing the base product through as-is.
-    """
     text = normalize_text(prod_text).upper()
     component = "IM" if "IM" in text or "IR" in text else ("OM" if "OM" in text or "OR" in text else "Assembly")
-    
     base_product = text if text else "Gen Product"
     return base_product, component
 
-def download_excel(url):
-    response = requests.get(url)
-    if response.status_code != 200:
-        raise Exception(f"Failed downloading excel from {url}")
-    return io.BytesIO(response.content)
-
 def load_excel_sheets(url):
     try:
-        excel_data = download_excel(url)
-        xls = pd.ExcelFile(excel_data)
+        resp = HTTP_SESSION.get(url, timeout=30)
+        if resp.status_code != 200:
+            return {}
+        xls = pd.ExcelFile(io.BytesIO(resp.content))
         sheets = {}
         for sheet in xls.sheet_names:
             try:
@@ -109,23 +86,24 @@ def load_excel_sheets(url):
                 df.columns = [str(c).strip().lower() for c in df.columns]
                 sheets[sheet] = df
             except Exception as e:
-                print(f"Error reading sheet [{sheet}]: {str(e)}")
+                print(f"⚠️ Error reading sheet [{sheet}]: {e}")
         return sheets
     except Exception as e:
-        print(f"Failed to load workbook from {url}: {str(e)}")
+        print(f"❌ Failed to download workbook stream from {url}: {e}")
         return {}
 
 # =========================================================
-# MAIN PROCESSING CORE LOGIC
+# CORE EXTRACTION PIPELINE
 # =========================================================
 def process_traceability_data():
-    global MASTER_CACHE, FLOW_CACHE, LAST_REFRESH, IS_UPDATING
+    global MASTER_CACHE, LAST_REFRESH, IS_UPDATING, INITIALIZED
+    global GLOBAL_JW_RECORDS, GLOBAL_CH_RECORDS
     
     if IS_UPDATING:
         return
     
     IS_UPDATING = True
-    print(f"[{datetime.now()}] STARTING BACKGROUND EXCEL CACHE REFRESH...")
+    print(f"[{datetime.now()}] STARTING BACKGROUND TRACEABILITY PIPELINE SYNC...")
 
     try:
         mo_sheets = load_excel_sheets(settings.MO_DATA_URL)
@@ -133,11 +111,12 @@ def process_traceability_data():
         trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
         dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
 
-        mo_flow_records = {}
         summary_aggregation = {}
+        local_jw_collector = []
+        local_ch_collector = []
 
         # ---------------------------------------------------------
-        # 0. INITIALIZE SUMMARY MATRIX FROM GROUND-TRUTH MO DATA
+        # 0. MAP PRIMARY GROUND-TRUTH RECORD MATRIX
         # ---------------------------------------------------------
         for sheet_name, df in mo_sheets.items():
             if "mo#" not in df.columns or "comp item" not in df.columns:
@@ -156,35 +135,29 @@ def process_traceability_data():
                     continue
                 
                 comp_type = "IM" if comp_item_str.startswith("IM") else "OM"
-                
                 raw_mo = clean_mo(row.get("mo#"))
                 if not raw_mo:
                     continue
                 
                 mo_group = get_mo_group(raw_mo)
-                
                 qty_req = clean_nan(row.get("qty req"))
                 final_variant = normalize_text(row.get("finalvariant"))
                 base_prod, _ = parse_product_details(final_variant)
                 
                 sum_key = (mo_group, base_prod, comp_type)
-                
                 if sum_key not in summary_aggregation:
                     summary_aggregation[sum_key] = {
-                        "mo": mo_group,
-                        "base_product": base_prod,
-                        "final_variant": final_variant,
-                        "component_type": comp_type,
-                        "qty_req": qty_req,
-                        "sho_qty": 0.0, "sho_in_date": None, "sho_out_date": None,
-                        "tb_qty": 0.0, "tb_in_date": None, "tb_out_date": None,
+                        "mo": mo_group, "base_product": base_prod, "final_variant": final_variant,
+                        "component_type": comp_type, "qty_req": qty_req,
+                        "sho_qty": 0.0, "sho_in_date": None,
+                        "tb_qty": 0.0, "tb_out_date": None,
                         "ch_qty": 0.0, "ch_in_date": None, "ch_out_date": None,
                     }
                 else:
                     summary_aggregation[sum_key]["qty_req"] += qty_req
 
         # ---------------------------------------------------------
-        # 1. PROCESS JOBWORK REPORT (SHO & Transit Buffer)
+        # 1. PARSE JOBWORK REPORTS (SHO & Transit Buffer)
         # ---------------------------------------------------------
         for sheet_name, df in jobwork_sheets.items():
             if "po / pr no." not in df.columns:
@@ -194,14 +167,9 @@ def process_traceability_data():
                 raw_mo = clean_mo(row.get("po / pr no."))
                 if not raw_mo: 
                     continue
-                    
+                
                 mo_group = get_mo_group(raw_mo)
-
-                if mo_group not in mo_flow_records:
-                    mo_flow_records[mo_group] = {"mo": mo_group, "rows": []}
-
-                product_raw = row.get("product")
-                product_str = normalize_text(product_raw)
+                product_str = normalize_text(row.get("product"))
                 base_prod, comp_type = parse_product_details(product_str)
                 
                 jw_challan_date = parse_date_safe(row.get("jw challan date"))
@@ -210,18 +178,12 @@ def process_traceability_data():
                 qty_returned = clean_nan(row.get("qty returned"))
                 status = normalize_text(row.get("current status"))
 
-                # LOGIC UPDATE: SHO gets In Date, TB gets Out Date. Others blank.
-                mo_flow_records[mo_group]["rows"].append({
-                    "department": "SHO", "product": product_str, 
-                    "in_date": str(jw_challan_date) if jw_challan_date else "-",
-                    "out_date": "-",
-                    "qty_in": qty_approved, "qty_out": qty_returned, "status": status
-                })
-                mo_flow_records[mo_group]["rows"].append({
-                    "department": "Transit Buffer", "product": product_str, 
-                    "in_date": "-",
-                    "out_date": str(last_challan_date) if last_challan_date else "-",
-                    "qty_in": qty_returned, "qty_out": qty_returned, "status": status
+                # Track down into raw lookup cache for deep drilldown
+                local_jw_collector.append({
+                    "mo_group": mo_group, "full_mo": raw_mo, "product": product_str,
+                    "base_product": base_prod, "component_type": comp_type,
+                    "jw_challan_date": jw_challan_date, "last_challan_date": last_challan_date,
+                    "qty_approved": qty_approved, "qty_returned": qty_returned, "status": status
                 })
 
                 sum_key = (mo_group, base_prod, comp_type)
@@ -230,23 +192,21 @@ def process_traceability_data():
                     s_agg["sho_qty"] += qty_approved
                     s_agg["tb_qty"] += qty_returned
 
-                    # LOGIC UPDATE: Master summary min/max rules adjusted
                     if jw_challan_date:
                         s_agg["sho_in_date"] = min(s_agg["sho_in_date"], jw_challan_date) if s_agg["sho_in_date"] else jw_challan_date
                     if last_challan_date:
                         s_agg["tb_out_date"] = max(s_agg["tb_out_date"], last_challan_date) if s_agg["tb_out_date"] else last_challan_date
                 else:
-                    if sum_key not in summary_aggregation:
-                        summary_aggregation[sum_key] = {
-                            "mo": mo_group, "base_product": base_prod, "final_variant": product_str,
-                            "component_type": comp_type, "qty_req": 0,
-                            "sho_qty": qty_approved, "sho_in_date": jw_challan_date, "sho_out_date": None,
-                            "tb_qty": qty_returned, "tb_in_date": None, "tb_out_date": last_challan_date,
-                            "ch_qty": 0.0, "ch_in_date": None, "ch_out_date": None,
-                        }
+                    summary_aggregation[sum_key] = {
+                        "mo": mo_group, "base_product": base_prod, "final_variant": product_str,
+                        "component_type": comp_type, "qty_req": 0,
+                        "sho_qty": qty_approved, "sho_in_date": jw_challan_date,
+                        "tb_qty": qty_returned, "tb_out_date": last_challan_date,
+                        "ch_qty": 0.0, "ch_in_date": None, "ch_out_date": None,
+                    }
 
         # ---------------------------------------------------------
-        # 2. PROCESS CHANNELS WITH SUMMED LOGIC
+        # 2. PARSE PRODUCTION CHANNELS WITH SUMMED MAXIMUMS
         # ---------------------------------------------------------
         all_channels = {**trb_sheets, **dgbb_sheets}
         channel_variant_maxes = {}
@@ -265,23 +225,18 @@ def process_traceability_data():
                     continue
                 
                 mo_group = get_mo_group(raw_mo)
-
-                prod_raw = row.get(type_col)
-                prod_str = normalize_text(prod_raw)
-                base_prod, _ = parse_product_details(prod_str)
+                prod_str = normalize_text(row.get(type_col))
+                base_prod, comp_type = parse_product_details(prod_str)
                 
                 cumulative = clean_nan(row.get("cumulative production"))
                 production = clean_nan(row.get("production"))
                 date_val = parse_date_safe(row.get("date"))
 
-                if mo_group not in mo_flow_records:
-                    mo_flow_records[mo_group] = {"mo": mo_group, "rows": []}
-
-                mo_flow_records[mo_group]["rows"].append({
-                    "department": channel_name, "product": prod_str,
-                    "in_date": str(date_val) if production > 0 and production == cumulative else "",
-                    "out_date": str(date_val) if cumulative > 0 else "",
-                    "qty_in": cumulative, "qty_out": cumulative, "status": "Completed" if cumulative > 0 else "Running"
+                # Track down into raw channel memory store
+                local_ch_collector.append({
+                    "mo_group": mo_group, "full_mo": raw_mo, "channel": channel_name,
+                    "product": prod_str, "base_product": base_prod, "component_type": comp_type,
+                    "cumulative": cumulative, "production": production, "date": date_val
                 })
 
                 v_key = (mo_group, base_prod, prod_str)
@@ -320,13 +275,13 @@ def process_traceability_data():
                     summary_aggregation[sum_key] = {
                         "mo": mo_group, "base_product": base_prod, "final_variant": "Combined Family Channel Grouping",
                         "component_type": comp, "qty_req": 0,
-                        "sho_qty": 0.0, "sho_in_date": None, "sho_out_date": None,
-                        "tb_qty": 0.0, "tb_in_date": None, "tb_out_date": None,
+                        "sho_qty": 0.0, "sho_in_date": None,
+                        "tb_qty": 0.0, "tb_out_date": None,
                         "ch_qty": f_meta["ch_qty"], "ch_in_date": f_meta["ch_in_date"], "ch_out_date": f_meta["ch_out_date"],
                     }
 
         # ---------------------------------------------------------
-        # 3. COMPILING FINAL CACHE DATA FRAMES & SORTING
+        # 3. COMPILING GLOBAL DASHBOARD KPI MAPS
         # ---------------------------------------------------------
         compiled_summary = []
         for (mo_group, base_prod, comp_type), s_agg in summary_aggregation.items():
@@ -343,13 +298,13 @@ def process_traceability_data():
                 "final_variant": s_agg["final_variant"],
                 "component_type": comp_type,
                 "qty_req": int(s_agg["qty_req"]),
-                "sho_qty": s_agg["sho_qty"],
+                "sho_qty": math.ceil(s_agg["sho_qty"]),
                 "sho_in": str(s_agg["sho_in_date"]) if s_agg["sho_in_date"] else "-",
-                "sho_out": "-",  # Hardcoded blank based on new logic
-                "tb_qty": s_agg["tb_qty"],
-                "tb_in": "-",    # Hardcoded blank based on new logic
+                "sho_out": "-",
+                "tb_qty": math.ceil(s_agg["tb_qty"]),
+                "tb_in": "-",
                 "tb_out": str(s_agg["tb_out_date"]) if s_agg["tb_out_date"] else "-",
-                "ch_qty": s_agg["ch_qty"],
+                "ch_qty": math.ceil(s_agg["ch_qty"]),
                 "ch_in": str(s_agg["ch_in_date"]) if s_agg["ch_in_date"] else "-",
                 "ch_out": str(s_agg["ch_out_date"]) if s_agg["ch_out_date"] else "-",
                 "status": calc_status
@@ -357,50 +312,148 @@ def process_traceability_data():
 
         compiled_summary.sort(key=lambda x: (x["mo"], x["base_product"], x["component_type"]))
         
+        # Commit safely into memory variables
+        GLOBAL_JW_RECORDS = local_jw_collector
+        GLOBAL_CH_RECORDS = local_ch_collector
         MASTER_CACHE = compiled_summary
-        FLOW_CACHE = mo_flow_records
         LAST_REFRESH = datetime.now()
-        print(f"[{datetime.now()}] PIPELINE SYNCHRONIZED. CACHE INSTANCED.")
+        INITIALIZED = True
+        print(f"[{datetime.now()}] TRACEABILITY MATRIX RE-CALCULATED SUCCESSFULLY.")
 
     except Exception as e:
-        print(f"CRITICAL DATA ENGINE THREAD ERROR: {str(e)}")
+        print(f"❌ PIPELINE ERROR GENERATING MATRICES: {str(e)}")
     finally:
         IS_UPDATING = False
 
-# Background Daemon initialization
 def background_refresh_loop():
     process_traceability_data()
     while True:
         time.sleep(CACHE_DURATION_MINUTES * 60)
         process_traceability_data()
 
-t = threading.Thread(target=background_refresh_loop, daemon=True)
-t.start()
+threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 # =========================================================
-# ROUTER API SERVICE ENDPOINTS
+# ROUTER API ENDPOINTS
 # =========================================================
 @router.get("/traceability_all_mos")
 def get_all_mos():
-    if not LAST_REFRESH and not MASTER_CACHE:
-        return {
-            "status": "initializing",
-            "message": "System maps are being prepared. Please hold...",
-            "data": []
-        }
-    return {
-        "status": "success",
-        "last_updated": str(LAST_REFRESH),
-        "data": MASTER_CACHE
-    }
+    if not INITIALIZED:
+        return {"status": "initializing", "message": "Downloading production schemas...", "data": []}
+    return {"status": "success", "last_updated": str(LAST_REFRESH), "data": MASTER_CACHE}
 
 @router.get("/traceability_report/{mo}")
-def get_flow(mo: str):
-    search_mo = get_mo_group(clean_mo(mo))
-    if search_mo in FLOW_CACHE:
-        return {
-            "status": "success",
-            "last_updated": str(LAST_REFRESH),
-            "data": FLOW_CACHE[search_mo]
+def get_traceability_flow(mo: str):
+    """
+    Generates structured routing components mirroring the layout logic of the TBE module.
+    SHO & TB stay aggregated at the variant level, while the Channel items split by Exact Single MO.
+    """
+    search_group = get_mo_group(clean_mo(mo))
+    
+    # Filter global memory tracking stores
+    jw_filtered = [r for r in GLOBAL_JW_RECORDS if r["mo_group"] == search_group]
+    ch_filtered = [r for r in GLOBAL_CH_RECORDS if r["mo_group"] == search_group]
+
+    if not jw_filtered and not ch_filtered:
+        raise HTTPException(status_code=404, detail=f"No matching trace history records for order prefix: '{mo}'")
+
+    # Establish fallback string of unique full production order numbers
+    unique_full_mos = sorted(list(set([str(r["full_mo"]) for r in jw_filtered if r.get("full_mo")])))
+    mo_group_reference = ", ".join(unique_full_mos) if unique_full_mos else search_group
+
+    sho_map = {}
+    tb_map = {}
+    ch_map = {}
+
+    # Gather SHO & Transit Buffer rows (Grouped cleanly by Variant string)
+    for r in jw_filtered:
+        prod_name = r["product"]
+        norm_key = str(prod_name).upper().replace("-", "").replace(" ", "")
+        if not norm_key: 
+            continue
+        
+        # Aggregate SHO
+        if norm_key not in sho_map:
+            sho_map[norm_key] = {"label": prod_name, "qty": 0.0, "dates": [], "status": r["status"]}
+        sho_map[norm_key]["qty"] += r["qty_approved"]
+        if r["jw_challan_date"]: 
+            sho_map[norm_key]["dates"].append(r["jw_challan_date"])
+
+        # Aggregate Transit Buffer
+        if norm_key not in tb_map:
+            tb_map[norm_key] = {"label": prod_name, "qty": 0.0, "dates": [], "status": r["status"]}
+        tb_map[norm_key]["qty"] += r["qty_returned"]
+        if r["last_challan_date"]: 
+            tb_map[norm_key]["dates"].append(r["last_challan_date"])
+
+    # Gather Channels (Grouped explicitly by Channel Name AND Variant AND Exact Single MO)
+    for r in ch_filtered:
+        prod_name = r["product"]
+        exact_mo = r["full_mo"]
+        ch_name = r["channel"]
+        norm_v = str(prod_name).upper().replace("-", "").replace(" ", "")
+        if not norm_v: 
+            continue
+        
+        # Unique tuple key maps separate rows for distinct production orders on the same channel
+        norm_key = (ch_name, norm_v, exact_mo)
+        if norm_key not in ch_map:
+            ch_map[norm_key] = {
+                "channel_name": ch_name, "label": prod_name, 
+                "exact_mo": exact_mo, "max_cum": 0.0, "dates": []
+            }
+        
+        if r["cumulative"] > ch_map[norm_key]["max_cum"]:
+            ch_map[norm_key]["max_cum"] = r["cumulative"]
+        if r["date"]: 
+            ch_map[norm_key]["dates"].append(r["date"])
+
+    sequential_rows = []
+
+    # Emit SHO rows
+    for k, data in sho_map.items():
+        in_d = str(min(data["dates"])) if data["dates"] else "-"
+        sequential_rows.append({
+            "mo_ref": mo_group_reference,
+            "department": "SHO Department",
+            "product": data["label"],
+            "in_date": in_d,
+            "out_date": "-",
+            "qty": math.ceil(data["qty"]),
+            "status": data["status"] if data["status"] else "Allocated"
+        })
+
+    # Emit Transit Buffer rows
+    for k, data in tb_map.items():
+        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        sequential_rows.append({
+            "mo_ref": mo_group_reference,
+            "department": "Transit Buffer",
+            "product": data["label"],
+            "in_date": "-",
+            "out_date": out_d,
+            "qty": math.ceil(data["qty"]),
+            "status": "In Transit"
+        })
+
+    # Emit Channel Section rows split by Exact Single Full MO
+    for k, data in ch_map.items():
+        in_d = str(min(data["dates"])) if data["dates"] else "-"
+        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        sequential_rows.append({
+            "mo_ref": data["exact_mo"],  # Displays exact single full MO
+            "department": f"Channel Section ({data['channel_name']})",
+            "product": data["label"],
+            "in_date": in_d,
+            "out_date": out_d,
+            "qty": math.ceil(data["max_cum"]),
+            "status": "Completed" if data["max_cum"] > 0 else "Running"
+        })
+
+    return {
+        "status": "success",
+        "data": {
+            "mo": search_group,
+            "rows": sequential_rows
         }
-    raise HTTPException(status_code=404, detail=f"No details tracked for variant parameters: '{mo}'")
+    }

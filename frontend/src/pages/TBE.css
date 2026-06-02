@@ -260,6 +260,43 @@
   color: #2563eb; /* Matches your interactive blue brand color */
 }
 
+.clickable-cell {
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+.clickable-cell:hover {
+  background-color: #f1f8ff;
+  text-decoration: underline;
+}
+.detail-row {
+  border-bottom: 2px solid #ccc;
+  box-shadow: inset 0 3px 5px rgba(0,0,0,0.05);
+}
+.sub-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+  background-color: white;
+  border: 1px solid #ddd;
+}
+.sub-table th, .sub-table td {
+  padding: 8px 12px;
+  border-bottom: 1px solid #eee;
+  text-align: left;
+}
+.sub-table th {
+  background-color: #f4f6f8;
+  color: #333;
+  font-weight: bold;
+}
+.badge-source {
+  background-color: #e2e8f0;
+  color: #475569;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
 @keyframes spin {
   0% { transform: rotate(0deg); }
   100% { transform: rotate(360deg); }

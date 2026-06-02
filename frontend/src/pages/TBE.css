@@ -24,11 +24,14 @@
   margin: 0 0 4px 0;
 }
 
-/* Add this inside your TBE.css */
 .table-wrapper {
   max-height: 75vh;
   overflow-y: auto;
   position: relative;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  overflow-x: auto;
 }
 
 .trace-table th {
@@ -37,14 +40,13 @@
   box-shadow: 0 2px 2px -1px rgba(0, 0, 0, 0.4);
 }
 
-/* The top row of headers */
+/* Sticky Rows Header Control */
 .super-header th {
   top: 0;
 }
 
-/* The bottom row of headers */
 .sub-header th {
-  top: 38px; /* You may need to tweak this slightly (e.g., 40px, 45px) depending on your exact font size */
+  top: 38px; 
 }
 
 .sub-tag {
@@ -68,6 +70,7 @@
   font-size: 14px;
   outline: none;
   transition: border-color 0.2s, box-shadow 0.2s;
+  background-color: #ffffff;
 }
 
 .search-box:focus {
@@ -91,13 +94,6 @@
 }
 
 /* Table Architecture Grid */
-.table-wrapper {
-  background: #ffffff;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  overflow-x: auto;
-}
-
 .trace-table {
   width: 100%;
   border-collapse: collapse; 
@@ -123,10 +119,10 @@
   border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
-.meta-head { background-color: #1e293b; } /* Slate 800 */
-.sho-head  { background-color: #1e3a8a; } /* Blue 900 */
-.tb-head   { background-color: #7c2d12; } /* Orange 900 */
-.ch-head   { background-color: #065f46; } /* Emerald 800 */
+.meta-head { background-color: #1e293b; } 
+.sho-head  { background-color: #1e3a8a; } 
+.tb-head   { background-color: #7c2d12; } 
+.ch-head   { background-color: #065f46; } 
 
 /* Metrics Sub Headers */
 .sub-header th {
@@ -142,22 +138,20 @@
 
 .merged-mo-cell, 
 .merged-channel-cell {
-  background-color: #ffffff !important; /* Overrides hover so parent spanned block does not flash */
+  background-color: #ffffff !important; 
 }
 
-.mo-link-btn {
-  background: none;
-  border: none;
-  color: #2563eb;
-  font-weight: 700;
+/* Interactive Component Interlock */
+.clickable-family-cell {
   cursor: pointer;
   text-decoration: underline;
-  padding: 0;
-  font-size: 13px;
+  color: #2563eb !important;
+  transition: all 0.15s ease;
 }
 
-.mo-link-btn:hover {
-  color: #1d4ed8;
+.clickable-family-cell:hover {
+  background-color: #eff6ff !important;
+  color: #1d4ed8 !important;
 }
 
 /* Typography Utility Modifiers */
@@ -166,9 +160,8 @@
   color: #0f172a;
 }
 
-.qty-cell {
-  font-weight: 600;
-  color: #334155;
+.text-start {
+  text-align: left;
 }
 
 /* State Status Badge System */
@@ -239,12 +232,6 @@
   margin-bottom: 4px;
 }
 
-.initializing-box .sub-text { 
-  color: #3b82f6; 
-  font-size: 14px; 
-  margin: 8px 0 0 0; 
-}
-
 /* CSS Live Wireframe Spinner Keyframe */
 .spinner {
   width: 28px;
@@ -256,9 +243,8 @@
   animation: spin 0.8s linear infinite;
 }
 
-.text-primary {
-  color: #2563eb; /* Matches your interactive blue brand color */
-}
+.text-primary { color: #2563eb; }
+.text-success { color: #166534; }
 
 @keyframes spin {
   0% { transform: rotate(0deg); }
@@ -266,100 +252,126 @@
 }
 
 /* ==========================================================================
-   Drill-Down Modal Overlay Styles
+   Modal Breakdown Interface Overlay Architecture
    ========================================================================== */
-
 .modal-overlay {
   position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   background-color: rgba(15, 23, 42, 0.6);
   display: flex;
-  justify-content: center;
   align-items: center;
-  z-index: 1000;
-  backdrop-filter: blur(3px);
-  animation: fadeIn 0.2s ease-out;
+  justify-content: center;
+  z-index: 2000;
+  backdrop-filter: blur(4px);
 }
 
 .modal-content {
   background: #ffffff;
-  border-radius: 8px;
-  width: 90%;
-  max-width: 800px;
+  border-radius: 12px;
+  width: 750px;
+  max-width: 92%;
   max-height: 85vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.25);
-  overflow: hidden;
-  animation: slideUp 0.3s ease-out;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.15), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  animation: modalSlideUp 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes modalSlideUp {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .modal-header {
-  padding: 16px 24px;
+  padding: 18px 24px;
   border-bottom: 1px solid #e2e8f0;
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background: #f8fafc;
+  background-color: #f8fafc;
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
 }
 
-.modal-header h2 {
+.modal-header h3 {
   margin: 0;
   font-size: 18px;
   color: #0f172a;
   font-weight: 700;
 }
 
-.close-btn {
+.modal-subheading {
+  margin: 4px 0 0 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
+.close-modal-btn {
   background: none;
   border: none;
   font-size: 28px;
-  line-height: 1;
   cursor: pointer;
-  color: #64748b;
-  transition: color 0.2s;
+  color: #94a3b8;
+  line-height: 1;
+  padding: 0;
+  transition: color 0.15s;
 }
 
-.close-btn:hover {
-  color: #ef4444;
+.close-modal-btn:hover {
+  color: #475569;
 }
 
 .modal-body {
   padding: 24px;
   overflow-y: auto;
   background-color: #ffffff;
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
 }
 
-.details-table {
+.modal-table-wrapper {
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+/* Detail Variant Table Style (Stacked entries sequence) */
+.detail-variant-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
-  text-align: left;
+  text-align: center;
 }
 
-.details-table th, .details-table td {
-  border: 1px solid #e2e8f0;
+.detail-variant-table th {
+  background-color: #1e293b;
+  color: #ffffff;
   padding: 12px;
-}
-
-.details-table th {
-  background-color: #f1f5f9;
   font-weight: 600;
-  color: #334155;
-  position: sticky;
-  top: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
-.details-table tbody tr:hover {
+.detail-variant-table td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 12px;
+  color: #334155;
+}
+
+.detail-variant-table tr:last-child td {
+  border-bottom: none;
+}
+
+.detail-variant-table tr:nth-child(even) {
   background-color: #f8fafc;
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-@keyframes slideUp {
-  from { opacity: 0; transform: translateY(20px); }
-  to { opacity: 1; transform: translateY(0); }
+.detail-loading-box {
+  text-align: center;
+  padding: 32px 0;
+  color: #64748b;
 }

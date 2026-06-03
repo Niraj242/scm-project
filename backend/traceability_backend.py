@@ -22,7 +22,7 @@ GLOBAL_RAW_RECORDS = {"mo_data": [], "jw_data": [], "ch_data": []}
 HTTP_SESSION = requests.Session()
 
 def clean_mo(value):
-    """Aggressively checks and cleans MO strings. Returns None for blanks/NaNs to prevent ghost records."""
+    """Aggressively checks and cleans MO strings."""
     if pd.isna(value): return None
     val = str(value).strip().upper().replace(" ", "")
     if val.endswith(".0"): 
@@ -30,7 +30,7 @@ def clean_mo(value):
     if not val or val in ["NAN", "-", "...", "", "NAT", "NONE", "NA", "NULL"]: 
         return None
     if len(val) < 4: 
-        return None # MOs should be at least 4 characters long
+        return None 
     return val
 
 def get_mo_group(clean_mo_str):
@@ -41,14 +41,11 @@ def get_mo_group(clean_mo_str):
     return group
 
 def clean_family_name(text):
-    """Strictly isolates the bearing family number (e.g., '6007') and discards garbage text."""
+    """Strictly isolates the bearing family number and discards garbage text."""
     if pd.isna(text): return "Unknown Bearing"
     t = str(text).upper()
     
-    # Clean out known garbage words first
     t = re.sub(r'(?i)(NORMAL|INNER|OUTER|GENERIC PRODUCT)', '', t)
-    
-    # Extract the bearing number sequence (3 or more digits + optional trailing characters)
     match = re.search(r'(\d{3,}[A-Z0-9\-]*)', t)
     if match:
         core = match.group(1)
@@ -95,7 +92,7 @@ def load_excel_sheets(url):
         return {}
 
 def fetch_all_data_concurrently():
-    """Dramatically speeds up data loading by downloading all 4 sheets in parallel."""
+    """Speeds up data loading by downloading all 4 sheets in parallel."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         f_mo = executor.submit(load_excel_sheets, settings.MO_DATA_URL)
         f_jw = executor.submit(load_excel_sheets, settings.JOBWORK_REPORT_URL)
@@ -128,7 +125,6 @@ def process_traceability_data():
     IS_UPDATING = True
 
     try:
-        # Load all sheets in parallel to fix the 2-minute delay
         mo_sheets, jobwork_sheets, trb_sheets, dgbb_sheets = fetch_all_data_concurrently()
 
         summary_map = {}
@@ -151,17 +147,22 @@ def process_traceability_data():
                 mo_group = get_mo_group(raw_mo)
                 if not mo_group: continue
                 
-                comp_raw = str(row.get("comp item", "")).strip()
-                comp_type = determine_component(comp_raw)
+                comp_raw = str(row.get("comp item", "")).strip().upper()
                 
+                # STRICT RULE: Must START WITH "IM" or "OM"
+                if not (comp_raw.startswith("IM") or comp_raw.startswith("OM")):
+                    continue
+                
+                comp_type = "IM" if comp_raw.startswith("IM") else "OM"
                 qty_req = clean_nan(row.get("qty req", 0))
                 final_variant = clean_family_name(row.get("finalvariant"))
                 
                 raw_mo_data.append({"mo_group": mo_group, "variant": final_variant, "comp_type": comp_type, "qty_req": qty_req})
                 data = ensure_mo_in_summary(summary_map, mo_group, final_variant)
                 
-                # Restored to += to ensure valid rows are added together and not overwritten by zero-rows
-                data["components"][comp_type]["qty_req"] += qty_req
+                # STRICT ASSIGNMENT: No summation for MO Target Quantities
+                if qty_req > 0:
+                    data["components"][comp_type]["qty_req"] = qty_req
 
         # 2. JobWork Data
         for _, df in jobwork_sheets.items():
@@ -176,7 +177,6 @@ def process_traceability_data():
                 raw_product = row.get("product", "")
                 variant = clean_family_name(raw_product)
                 
-                # Blocks ghost records where MO is accidentally typed as the bearing number
                 if mo_group == variant: continue 
 
                 comp_type = determine_component(raw_product)
@@ -211,7 +211,6 @@ def process_traceability_data():
                 
                 variant = clean_family_name(row.get(type_col)) if type_col else "Unknown Bearing"
                 
-                # Blocks ghost records where MO is accidentally typed as the bearing number
                 if mo_group == variant: continue 
 
                 ch_qty = clean_nan(row.get("production", 0))

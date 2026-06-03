@@ -21,42 +21,41 @@ GLOBAL_RAW_RECORDS = {"mo_data": [], "jw_data": [], "ch_data": []}
 HTTP_SESSION = requests.Session()
 
 def clean_mo(value):
+    """Aggressively checks and cleans MO strings. Returns None for blanks/NaNs to prevent ghost records."""
     if pd.isna(value): return None
     val = str(value).strip().upper().replace(" ", "")
     if val.endswith(".0"): 
         val = val[:-2]
-    if val in ["NAN", "-", "...", "", "NAT", "NONE"]: 
+    if not val or val in ["NAN", "-", "...", "", "NAT", "NONE"]: 
         return None
+    if len(val) < 3: 
+        return None # Prevents stray 1-2 character anomalies from creating ghost groups
     return val
 
 def get_mo_group(clean_mo_str):
-    if not clean_mo_str: return clean_mo_str
-    # Restored Original Grouping: Match numeric MOs, or group by first 4 characters (e.g. M0QQ)
+    if not clean_mo_str: return None
     match = re.match(r'^(\d{4,})', clean_mo_str)
-    return match.group(1) if match else clean_mo_str[:4] if len(clean_mo_str) >= 4 else clean_mo_str
+    group = match.group(1) if match else clean_mo_str[:4] if len(clean_mo_str) >= 4 else clean_mo_str
+    if not group or group.strip() == "": return None
+    return group
 
 def clean_family_name(text):
-    if pd.isna(text) or str(text).strip().upper() in ["NAN", "NONE", "", "GENERIC PRODUCT"]:
-        return "Unknown Bearing"
+    """Strictly isolates the bearing family number (e.g., '6007') and discards garbage text."""
+    if pd.isna(text): return "Unknown Bearing"
+    t = str(text).upper()
     
-    t = str(text)
+    # Clean out known garbage words first
+    t = re.sub(r'(?i)(NORMAL|INNER|OUTER|GENERIC PRODUCT)', '', t)
     
-    # 1. Clean attached modifiers (e.g. 6007/NormalIM -> 6007/Normal)
-    t = re.sub(r'(?i)NormalIM', 'Normal', t)
-    t = re.sub(r'(?i)NormalOM', 'Normal', t)
-    
-    # 2. Clean prefixes/suffixes directly touching numbers (IM6007 -> 6007, 6007IM -> 6007)
-    t = re.sub(r'(?i)^IM(?=\d)', '', t)
-    t = re.sub(r'(?i)^OM(?=\d)', '', t)
-    t = re.sub(r'(?i)(?<=\d)IM$', '', t)
-    t = re.sub(r'(?i)(?<=\d)OM$', '', t)
-    
-    # 3. Clean standalone indicator words
-    t = re.sub(r'(?i)\b(?:IM|OM|INNER|OUTER)\b', '', t)
-    
-    # Clean up any leftover punctuation at the ends
-    t = t.strip(' /-_')
-    return t if t else "Unknown Bearing"
+    # Extract the bearing number sequence (3 or more digits + optional trailing characters)
+    match = re.search(r'(\d{3,}[A-Z0-9\-]*)', t)
+    if match:
+        core = match.group(1)
+        # Strip trailing IM/OM if physically attached to the digits (e.g., '6007IM' -> '6007')
+        core = re.sub(r'(?i)(IM|OM)$', '', core)
+        return core.strip('- ')
+        
+    return "Unknown Bearing"
 
 def clean_nan(value):
     try:
@@ -90,7 +89,8 @@ def load_excel_sheets(url):
             df.columns = [str(c).strip().lower() for c in df.columns]
             sheets[sheet] = df
         return sheets
-    except:
+    except Exception as e:
+        print(f"Error loading {url}: {e}")
         return {}
 
 def ensure_mo_in_summary(summary_map, mo_group, potential_family="Unknown Bearing"):
@@ -127,7 +127,7 @@ def process_traceability_data():
         raw_jw_data = []
         raw_ch_data = []
 
-        # 1. MO Data
+        # 1. MO Data (Using to_dict('records') to fix processing speed)
         for _, df in mo_sheets.items():
             if "mo#" not in df.columns: continue
             
@@ -135,39 +135,46 @@ def process_traceability_data():
                 df["pdiv"] = df["pdiv"].fillna("").astype(str).str.strip().str.upper()
                 df = df[df["pdiv"].isin(["227D", "227T"])]
 
-            for _, row in df.iterrows():
+            for row in df.to_dict('records'):
                 raw_mo = clean_mo(row.get("mo#"))
                 if not raw_mo: continue
                 
                 mo_group = get_mo_group(raw_mo)
-                qty_req = clean_nan(row.get("qty req") if "qty req" in df.columns else 0)
+                if not mo_group: continue
                 
+                comp_raw = str(row.get("comp item", "")).strip().upper()
+                # STRICT FILTER: Only process rows explicitly labeled IM or OM
+                if comp_raw not in ["IM", "OM"]: 
+                    continue
+                
+                qty_req = clean_nan(row.get("qty req", 0))
                 final_variant = clean_family_name(row.get("finalvariant"))
-                comp_raw = row.get("comp item") if "comp item" in df.columns else ""
-                comp_type = determine_component(comp_raw)
                 
-                raw_mo_data.append({"mo_group": mo_group, "variant": final_variant, "comp_type": comp_type, "qty_req": qty_req})
+                raw_mo_data.append({"mo_group": mo_group, "variant": final_variant, "comp_type": comp_raw, "qty_req": qty_req})
 
                 data = ensure_mo_in_summary(summary_map, mo_group, final_variant)
-                data["components"][comp_type]["qty_req"] += qty_req
+                
+                # STRICT ASSIGNMENT: Directly set quantity, do NOT add multiple rows together
+                data["components"][comp_raw]["qty_req"] = qty_req
 
         # 2. JobWork Data
         for _, df in jobwork_sheets.items():
             if "po / pr no." not in df.columns: continue
-            for _, row in df.iterrows():
+            for row in df.to_dict('records'):
                 raw_mo = clean_mo(row.get("po / pr no."))
                 if not raw_mo: continue
                 
                 mo_group = get_mo_group(raw_mo)
-                raw_product = row.get("product") if "product" in df.columns else ""
+                if not mo_group: continue
                 
+                raw_product = row.get("product", "")
                 variant = clean_family_name(raw_product)
                 comp_type = determine_component(raw_product)
 
-                sho_qty = clean_nan(row.get("qty approved") if "qty approved" in df.columns else 0)
-                tb_qty = clean_nan(row.get("qty returned") if "qty returned" in df.columns else 0)
-                sho_date = parse_date_safe(row.get("jw challan date") if "jw challan date" in df.columns else None)
-                tb_date = parse_date_safe(row.get("last challan date") if "last challan date" in df.columns else None)
+                sho_qty = clean_nan(row.get("qty approved", 0))
+                tb_qty = clean_nan(row.get("qty returned", 0))
+                sho_date = parse_date_safe(row.get("jw challan date"))
+                tb_date = parse_date_safe(row.get("last challan date"))
 
                 raw_jw_data.append({
                     "mo_group": mo_group, "variant": variant, "comp_type": comp_type,
@@ -186,14 +193,16 @@ def process_traceability_data():
             if "mo" not in df.columns: continue
             type_col = "type" if "type" in df.columns else ("product" if "product" in df.columns else None)
             
-            for _, row in df.iterrows():
+            for row in df.to_dict('records'):
                 raw_mo = clean_mo(row.get("mo"))
                 if not raw_mo: continue
                 
                 mo_group = get_mo_group(raw_mo)
-                variant = clean_family_name(row.get(type_col))
-                ch_qty = clean_nan(row.get("production") if "production" in df.columns else 0)
-                ch_date = parse_date_safe(row.get("date") if "date" in df.columns else None)
+                if not mo_group: continue
+                
+                variant = clean_family_name(row.get(type_col)) if type_col else "Unknown Bearing"
+                ch_qty = clean_nan(row.get("production", 0))
+                ch_date = parse_date_safe(row.get("date"))
 
                 raw_ch_data.append({"mo_group": mo_group, "variant": variant, "ch_qty": ch_qty, "ch_date": ch_date})
 
@@ -257,8 +266,9 @@ def get_all_mos():
 @router.get("/traceability_report/{mo}")
 def get_traceability_flow(mo: str):
     search_group = get_mo_group(clean_mo(mo))
-    
-    # Dictionaries to aggregate Variant logs cleanly
+    if not search_group:
+        return {"status": "error", "message": "Invalid MO"}
+        
     jw_sho_agg, jw_tb_agg, ch_agg = {}, {}, {}
 
     for r in GLOBAL_RAW_RECORDS["jw_data"]:
@@ -285,7 +295,6 @@ def get_traceability_flow(mo: str):
 
     rows = []
 
-    # Format Jobwork SHO Rows
     for v_name, data in jw_sho_agg.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         rows.append({
@@ -294,7 +303,6 @@ def get_traceability_flow(mo: str):
             "qty": math.ceil(data["qty"]), "status": "Allocated"
         })
         
-    # Format Jobwork Transit Buffer Rows
     for v_name, data in jw_tb_agg.items():
         out_d = str(max(data["dates"])) if data["dates"] else "-"
         rows.append({
@@ -303,7 +311,6 @@ def get_traceability_flow(mo: str):
             "qty": math.ceil(data["qty"]), "status": "In Transit"
         })
 
-    # Format Channel Rows (Single row per variant, displaying Start and End Date)
     for v_name, data in ch_agg.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"

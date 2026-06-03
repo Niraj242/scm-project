@@ -21,12 +21,13 @@ HTTP_SESSION = requests.Session()
 
 def clean_mo(value):
     if pd.isna(value): return None
-    val = str(value).strip().upper().replace(" ", "").replace(".0", "")
-    if val in ["NAN", "-", "...", ""]: return None
+    # Aggressively clean the MO string to ensure cross-sheet matching
+    val = str(value).strip().upper().replace(" ", "")
+    if val.endswith(".0"): 
+        val = val[:-2]
+    if val in ["NAN", "-", "...", "", "NAT", "NONE"]: 
+        return None
     return val
-
-def get_mo_group(clean_mo_str):
-    return clean_mo_str
 
 def clean_nan(value):
     try:
@@ -47,12 +48,12 @@ def parse_date_safe(value):
 def determine_component(text):
     text = str(text).strip().upper()
     if "OM" in text or "OUTER" in text: return "OM"
-    return "IM" # Default Inner Module
+    return "IM" # Default to Inner Module if unspecified
 
 def is_valid_family(text):
-    """Prevents IM/OM from being set as the family base product"""
+    """Strictly prevents IM/OM/Generic text from being set as the bearing family base product"""
     t = str(text).strip().upper()
-    if t in ["IM", "OM", "INNER", "OUTER", "GENERIC PRODUCT", "NAN", "NONE", ""]:
+    if pd.isna(text) or t in ["IM", "OM", "INNER", "OUTER", "GENERIC PRODUCT", "NAN", "NONE", ""]:
         return False
     return True
 
@@ -83,7 +84,7 @@ def ensure_mo_in_summary(summary_map, mo_group, potential_family="Unknown Bearin
             }
         }
     else:
-        # Update family name if we found a better one than the default
+        # If we find a better family name later in the sheets, update it
         if is_valid_family(potential_family) and summary_map[mo_group]["base_product"] == "Unknown Bearing":
             summary_map[mo_group]["base_product"] = potential_family
             
@@ -105,22 +106,21 @@ def process_traceability_data():
         raw_jw_data = []
         raw_ch_data = []
 
-        # 1. MO Data
+        # 1. Process MO Data (Extract Target Qty & Base Families)
         for _, df in mo_sheets.items():
             if "mo#" not in df.columns: continue
             
-            # PDIV Filter
+            # Apply PDIV Filter (Exclude everything except 227D and 227T)
             if "pdiv" in df.columns:
                 df["pdiv"] = df["pdiv"].fillna("").astype(str).str.strip().str.upper()
                 df = df[df["pdiv"].isin(["227D", "227T"])]
 
             for _, row in df.iterrows():
-                raw_mo = clean_mo(row.get("mo#"))
-                if not raw_mo: continue
+                mo_group = clean_mo(row.get("mo#"))
+                if not mo_group: continue
                 
-                mo_group = get_mo_group(raw_mo)
                 qty_req = clean_nan(row.get("qty req") if "qty req" in df.columns else 0)
-                final_variant = str(row.get("finalvariant")).strip() if "finalvariant" in df.columns and not pd.isna(row.get("finalvariant")) else ""
+                final_variant = str(row.get("finalvariant")).strip() if "finalvariant" in df.columns else ""
                 
                 comp_raw = row.get("comp item") if "comp item" in df.columns else ""
                 comp_type = determine_component(comp_raw)
@@ -133,15 +133,14 @@ def process_traceability_data():
                 data = ensure_mo_in_summary(summary_map, mo_group, final_variant)
                 data["components"][comp_type]["qty_req"] += qty_req
 
-        # 2. JobWork Data
+        # 2. Process JobWork Data (SHO & TB)
         for _, df in jobwork_sheets.items():
             if "po / pr no." not in df.columns: continue
             for _, row in df.iterrows():
-                raw_mo = clean_mo(row.get("po / pr no."))
-                if not raw_mo: continue
+                mo_group = clean_mo(row.get("po / pr no."))
+                if not mo_group: continue
                 
-                mo_group = get_mo_group(raw_mo)
-                variant = str(row.get("product")).strip() if "product" in df.columns and not pd.isna(row.get("product")) else ""
+                variant = str(row.get("product")).strip() if "product" in df.columns else ""
                 comp_type = determine_component(variant)
 
                 sho_qty = clean_nan(row.get("qty approved") if "qty approved" in df.columns else 0)
@@ -160,19 +159,20 @@ def process_traceability_data():
                 if sho_date: data["components"][comp_type]["sho_d"] = str(sho_date)
                 if tb_date: data["components"][comp_type]["tb_d"] = str(tb_date)
 
-        # 3. Channel Data (Unified)
+        # 3. Process Channel Data (Unified TRB & DGBB)
         all_channels = {**trb_sheets, **dgbb_sheets}
         for _, df in all_channels.items():
             if "mo" not in df.columns: continue
             type_col = "type" if "type" in df.columns else ("product" if "product" in df.columns else None)
             
             for _, row in df.iterrows():
-                raw_mo = clean_mo(row.get("mo"))
-                if not raw_mo: continue
+                mo_group = clean_mo(row.get("mo"))
+                if not mo_group: continue
                 
-                mo_group = get_mo_group(raw_mo)
-                variant = str(row.get(type_col)).strip() if type_col and not pd.isna(row.get(type_col)) else ""
-                ch_qty = clean_nan(row.get("cumulative production") if "cumulative production" in df.columns else 0)
+                variant = str(row.get(type_col)).strip() if type_col else ""
+                
+                # FIXED: Now strictly summing 'production', NOT 'cumulative production'
+                ch_qty = clean_nan(row.get("production") if "production" in df.columns else 0)
                 ch_date = parse_date_safe(row.get("date") if "date" in df.columns else None)
 
                 raw_ch_data.append({
@@ -180,12 +180,11 @@ def process_traceability_data():
                 })
 
                 data = ensure_mo_in_summary(summary_map, mo_group, variant)
-                # FIX: SUMMATION INSTEAD OF MAX
                 data["ch_qty"] += ch_qty
                 if ch_date: 
                     data["ch_date"] = str(ch_date)
 
-        # Build Flat List for Table
+        # Build Flat List for the React Table
         compiled_summary = []
         for mo, data in summary_map.items():
             im = data["components"]["IM"]
@@ -194,6 +193,7 @@ def process_traceability_data():
             
             status = "Completed" if (data["ch_qty"] >= req and req > 0) else ("In Process" if (im["sho"] > 0 or om["sho"] > 0) else "Yet to Start")
 
+            # Only append IM row if it has actual data
             if im["qty_req"] > 0 or im["sho"] > 0 or data["ch_qty"] > 0:
                 compiled_summary.append({
                     "mo": mo, "base_product": data["base_product"], "component": "IM",
@@ -202,6 +202,7 @@ def process_traceability_data():
                     "ch_qty": math.ceil(data["ch_qty"]), "ch_date": data["ch_date"] or "-", "status": status
                 })
             
+            # Only append OM row if it has actual data
             if om["qty_req"] > 0 or om["sho"] > 0:
                 compiled_summary.append({
                     "mo": mo, "base_product": data["base_product"], "component": "OM",
@@ -210,6 +211,7 @@ def process_traceability_data():
                     "ch_qty": math.ceil(data["ch_qty"]), "ch_date": data["ch_date"] or "-", "status": status
                 })
 
+        # Sort cleanly by MO, then by IM/OM
         compiled_summary.sort(key=lambda x: (x["mo"], x["component"]))
         
         MASTER_CACHE = compiled_summary
@@ -238,13 +240,13 @@ def get_all_mos():
 
 @router.get("/traceability_report/{mo}")
 def get_traceability_flow(mo: str):
-    search_group = get_mo_group(clean_mo(mo))
+    search_group = clean_mo(mo)
     rows = []
 
-    # 1. Map Individual JobWork Entries (Exact Variants)
+    # 1. Map Individual JobWork Entries directly into the modal
     for r in GLOBAL_RAW_RECORDS["jw_data"]:
         if r["mo_group"] == search_group:
-            v_name = r["variant"] if r["variant"] else f"{r['comp_type']} Component"
+            v_name = r["variant"] if r["variant"] and is_valid_family(r["variant"]) else f"{r['comp_type']} Component"
             
             if r["sho_qty"] > 0:
                 rows.append({
@@ -261,7 +263,7 @@ def get_traceability_flow(mo: str):
                     "qty": math.ceil(r["tb_qty"]), "status": "In Transit"
                 })
 
-    # 2. Map Individual Channel Variants (Exact entries from Channel Data)
+    # 2. Map Individual Channel Variants directly into the modal
     for r in GLOBAL_RAW_RECORDS["ch_data"]:
         if r["mo_group"] == search_group:
             if r["ch_qty"] > 0:

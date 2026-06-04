@@ -183,9 +183,16 @@ def process_traceability_data():
                     data["components"][comp_type]["qty_req"] = qty_req
 
         # 2. JobWork Data
-        for _, df in jobwork_sheets.items():
+        for sheet_name, df in jobwork_sheets.items():
             time.sleep(0.01) # Yield GIL
+            
+            # --- STRICT SHEET FILTER ---
+            clean_sheet = str(sheet_name).strip().lower()
+            if "allot" not in clean_sheet and "alloc" not in clean_sheet:
+                continue
+                
             if "po / pr no." not in df.columns: continue
+            
             for row in df.to_dict('records'):
                 raw_mo = clean_mo(row.get("po / pr no."))
                 if not raw_mo: continue

@@ -19,7 +19,13 @@ INITIALIZED = False
 CACHE_DURATION_MINUTES = 5
 
 GLOBAL_RAW_RECORDS = {"mo_data": [], "jw_data": [], "ch_data": []}
-HTTP_SESSION = requests.Session()
+
+# --- PRE-COMPILED REGEX FOR SPEED ---
+MO_GROUP_REGEX = re.compile(r'^(\d{4,})')
+FAM_GARBAGE_REGEX = re.compile(r'(?i)(NORMAL|INNER|OUTER|GENERIC PRODUCT)')
+FAM_CORE_REGEX = re.compile(r'(\d{3,}[A-Z0-9\-]*)')
+FAM_SUFFIX_REGEX = re.compile(r'(?i)(IM|OM)$')
+
 
 def clean_mo(value):
     """Aggressively checks and cleans MO strings."""
@@ -35,7 +41,7 @@ def clean_mo(value):
 
 def get_mo_group(clean_mo_str):
     if not clean_mo_str: return None
-    match = re.match(r'^(\d{4,})', clean_mo_str)
+    match = MO_GROUP_REGEX.match(clean_mo_str)
     group = match.group(1) if match else clean_mo_str[:4] if len(clean_mo_str) >= 4 else clean_mo_str
     if not group or group.strip() == "": return None
     return group
@@ -45,11 +51,11 @@ def clean_family_name(text):
     if pd.isna(text): return "Unknown Bearing"
     t = str(text).upper()
     
-    t = re.sub(r'(?i)(NORMAL|INNER|OUTER|GENERIC PRODUCT)', '', t)
-    match = re.search(r'(\d{3,}[A-Z0-9\-]*)', t)
+    t = FAM_GARBAGE_REGEX.sub('', t)
+    match = FAM_CORE_REGEX.search(t)
     if match:
         core = match.group(1)
-        core = re.sub(r'(?i)(IM|OM)$', '', core)
+        core = FAM_SUFFIX_REGEX.sub('', core)
         return core.strip('- ')
         
     return "Unknown Bearing"
@@ -78,12 +84,23 @@ def determine_component(text):
 def load_excel_sheets(url):
     """Fetches and parses a single Excel URL into a dictionary of DataFrames."""
     try:
-        resp = HTTP_SESSION.get(url, timeout=30)
+        # Fresh request to prevent stale connection hang
+        resp = requests.get(url, timeout=45)
         if resp.status_code != 200: return {}
-        xls = pd.ExcelFile(io.BytesIO(resp.content))
+        content = io.BytesIO(resp.content)
+        
+        # Try lightning-fast calamine engine, fallback if not installed
+        try:
+            xls = pd.ExcelFile(content, engine='calamine')
+        except ImportError:
+            xls = pd.ExcelFile(content)
+            
+        time.sleep(0.05)  # Yield GIL
+        
         sheets = {}
         for sheet in xls.sheet_names:
-            df = pd.read_excel(xls, sheet_name=sheet)
+            time.sleep(0.01)  # Yield GIL so server remains responsive
+            df = xls.parse(sheet)
             df.columns = [str(c).strip().lower() for c in df.columns]
             sheets[sheet] = df
         return sheets
@@ -134,6 +151,7 @@ def process_traceability_data():
 
         # 1. MO Data
         for _, df in mo_sheets.items():
+            time.sleep(0.01) # Yield GIL
             if "mo#" not in df.columns: continue
             
             if "pdiv" in df.columns:
@@ -166,6 +184,7 @@ def process_traceability_data():
 
         # 2. JobWork Data
         for _, df in jobwork_sheets.items():
+            time.sleep(0.01) # Yield GIL
             if "po / pr no." not in df.columns: continue
             for row in df.to_dict('records'):
                 raw_mo = clean_mo(row.get("po / pr no."))
@@ -199,6 +218,7 @@ def process_traceability_data():
         # 3. Channel Data 
         all_channels = {**trb_sheets, **dgbb_sheets}
         for _, df in all_channels.items():
+            time.sleep(0.01) # Yield GIL
             if "mo" not in df.columns: continue
             type_col = "type" if "type" in df.columns else ("product" if "product" in df.columns else None)
             
@@ -262,10 +282,12 @@ def process_traceability_data():
         IS_UPDATING = False
 
 def background_refresh_loop():
-    process_traceability_data()
     while True:
+        try:
+            process_traceability_data()
+        except Exception as e:
+            print(f"Background thread error: {e}")
         time.sleep(CACHE_DURATION_MINUTES * 60)
-        process_traceability_data()
 
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 

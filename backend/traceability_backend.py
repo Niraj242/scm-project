@@ -18,6 +18,10 @@ IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 5
 
+# 💡 OPTIONAL: If your sheet has an exact name (e.g., "Sheet1", "JobWork Allotment"), 
+# type it here inside the quotes to ONLY pull from that exact tab. Leave it "" to auto-filter.
+EXACT_JOBWORK_SHEET_NAME = "Worksheet" 
+
 GLOBAL_RAW_RECORDS = {"mo_data": [], "jw_data": [], "ch_data": []}
 
 # --- PRE-COMPILED REGEX FOR SPEED ---
@@ -84,12 +88,10 @@ def determine_component(text):
 def load_excel_sheets(url):
     """Fetches and parses a single Excel URL into a dictionary of DataFrames."""
     try:
-        # Fresh request to prevent stale connection hang
         resp = requests.get(url, timeout=45)
         if resp.status_code != 200: return {}
         content = io.BytesIO(resp.content)
         
-        # Try lightning-fast calamine engine, fallback if not installed
         try:
             xls = pd.ExcelFile(content, engine='calamine')
         except ImportError:
@@ -186,10 +188,17 @@ def process_traceability_data():
         for sheet_name, df in jobwork_sheets.items():
             time.sleep(0.01) # Yield GIL
             
-            # --- STRICT SHEET FILTER ---
+            # --- SMART SHEET FILTERING ---
             clean_sheet = str(sheet_name).strip().lower()
-            if "allot" not in clean_sheet and "alloc" not in clean_sheet:
-                continue
+            
+            if EXACT_JOBWORK_SHEET_NAME != "":
+                # If exact name is specified, skip everything else
+                if str(sheet_name).strip().lower() != EXACT_JOBWORK_SHEET_NAME.strip().lower():
+                    continue
+            else:
+                # Exclusion rule: Skip junk, summary, and pivot tabs that cause double counting
+                if any(k in clean_sheet for k in ["summary", "pivot", "total", "history", "dash", "master"]):
+                    continue
                 
             if "po / pr no." not in df.columns: continue
             

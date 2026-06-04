@@ -20,7 +20,10 @@ CACHE_DURATION_MINUTES = 5
 GLOBAL_CH_ROWS = []
 GLOBAL_TB_ROWS = []
 
-HTTP_SESSION = requests.Session()
+# Pre-compiled regex for speed
+NUM_REGEX = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
+PREFIX_REGEX = re.compile(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)')
+FAM_REGEX = re.compile(r'(\d{3,5})')
 
 def repair_sheet_headers(df):
     if df.empty: return df
@@ -56,7 +59,7 @@ def normalize_channel(value, force_t_prefix=False):
     val_str = str(value).strip().upper()
     
     is_explicit_t = val_str.startswith("T")
-    val_str = re.sub(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)', '', val_str).strip()
+    val_str = PREFIX_REGEX.sub('', val_str).strip()
     
     if val_str.startswith("T"):
         is_explicit_t = True
@@ -80,7 +83,7 @@ def parse_family_and_type(prod_text):
     if any(x in text for x in ["IM", "IR", "INNER"]): r_type = "IM"
     elif any(x in text for x in ["OM", "OR", "OUTER"]): r_type = "OM"
     
-    match = re.search(r'(\d{3,5})', text)
+    match = FAM_REGEX.search(text)
     base = match.group(1) if match else text.split()[0].split('-')[0]
     
     if "BT" in text.split() or text.startswith("BT") or "-BT" in text or " BT" in text:
@@ -93,7 +96,7 @@ def parse_family_and_type(prod_text):
 def clean_nan(value):
     if pd.isna(value): return 0.0
     val_str = str(value)
-    match = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', val_str.replace(',', ''))
+    match = NUM_REGEX.search(val_str.replace(',', ''))
     if match: 
         return float(match.group())
     return 0.0
@@ -109,9 +112,19 @@ def parse_date_safe(value):
 
 def load_excel_sheets(url):
     try:
-        resp = HTTP_SESSION.get(url, timeout=30)
+        # Use fresh request to prevent stale connection hang
+        resp = requests.get(url, timeout=45)
         if resp.status_code != 200: return {}
-        xls = pd.ExcelFile(io.BytesIO(resp.content))
+        
+        content = io.BytesIO(resp.content)
+        
+        # Try lightning-fast calamine engine, fallback to default if not installed
+        try:
+            xls = pd.ExcelFile(content, engine='calamine')
+        except ImportError:
+            xls = pd.ExcelFile(content)
+            
+        time.sleep(0.05) # Yield GIL
         return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
@@ -120,6 +133,7 @@ def load_excel_sheets(url):
 def process_master_sheets(sheets_dict, is_trb):
     ch_list = []
     for sheet_name, df in sheets_dict.items():
+        time.sleep(0.01) # Yield CPU to FastAPI so UI doesn't freeze
         if df.empty: continue
         
         clean_name = str(sheet_name).strip().upper()
@@ -170,8 +184,8 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     else:
         df_mo = pd.DataFrame(columns=["ch", "fam", "mo_list"])
 
-    s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
-    e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
+    s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
+    e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
     filtered_ch = GLOBAL_CH_ROWS
     filtered_tb = GLOBAL_TB_ROWS 
@@ -282,6 +296,7 @@ def process_tbe_data():
 
         tb_list = []
         for sheet_name, df in ring_wt_sheets.items():
+            time.sleep(0.01) # Yield CPU 
             if df.empty: continue
             
             c_col = find_column(df, ["ch#no", "ch# no", "channelref", "channel", "machineno"])
@@ -334,10 +349,12 @@ def process_tbe_data():
         IS_UPDATING = False
 
 def background_refresh_loop():
-    process_tbe_data()
     while True:
+        try:
+            process_tbe_data()
+        except Exception as e:
+            print(f"Background thread error: {e}")
         time.sleep(CACHE_DURATION_MINUTES * 60)
-        process_tbe_data()
 
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
@@ -355,8 +372,9 @@ def get_tbe_dashboard(start_date: str = Query(None), end_date: str = Query(None)
 
 @router.get("/tbe_variant_details")
 def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_date: str = Query(None), end_date: str = Query(None)):
-    s_dt = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
-    e_dt = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date else None
+    # Safe date parsing to prevent frontend infinite loading
+    s_dt = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date and start_date.strip() not in ["", "null", "None"] else None
+    e_dt = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date and end_date.strip() not in ["", "null", "None"] else None
 
     ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
@@ -382,7 +400,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     sho_map = {}
     tb_map = {}
     ch_map = {}
-    mo_summary_map = {} # NEW: For tracking MO totals
+    mo_summary_map = {} 
 
     for r in tb_filtered:
         raw_v = r["variant"]
@@ -405,14 +423,12 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         norm_v = str(raw_v).upper().replace("-", "").replace(" ", "")
         if not norm_v: continue
         
-        # Build individual variant details map
         norm_key = (norm_v, raw_mo)
         if norm_key not in ch_map:
             ch_map[norm_key] = {"label": raw_v, "exact_mo": raw_mo, "qty": 0.0, "dates": []}
         ch_map[norm_key]["qty"] += r["qty"]
         if r["date"]: ch_map[norm_key]["dates"].append(r["date"])
             
-        # Build MO Total Summary Map
         if raw_mo not in mo_summary_map:
             mo_summary_map[raw_mo] = {"qty": 0.0, "dates": []}
         mo_summary_map[raw_mo]["qty"] += r["qty"]
@@ -420,7 +436,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
 
     sequential_rows = []
 
-    # 1. SHO Rows
     for k, data in sho_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
@@ -433,7 +448,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "status": "Allocated"
         })
 
-    # 2. Transit Buffer Rows
     for k, data in tb_map.items():
         out_d = str(max(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
@@ -446,7 +460,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "status": "In Transit"
         })
         
-    # 3. Channel MO Summary Rows (New Addition)
     for exact_mo, data in mo_summary_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"
@@ -470,7 +483,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "status": "MO Total"
         })
 
-    # 4. Individual Channel Variant Rows
     for k, data in ch_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"

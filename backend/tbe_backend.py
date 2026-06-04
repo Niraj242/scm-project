@@ -7,6 +7,7 @@ import time
 import re
 import math
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 router = APIRouter()
 
@@ -161,6 +162,92 @@ def process_master_sheets(sheets_dict, is_trb):
             })
     return ch_list
 
+def compile_summary_data(start_date_str=None, end_date_str=None):
+    """Dynamically slices and computes matrices strictly bound to targeted date intervals."""
+    s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
+    e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
+
+    # Apply strict transaction level date filters
+    filtered_ch = GLOBAL_CH_ROWS
+    filtered_tb = GLOBAL_TB_ROWS
+
+    if s_dt or e_dt:
+        if s_dt and e_dt:
+            filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
+        elif s_dt:
+            filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] >= s_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] >= s_dt]
+        elif e_dt:
+            filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
+
+    df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
+        ch_qty=('qty', 'sum'),
+        ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
+        ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None)),
+        mo_list=('mo', lambda x: ", ".join(sorted(set([i for i in x if i]))))
+    ).reset_index() if filtered_ch else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
+
+    tb_list_parsed = []
+    if filtered_tb:
+        for r in filtered_tb:
+            tb_list_parsed.append({
+                "ch": r["ch"], "fam": r["fam"], "type": r.get("type", parse_family_and_type(r["variant"])[1]),
+                "qty": r["qty"], "date": r["date"]
+            })
+
+    df_tb_grouped = pd.DataFrame(tb_list_parsed).groupby(["ch", "fam", "type"]).agg(
+        tb_qty=('qty', 'sum'),
+        tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
+        tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
+    ).reset_index() if tb_list_parsed else pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
+
+    if df_tb_grouped.empty and df_ch_grouped.empty:
+        return []
+
+    merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
+    compiled_summary = []
+
+    for _, row in merged.iterrows():
+        ch, fam = row["ch"], row["fam"]
+        r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
+        
+        tb_qty = row.get("tb_qty", 0.0)
+        ch_qty = row.get("ch_qty", 0.0)
+        if pd.isna(tb_qty): tb_qty = 0.0
+        if pd.isna(ch_qty): ch_qty = 0.0
+
+        tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
+        ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
+        mo_list = row.get("mo_list", "")
+
+        final_tb_qty = math.ceil(tb_qty)
+        final_ch_qty = math.ceil(ch_qty)
+
+        if final_tb_qty == 0 and final_ch_qty > 0: calc_status = "Channel Only"
+        elif final_tb_qty > 0 and final_ch_qty == 0: calc_status = "Missing Channel Data"
+        elif final_ch_qty >= final_tb_qty and final_tb_qty > 0: calc_status = "Completed"
+        else: calc_status = "In Process"
+
+        compiled_summary.append({
+            "channel_ref": ch,
+            "mo_ref": mo_list if pd.notna(mo_list) else "",
+            "product_variant": fam,
+            "ring_type": r_type,
+            "sho_qty": final_tb_qty, 
+            "tb_qty": final_tb_qty, # Syncing transit buffer quantity field explicitly with SHO volume
+            "sho_in": str(tb_min) if pd.notna(tb_min) and tb_min else "-",
+            "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
+            "ch_qty": final_ch_qty,
+            "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
+            "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-",
+            "status": calc_status
+        })
+
+    compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
+    return compiled_summary
+
 def process_tbe_data():
     global MASTER_CACHE, LAST_REFRESH, IS_UPDATING, INITIALIZED, GLOBAL_CH_ROWS, GLOBAL_TB_ROWS
     if IS_UPDATING: return
@@ -168,18 +255,18 @@ def process_tbe_data():
 
     try:
         from settings import settings
-        ring_wt_sheets = load_excel_sheets(settings.RINGWT_TRANSITBUFFER_URL)
-        trb_sheets = load_excel_sheets(settings.TRB_MASTER_URL)
-        dgbb_sheets = load_excel_sheets(settings.DGBB_MASTER_URL)
+        
+        # Parallel Execution Strategy for lightning fast loads
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_ring = executor.submit(load_excel_sheets, settings.RINGWT_TRANSITBUFFER_URL)
+            future_trb = executor.submit(load_excel_sheets, settings.TRB_MASTER_URL)
+            future_dgbb = executor.submit(load_excel_sheets, settings.DGBB_MASTER_URL)
+            
+            ring_wt_sheets = future_ring.result()
+            trb_sheets = future_trb.result()
+            dgbb_sheets = future_dgbb.result()
 
         ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
-
-        df_ch_grouped = pd.DataFrame(ch_list).groupby(["ch", "fam"]).agg(
-            ch_qty=('qty', 'sum'),
-            ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None)),
-            mo_list=('mo', lambda x: ", ".join(sorted(set([i for i in x if i]))))
-        ).reset_index() if ch_list else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
 
         tb_list = []
         for sheet_name, df in ring_wt_sheets.items():
@@ -222,60 +309,10 @@ def process_tbe_data():
                     "date": dt
                 })
 
-        df_tb_grouped = pd.DataFrame(tb_list).groupby(["ch", "fam", "type"]).agg(
-            tb_qty=('qty', 'sum'),
-            tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-            tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
-        ).reset_index() if tb_list else pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
-
         GLOBAL_CH_ROWS = ch_list
         GLOBAL_TB_ROWS = tb_list
 
-        if df_tb_grouped.empty and df_ch_grouped.empty:
-            MASTER_CACHE = []
-            LAST_REFRESH = datetime.now()
-            return
-
-        merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
-        
-        compiled_summary = []
-        for _, row in merged.iterrows():
-            ch, fam = row["ch"], row["fam"]
-            r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
-            
-            tb_qty = row.get("tb_qty", 0.0)
-            ch_qty = row.get("ch_qty", 0.0)
-            if pd.isna(tb_qty): tb_qty = 0.0
-            if pd.isna(ch_qty): ch_qty = 0.0
-
-            tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
-            ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
-            mo_list = row.get("mo_list", "")
-
-            final_tb_qty = math.ceil(tb_qty)
-            final_ch_qty = math.ceil(ch_qty)
-
-            if final_tb_qty == 0 and final_ch_qty > 0: calc_status = "Channel Only"
-            elif final_tb_qty > 0 and final_ch_qty == 0: calc_status = "Missing Channel Data"
-            elif final_ch_qty >= final_tb_qty and final_tb_qty > 0: calc_status = "Completed"
-            else: calc_status = "In Process"
-
-            compiled_summary.append({
-                "channel_ref": ch,
-                "mo_ref": mo_list if pd.notna(mo_list) else "",
-                "product_variant": fam,
-                "ring_type": r_type,
-                "sho_qty": final_tb_qty, 
-                "sho_in": str(tb_min) if pd.notna(tb_min) and tb_min else "-",
-                "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
-                "ch_qty": final_ch_qty,
-                "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
-                "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-",
-                "status": calc_status
-            })
-
-        compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
-        MASTER_CACHE = compiled_summary
+        MASTER_CACHE = compile_summary_data(None, None)
         LAST_REFRESH = datetime.now()
 
     except Exception as e:
@@ -293,21 +330,38 @@ def background_refresh_loop():
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 @router.get("/tbe_all_mos")
-def get_tbe_dashboard():
+def get_tbe_dashboard(start_date: str = Query(None), end_date: str = Query(None)):
     if not INITIALIZED:
         return {"status": "initializing", "message": "Compiling data matrices...", "data": []}
-    return {"status": "success", "last_updated": str(LAST_REFRESH), "data": MASTER_CACHE}
+    
+    # Render dynamically filtered dataset when params exist; fall back on memory baseline otherwise
+    if start_date or end_date:
+        data_slice = compile_summary_data(start_date, end_date)
+    else:
+        data_slice = MASTER_CACHE
+        
+    return {"status": "success", "last_updated": str(LAST_REFRESH), "data": data_slice}
 
 @router.get("/tbe_variant_details")
-def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
-    """
-    Generates sequential rows grouped by Variant and Department.
-    SHO and TB display the grouped MO. Channel Section maps the EXACT single MO.
-    """
+def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_date: str = Query(None), end_date: str = Query(None)):
+    s_dt = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date else None
+    e_dt = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date else None
+
     ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
     
-    # Grouped MO fallback string for SHO and TB
+    # Filter variant breakdown lines inside selected bounds
+    if s_dt or e_dt:
+        if s_dt and e_dt:
+            ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
+        elif s_dt:
+            ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] >= s_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] >= s_dt]
+        elif e_dt:
+            ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] <= e_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] <= e_dt]
+
     found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_filtered if r.get("mo")])))
     mo_reference = ", ".join(found_mos) if found_mos else "-"
     if mo_reference != "-" and ch:
@@ -319,7 +373,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
     tb_map = {}
     ch_map = {}
 
-    # Gather SHO & Transit Buffer entries (Grouped by Variant only)
     for r in tb_filtered:
         raw_v = r["variant"]
         norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
@@ -335,14 +388,13 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
         tb_map[norm_key]["qty"] += r["qty"]
         if r["date"]: tb_map[norm_key]["dates"].append(r["date"])
 
-    # Gather Channel Section entries (Grouped by Variant AND Exact MO)
     for r in ch_filtered:
         raw_v = r["variant"]
         raw_mo = str(r.get("mo", "")).strip()
         norm_v = str(raw_v).upper().replace("-", "").replace(" ", "")
         if not norm_v: continue
         
-        norm_key = (norm_v, raw_mo)  # Tuple as dictionary key
+        norm_key = (norm_v, raw_mo)
         
         if norm_key not in ch_map:
             ch_map[norm_key] = {"label": raw_v, "exact_mo": raw_mo, "qty": 0.0, "dates": []}
@@ -351,10 +403,8 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
 
     sequential_rows = []
 
-    # Compile SHO
     for k, data in sho_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
-        out_d = str(max(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
             "mo_ref": mo_group_display,
             "department": "SHO Department",
@@ -365,9 +415,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
             "status": "Allocated"
         })
 
-    # Compile Transit Buffer
     for k, data in tb_map.items():
-        in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
             "mo_ref": mo_group_display,
@@ -379,7 +427,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...)):
             "status": "In Transit"
         })
 
-    # Compile Channel Section (Exact MO Split)
     for k, data in ch_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"

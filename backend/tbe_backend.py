@@ -163,9 +163,7 @@ def process_master_sheets(sheets_dict, is_trb):
     return ch_list
 
 def compile_summary_data(start_date_str=None, end_date_str=None):
-    """Dynamically slices matrices. Applies dates strictly to Channel throughput, protecting Buffer inventory."""
-    
-    # 1. Global MO Mappings: Ensures rows don't lose their MO if Channel Qty hits 0
+    # 1. Global MO Mappings: Ensures rows don't lose their MO if filtered quantities drop to 0
     if GLOBAL_CH_ROWS:
         df_mo = pd.DataFrame(GLOBAL_CH_ROWS).groupby(["ch", "fam"]).agg(
             mo_list=('mo', lambda x: ", ".join(sorted(set([str(i) for i in x if pd.notna(i) and str(i).strip()]))))
@@ -176,17 +174,20 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
 
-    # 2. Date Filter Applies ONLY to Channel 
+    # 2. Date Filter Applies to BOTH Channel and Buffer Data Now
     filtered_ch = GLOBAL_CH_ROWS
-    filtered_tb = GLOBAL_TB_ROWS # Buffer is intentionally kept unfiltered so inventory does not disappear
+    filtered_tb = GLOBAL_TB_ROWS 
 
     if s_dt or e_dt:
         if s_dt and e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] >= s_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
 
     # 3. Group Channel Data
     if filtered_ch:
@@ -219,7 +220,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     if df_tb_grouped.empty and df_ch_grouped.empty:
         return []
 
-    # 5. Strategic Merging 
+    # 5. Strategic Merging (Outer Join ensures rows with only TB data survive)
     merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
     merged = pd.merge(merged, df_mo, on=["ch", "fam"], how="left")
 
@@ -236,7 +237,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
         ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
         
-        # Grab locked MO reference
         mo_list = row.get("mo_list", "")
         if pd.isna(mo_list): mo_list = ""
 
@@ -366,14 +366,17 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
     
-    # Isolate date filter to target Channel only, protecting Buffer logs from hiding
+    # Filter BOTH by Date 
     if s_dt or e_dt:
         if s_dt and e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] >= s_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] <= e_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] <= e_dt]
 
     found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_filtered if r.get("mo")])))
     mo_reference = ", ".join(found_mos) if found_mos else "-"

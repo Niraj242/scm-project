@@ -19,12 +19,13 @@ const TBE = () => {
 
   const timerRef = useRef(null);
 
+  // Re-fetch data whenever date filters change to calculate strict sums server-side
   useEffect(() => {
     fetchTBEDashboard();
     return () => {
       if (timerRef.current) clearTimeout(timerRef.current);
     };
-  }, []);
+  }, [startDate, endDate]);
 
   useEffect(() => {
     if (!selectedFamily) {
@@ -35,7 +36,10 @@ const TBE = () => {
     const fetchVariantDetails = async () => {
       try {
         setDetailLoading(true);
-        const url = `${API}/tbe_variant_details?ch=${encodeURIComponent(selectedFamily.ch)}&fam=${encodeURIComponent(selectedFamily.fam)}`;
+        let url = `${API}/tbe_variant_details?ch=${encodeURIComponent(selectedFamily.ch)}&fam=${encodeURIComponent(selectedFamily.fam)}`;
+        if (startDate) url += `&start_date=${startDate}`;
+        if (endDate) url += `&end_date=${endDate}`;
+
         const res = await fetch(url);
         if (!res.ok) throw new Error("Could not retrieve variant sequential logs.");
         const json = await res.json();
@@ -48,14 +52,20 @@ const TBE = () => {
     };
 
     fetchVariantDetails();
-  }, [selectedFamily]);
+  }, [selectedFamily, startDate, endDate]);
 
   const fetchTBEDashboard = async () => {
     try {
       if (!isInitializing) setLoading(true);
       setError('');
 
-      const res = await fetch(`${API}/tbe_all_mos`);
+      let url = `${API}/tbe_all_mos`;
+      const queryParams = [];
+      if (startDate) queryParams.push(`start_date=${startDate}`);
+      if (endDate) queryParams.push(`end_date=${endDate}`);
+      if (queryParams.length > 0) url += `?${queryParams.join('&')}`;
+
+      const res = await fetch(url);
       if (!res.ok) throw new Error(`Server returned status code: ${res.status}`);
       
       const json = await res.json();
@@ -78,28 +88,9 @@ const TBE = () => {
   };
 
   const filteredSummary = summaryData.filter(item => {
-    const matchesSearch = 
-      (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
+    return (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
       (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase())) ||
       (item.mo_ref && String(item.mo_ref).toLowerCase().includes(search.toLowerCase()));
-
-    let matchesDate = true;
-    if (startDate || endDate) {
-      const dates = [item.sho_in, item.tb_out, item.ch_in, item.ch_out].filter(d => d && d !== '-');
-      
-      if (dates.length === 0) {
-        matchesDate = false; 
-      } else {
-        matchesDate = dates.some(d => {
-          const dateObj = new Date(d);
-          const s = startDate ? new Date(startDate) : new Date('1900-01-01');
-          const e = endDate ? new Date(endDate) : new Date('2100-01-01');
-          return dateObj >= s && dateObj <= e;
-        });
-      }
-    }
-
-    return matchesSearch && matchesDate;
   });
 
   const sortedSummary = [...filteredSummary].sort((a, b) => {
@@ -240,7 +231,7 @@ const TBE = () => {
                       </td>
                     )}
 
-                    {/* Ring Family Column - Interactive Drilldown Component */}
+                    {/* Ring Family Column */}
                     {familySpan > 0 && (
                       <td 
                         rowSpan={familySpan} 
@@ -315,7 +306,7 @@ const TBE = () => {
                   <p>Querying breakdown registries...</p>
                 </div>
               ) : detailData.length === 0 ? (
-                <div className="empty-state">No independent deployment logs located for this variant structure.</div>
+                <div className="empty-state">No independent deployment logs located for this variant structure within chosen dates.</div>
               ) : (
                 <div className="modal-table-wrapper">
                   <table className="detail-variant-table">

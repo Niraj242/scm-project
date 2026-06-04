@@ -163,7 +163,6 @@ def process_master_sheets(sheets_dict, is_trb):
     return ch_list
 
 def compile_summary_data(start_date_str=None, end_date_str=None):
-    # 1. Global MO Mappings: Ensures rows don't lose their MO if filtered quantities drop to 0
     if GLOBAL_CH_ROWS:
         df_mo = pd.DataFrame(GLOBAL_CH_ROWS).groupby(["ch", "fam"]).agg(
             mo_list=('mo', lambda x: ", ".join(sorted(set([str(i) for i in x if pd.notna(i) and str(i).strip()]))))
@@ -174,7 +173,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
 
-    # 2. Date Filter Applies to BOTH Channel and Buffer Data Now
     filtered_ch = GLOBAL_CH_ROWS
     filtered_tb = GLOBAL_TB_ROWS 
 
@@ -189,7 +187,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
 
-    # 3. Group Channel Data
     if filtered_ch:
         df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
@@ -199,7 +196,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     else:
         df_ch_grouped = pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date"])
 
-    # 4. Group TB / SHO Data
     tb_list_parsed = []
     if filtered_tb:
         for r in filtered_tb:
@@ -220,7 +216,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     if df_tb_grouped.empty and df_ch_grouped.empty:
         return []
 
-    # 5. Strategic Merging (Outer Join ensures rows with only TB data survive)
     merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
     merged = pd.merge(merged, df_mo, on=["ch", "fam"], how="left")
 
@@ -366,7 +361,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
     
-    # Filter BOTH by Date 
     if s_dt or e_dt:
         if s_dt and e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
@@ -388,6 +382,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     sho_map = {}
     tb_map = {}
     ch_map = {}
+    mo_summary_map = {} # NEW: For tracking MO totals
 
     for r in tb_filtered:
         raw_v = r["variant"]
@@ -410,15 +405,22 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         norm_v = str(raw_v).upper().replace("-", "").replace(" ", "")
         if not norm_v: continue
         
+        # Build individual variant details map
         norm_key = (norm_v, raw_mo)
-        
         if norm_key not in ch_map:
             ch_map[norm_key] = {"label": raw_v, "exact_mo": raw_mo, "qty": 0.0, "dates": []}
         ch_map[norm_key]["qty"] += r["qty"]
         if r["date"]: ch_map[norm_key]["dates"].append(r["date"])
+            
+        # Build MO Total Summary Map
+        if raw_mo not in mo_summary_map:
+            mo_summary_map[raw_mo] = {"qty": 0.0, "dates": []}
+        mo_summary_map[raw_mo]["qty"] += r["qty"]
+        if r["date"]: mo_summary_map[raw_mo]["dates"].append(r["date"])
 
     sequential_rows = []
 
+    # 1. SHO Rows
     for k, data in sho_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
@@ -431,6 +433,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "status": "Allocated"
         })
 
+    # 2. Transit Buffer Rows
     for k, data in tb_map.items():
         out_d = str(max(data["dates"])) if data["dates"] else "-"
         sequential_rows.append({
@@ -442,7 +445,32 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "qty": math.ceil(data["qty"]),
             "status": "In Transit"
         })
+        
+    # 3. Channel MO Summary Rows (New Addition)
+    for exact_mo, data in mo_summary_map.items():
+        in_d = str(min(data["dates"])) if data["dates"] else "-"
+        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        
+        if exact_mo and ch:
+            ch_mo_display = f"{exact_mo} (Ch: {ch})"
+        elif exact_mo:
+            ch_mo_display = exact_mo
+        elif ch:
+            ch_mo_display = f"Ch: {ch}"
+        else:
+            ch_mo_display = "-"
 
+        sequential_rows.append({
+            "mo_ref": ch_mo_display,
+            "department": "Channel (MO Summary)",
+            "variant": "ALL VARIANTS",
+            "in_date": in_d,
+            "out_date": out_d,
+            "qty": math.ceil(data["qty"]),
+            "status": "MO Total"
+        })
+
+    # 4. Individual Channel Variant Rows
     for k, data in ch_map.items():
         in_d = str(min(data["dates"])) if data["dates"] else "-"
         out_d = str(max(data["dates"])) if data["dates"] else "-"

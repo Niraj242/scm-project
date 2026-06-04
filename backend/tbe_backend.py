@@ -163,32 +163,42 @@ def process_master_sheets(sheets_dict, is_trb):
     return ch_list
 
 def compile_summary_data(start_date_str=None, end_date_str=None):
-    """Dynamically slices and computes matrices strictly bound to targeted date intervals."""
+    """Dynamically slices matrices. Applies dates strictly to Channel throughput, protecting Buffer inventory."""
+    
+    # 1. Global MO Mappings: Ensures rows don't lose their MO if Channel Qty hits 0
+    if GLOBAL_CH_ROWS:
+        df_mo = pd.DataFrame(GLOBAL_CH_ROWS).groupby(["ch", "fam"]).agg(
+            mo_list=('mo', lambda x: ", ".join(sorted(set([str(i) for i in x if pd.notna(i) and str(i).strip()]))))
+        ).reset_index()
+    else:
+        df_mo = pd.DataFrame(columns=["ch", "fam", "mo_list"])
+
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str else None
 
-    # Apply strict transaction level date filters
+    # 2. Date Filter Applies ONLY to Channel 
     filtered_ch = GLOBAL_CH_ROWS
-    filtered_tb = GLOBAL_TB_ROWS
+    filtered_tb = GLOBAL_TB_ROWS # Buffer is intentionally kept unfiltered so inventory does not disappear
 
     if s_dt or e_dt:
         if s_dt and e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
-            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] >= s_dt]
-            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
-            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
 
-    df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
-        ch_qty=('qty', 'sum'),
-        ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-        ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None)),
-        mo_list=('mo', lambda x: ", ".join(sorted(set([i for i in x if i]))))
-    ).reset_index() if filtered_ch else pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
+    # 3. Group Channel Data
+    if filtered_ch:
+        df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
+            ch_qty=('qty', 'sum'),
+            ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
+            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
+        ).reset_index()
+    else:
+        df_ch_grouped = pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date"])
 
+    # 4. Group TB / SHO Data
     tb_list_parsed = []
     if filtered_tb:
         for r in filtered_tb:
@@ -197,18 +207,23 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
                 "qty": r["qty"], "date": r["date"]
             })
 
-    df_tb_grouped = pd.DataFrame(tb_list_parsed).groupby(["ch", "fam", "type"]).agg(
-        tb_qty=('qty', 'sum'),
-        tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-        tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
-    ).reset_index() if tb_list_parsed else pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
+    if tb_list_parsed:
+        df_tb_grouped = pd.DataFrame(tb_list_parsed).groupby(["ch", "fam", "type"]).agg(
+            tb_qty=('qty', 'sum'),
+            tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
+            tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
+        ).reset_index()
+    else:
+        df_tb_grouped = pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
 
     if df_tb_grouped.empty and df_ch_grouped.empty:
         return []
 
+    # 5. Strategic Merging 
     merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
-    compiled_summary = []
+    merged = pd.merge(merged, df_mo, on=["ch", "fam"], how="left")
 
+    compiled_summary = []
     for _, row in merged.iterrows():
         ch, fam = row["ch"], row["fam"]
         r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
@@ -220,7 +235,10 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
 
         tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
         ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
+        
+        # Grab locked MO reference
         mo_list = row.get("mo_list", "")
+        if pd.isna(mo_list): mo_list = ""
 
         final_tb_qty = math.ceil(tb_qty)
         final_ch_qty = math.ceil(ch_qty)
@@ -232,11 +250,11 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
 
         compiled_summary.append({
             "channel_ref": ch,
-            "mo_ref": mo_list if pd.notna(mo_list) else "",
+            "mo_ref": mo_list,
             "product_variant": fam,
             "ring_type": r_type,
             "sho_qty": final_tb_qty, 
-            "tb_qty": final_tb_qty, # Syncing transit buffer quantity field explicitly with SHO volume
+            "tb_qty": final_tb_qty, 
             "sho_in": str(tb_min) if pd.notna(tb_min) and tb_min else "-",
             "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
             "ch_qty": final_ch_qty,
@@ -256,7 +274,6 @@ def process_tbe_data():
     try:
         from settings import settings
         
-        # Parallel Execution Strategy for lightning fast loads
         with ThreadPoolExecutor(max_workers=3) as executor:
             future_ring = executor.submit(load_excel_sheets, settings.RINGWT_TRANSITBUFFER_URL)
             future_trb = executor.submit(load_excel_sheets, settings.TRB_MASTER_URL)
@@ -334,7 +351,6 @@ def get_tbe_dashboard(start_date: str = Query(None), end_date: str = Query(None)
     if not INITIALIZED:
         return {"status": "initializing", "message": "Compiling data matrices...", "data": []}
     
-    # Render dynamically filtered dataset when params exist; fall back on memory baseline otherwise
     if start_date or end_date:
         data_slice = compile_summary_data(start_date, end_date)
     else:
@@ -350,17 +366,14 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
     
-    # Filter variant breakdown lines inside selected bounds
+    # Isolate date filter to target Channel only, protecting Buffer logs from hiding
     if s_dt or e_dt:
         if s_dt and e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
-            tb_filtered = [r for r in tb_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] >= s_dt]
-            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] <= e_dt]
-            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] <= e_dt]
 
     found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_filtered if r.get("mo")])))
     mo_reference = ", ".join(found_mos) if found_mos else "-"

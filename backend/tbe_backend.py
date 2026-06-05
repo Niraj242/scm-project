@@ -177,13 +177,6 @@ def process_master_sheets(sheets_dict, is_trb):
     return ch_list
 
 def compile_summary_data(start_date_str=None, end_date_str=None):
-    if GLOBAL_CH_ROWS:
-        df_mo = pd.DataFrame(GLOBAL_CH_ROWS).groupby(["ch", "fam"]).agg(
-            mo_list=('mo', lambda x: ", ".join(sorted(set([str(i) for i in x if pd.notna(i) and str(i).strip()]))))
-        ).reset_index()
-    else:
-        df_mo = pd.DataFrame(columns=["ch", "fam", "mo_list"])
-
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
@@ -205,10 +198,11 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
             ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
+            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None)),
+            mo_list=('mo', lambda x: ", ".join(sorted(set([str(i) for i in x if pd.notna(i) and str(i).strip()]))))
         ).reset_index()
     else:
-        df_ch_grouped = pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date"])
+        df_ch_grouped = pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
 
     tb_list_parsed = []
     if filtered_tb:
@@ -231,7 +225,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         return []
 
     merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
-    merged = pd.merge(merged, df_mo, on=["ch", "fam"], how="left")
 
     compiled_summary = []
     for _, row in merged.iterrows():

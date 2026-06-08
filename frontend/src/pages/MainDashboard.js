@@ -72,6 +72,13 @@ export default function MainDashboard() {
       path: "/tbe",
       icon: "⚖️",
     },
+
+    {
+      title: "Scrap",
+      desc: "Daily Scrap Entry",
+      path: "/scrap",
+      icon: "S",
+    },
   ];
 
   return (

@@ -11,6 +11,7 @@ import Vendor from "./pages/Vendor";
 import Finance from "./pages/Finance";
 import Logistics from "./pages/Logistics";
 import SupplierChatbot from "./pages/SupplierChatbot";
+import Scrap from "./pages/Scrap";
 
 // Import Traceability
 import Traceability from "./pages/Traceability";
@@ -39,7 +40,8 @@ function App() {
         
         {/* TRACEABILITY & TBE ROUTES */}
         <Route path="/traceability" element={<ProtectedRoute><Traceability /></ProtectedRoute>} />
-        <Route path="/tbe" element={<ProtectedRoute><TBE /></ProtectedRoute>} /> {/* <-- New Route Added */}
+        <Route path="/tbe" element={<ProtectedRoute><TBE /></ProtectedRoute>} /> 
+        <Route path="/scrap" element={<ProtectedRoute><Scrap /></ProtectedRoute>} />   
 
         <Route path="/inventory" element={<ProtectedRoute><Inventory /></ProtectedRoute>} />
         <Route path="/production" element={<ProtectedRoute><Production /></ProtectedRoute>} />

@@ -32,12 +32,31 @@ async def submit_scrap(entry: ScrapEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        # CRITICAL PROTECTION: Prevent double entries for same department, date, and shift
+        cursor.execute(
+            """
+            SELECT id FROM scrap_history 
+            WHERE department = %s AND date = %s AND shift = %s
+            """,
+            (entry.department, entry.date, entry.shift)
+        )
+        existing_record = cursor.fetchone()
+        
+        if existing_record:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate Alert: An entry already exists for {entry.department} on {entry.date} during {entry.shift}. Please use the 'View & Edit Saved Sheets' tab to adjust these figures."
+            )
+
+        # Proceed to insert if clear
         cursor.execute(
             "INSERT INTO scrap_history (department, date, shift, category, payload) VALUES (%s, %s, %s, %s, %s)",
             (entry.department, entry.date, entry.shift, entry.category, json.dumps(entry.data))
         )
         conn.commit()
         return {"status": "success", "message": "Scrap data saved successfully!"}
+    except HTTPException as he:
+        raise he
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to insert data: {e}")
@@ -77,7 +96,6 @@ def get_scrap_history(department: str = None):
         cursor.close()
         conn.close()
 
-# --- NEW: UPDATE EXISITING HISTORICAL RECORDS ---
 @router.put("/api/scrap/update")
 async def update_scrap(update_data: ScrapUpdate):
     conn = get_db_connection()

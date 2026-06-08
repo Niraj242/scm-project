@@ -1,6 +1,4 @@
 # scrap_backend.py
-# Requirements: pip install fastapi psycopg2-binary pydantic
-
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
@@ -11,19 +9,17 @@ from datetime import date
 
 router = APIRouter()
 
-# Securely fetch the database URL from Render environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Fail fast if the environment variable is missing
 if not DATABASE_URL:
-    raise ValueError("CRITICAL ERROR: DATABASE_URL environment variable is not set. Please configure it in Render.")
+    raise ValueError("CRITICAL ERROR: DATABASE_URL environment variable is not set.")
 
 class ScrapEntry(BaseModel):
     department: str
     date: date
     shift: str
-    category: str  # Industrial or Automotive
-    data: List[Dict[str, Any]]  # The row data from the tables
+    category: str
+    data: List[Dict[str, Any]]
 
 def get_db_connection():
     try:
@@ -32,12 +28,11 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
 
-# --- 1. SUBMIT DAILY SCRAP ENTRY ---
-@router.post("/scrap/submit")
+# Hardcoded absolute paths so it works instantly regardless of main.py setup
+@router.post("/api/scrap/submit")
 async def submit_scrap(entry: ScrapEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     try:
         insert_query = """
             INSERT INTO scrap_history (department, date, shift, category, payload) 
@@ -50,10 +45,8 @@ async def submit_scrap(entry: ScrapEntry):
             entry.category,
             json.dumps(entry.data)
         ))
-        
         conn.commit()
         return {"status": "success", "message": "Scrap data saved successfully!"}
-    
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to insert data: {e}")
@@ -61,31 +54,18 @@ async def submit_scrap(entry: ScrapEntry):
         cursor.close()
         conn.close()
 
-# --- 2. CHECK HISTORY (DAY AND SHIFT WISE) ---
-@router.get("/scrap/history")
-def get_scrap_history(department: str = None, shift: str = None, target_date: str = None):
+@router.get("/api/scrap/history")
+def get_scrap_history(department: str = None):
     conn = get_db_connection()
     cursor = conn.cursor()
-    
     try:
-        # Base Query
-        query = "SELECT id, department, date, shift, category, payload FROM scrap_history WHERE 1=1"
+        query = "SELECT id, department, date, shift, category, payload FROM scrap_history"
         params = []
-        
-        # Add dynamic filters if the frontend passes them
         if department:
-            query += " AND department = %s"
+            query += " WHERE department = %s"
             params.append(department)
-        if shift:
-            query += " AND shift = %s"
-            params.append(shift)
-        if target_date:
-            query += " AND date = %s"
-            params.append(target_date)
-            
-        # Order by newest entries first
-        query += " ORDER BY date DESC, shift ASC"
         
+        query += " ORDER BY date DESC, shift ASC"
         cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
         
@@ -97,11 +77,9 @@ def get_scrap_history(department: str = None, shift: str = None, target_date: st
                 "date": str(row[2]),
                 "shift": row[3],
                 "category": row[4],
-                "payload": row[5] if isinstance(row[5], list) or isinstance(row[5], dict) else json.loads(row[5])
+                "payload": row[5] if isinstance(row[5], (list, dict)) else json.loads(row[5])
             })
-            
         return {"status": "success", "data": history_list}
-        
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch history: {e}")
     finally:

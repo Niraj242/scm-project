@@ -21,12 +21,44 @@ class ScrapEntry(BaseModel):
     category: str
     data: List[Dict[str, Any]]
 
+
+# Updated section in scrap_backend.py
+
 def get_db_connection():
     try:
         conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
+
+# --- AUTOMATIC TABLE INITIALIZER ---
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        create_table_query = """
+        CREATE TABLE IF NOT EXISTS scrap_history (
+            id SERIAL PRIMARY KEY,
+            department VARCHAR(100) NOT NULL,
+            date DATE NOT NULL,
+            shift VARCHAR(50) NOT NULL,
+            category VARCHAR(50) NOT NULL,
+            payload JSONB NOT NULL,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        );
+        """
+        cursor.execute(create_table_query)
+        conn.commit()
+        print("✅ Database table 'scrap_history' verified/created successfully.")
+    except Exception as e:
+        print(f"❌ Failed to initialize database tables: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+# Run initialization when the module loads
+init_db()
+
 
 # Hardcoded absolute paths so it works instantly regardless of main.py setup
 @router.post("/api/scrap/submit")

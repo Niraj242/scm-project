@@ -1,0 +1,185 @@
+/* Scrap.css */
+.scrap-module {
+  font-family: 'Inter', 'Segoe UI', sans-serif;
+  padding: 20px;
+  background-color: #f8fafc;
+  min-height: 100vh;
+}
+
+.module-header {
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  margin-bottom: 20px;
+}
+
+.module-header h2 {
+  margin-top: 0;
+  color: #1e293b;
+  font-size: 24px;
+}
+
+.controls-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.control-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.control-group label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+.control-group select, 
+.control-group input[type="date"] {
+  padding: 8px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 14px;
+  background-color: white;
+  min-width: 150px;
+}
+
+.control-group select:focus, 
+.control-group input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+}
+
+.table-wrapper {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  overflow: hidden;
+}
+
+.table-title {
+  background-color: #1e293b;
+  color: white;
+  padding: 12px 20px;
+}
+
+.table-title h3 {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: 0.5px;
+}
+
+.table-container {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.scrap-table {
+  width: 100%;
+  border-collapse: collapse;
+  white-space: nowrap;
+}
+
+.scrap-table th, 
+.scrap-table td {
+  border: 1px solid #e2e8f0;
+  padding: 0;
+  min-width: 50px;
+  text-align: center;
+}
+
+.scrap-table th {
+  background-color: #f1f5f9;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 10px;
+}
+
+.sticky-col {
+  position: sticky;
+  left: 0;
+  background-color: #f1f5f9;
+  z-index: 2;
+  min-width: 150px;
+  text-align: left !important;
+  padding-left: 15px !important;
+  box-shadow: 2px 0 5px rgba(0,0,0,0.05);
+}
+
+.font-bold {
+  font-weight: 600;
+  color: #334155;
+  font-size: 13px;
+}
+
+.process-cell {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.cell-input {
+  width: 100%;
+  height: 35px;
+  border: none;
+  text-align: center;
+  font-size: 14px;
+  background: transparent;
+}
+
+.cell-input:focus {
+  outline: 2px solid #3b82f6;
+  background-color: #eff6ff;
+}
+
+.row-highlight {
+  background-color: #f8fafc;
+  font-weight: bold;
+}
+
+/* Specific to DGBB Table */
+.header-input {
+  width: 90%;
+  margin: 2px auto;
+  display: block;
+  font-size: 11px;
+  text-align: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 2px;
+}
+
+.action-row {
+  margin-top: 20px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.submit-btn {
+  background-color: #2563eb;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.submit-btn:hover {
+  background-color: #1d4ed8;
+}
+
+.placeholder {
+  padding: 40px;
+  text-align: center;
+  color: #64748b;
+  font-style: italic;
+}

@@ -8,11 +8,7 @@ import json
 from datetime import date
 
 router = APIRouter()
-
 DATABASE_URL = os.getenv("DATABASE_URL")
-
-if not DATABASE_URL:
-    raise ValueError("CRITICAL ERROR: DATABASE_URL environment variable is not set.")
 
 class ScrapEntry(BaseModel):
     department: str
@@ -21,62 +17,25 @@ class ScrapEntry(BaseModel):
     category: str
     data: List[Dict[str, Any]]
 
-
-# Updated section in scrap_backend.py
+class ScrapUpdate(BaseModel):
+    id: int
+    payload: List[Dict[str, Any]]
 
 def get_db_connection():
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
+        return psycopg2.connect(DATABASE_URL)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
 
-# --- AUTOMATIC TABLE INITIALIZER ---
-def init_db():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        create_table_query = """
-        CREATE TABLE IF NOT EXISTS scrap_history (
-            id SERIAL PRIMARY KEY,
-            department VARCHAR(100) NOT NULL,
-            date DATE NOT NULL,
-            shift VARCHAR(50) NOT NULL,
-            category VARCHAR(50) NOT NULL,
-            payload JSONB NOT NULL,
-            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-        );
-        """
-        cursor.execute(create_table_query)
-        conn.commit()
-        print("✅ Database table 'scrap_history' verified/created successfully.")
-    except Exception as e:
-        print(f"❌ Failed to initialize database tables: {e}")
-    finally:
-        cursor.close()
-        conn.close()
-
-# Run initialization when the module loads
-init_db()
-
-
-# Hardcoded absolute paths so it works instantly regardless of main.py setup
 @router.post("/api/scrap/submit")
 async def submit_scrap(entry: ScrapEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        insert_query = """
-            INSERT INTO scrap_history (department, date, shift, category, payload) 
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        cursor.execute(insert_query, (
-            entry.department, 
-            entry.date, 
-            entry.shift, 
-            entry.category,
-            json.dumps(entry.data)
-        ))
+        cursor.execute(
+            "INSERT INTO scrap_history (department, date, shift, category, payload) VALUES (%s, %s, %s, %s, %s)",
+            (entry.department, entry.date, entry.shift, entry.category, json.dumps(entry.data))
+        )
         conn.commit()
         return {"status": "success", "message": "Scrap data saved successfully!"}
     except Exception as e:
@@ -96,8 +55,8 @@ def get_scrap_history(department: str = None):
         if department:
             query += " WHERE department = %s"
             params.append(department)
-        
         query += " ORDER BY date DESC, shift ASC"
+        
         cursor.execute(query, tuple(params))
         rows = cursor.fetchall()
         
@@ -114,6 +73,25 @@ def get_scrap_history(department: str = None):
         return {"status": "success", "data": history_list}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to fetch history: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+# --- NEW: UPDATE EXISITING HISTORICAL RECORDS ---
+@router.put("/api/scrap/update")
+async def update_scrap(update_data: ScrapUpdate):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE scrap_history SET payload = %s WHERE id = %s",
+            (json.dumps(update_data.payload), update_data.id)
+        )
+        conn.commit()
+        return {"status": "success", "message": "Historical records updated successfully!"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to modify archive records: {e}")
     finally:
         cursor.close()
         conn.close()

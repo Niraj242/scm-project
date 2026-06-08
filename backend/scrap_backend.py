@@ -7,17 +7,25 @@ from typing import List, Dict, Any
 import psycopg2
 import os
 from datetime import date
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file if running locally
+load_dotenv()
 
 app = FastAPI()
 
-# Make sure to set your Neon DB connection string in Render environment variables as DATABASE_URL
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@ep-cool-snowflake-123456.us-east-2.aws.neon.tech/neondb")
+# Securely fetch the database URL from the environment
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Fail fast if the environment variable is missing
+if not DATABASE_URL:
+    raise ValueError("CRITICAL ERROR: DATABASE_URL environment variable is not set. Please configure it in Render/Vercel or your local .env file.")
 
 class ScrapEntry(BaseModel):
     department: str
     date: date
     shift: str
-    category: str # Industrial or Automobile
+    category: str # Industrial or Automotive
     data: List[Dict[str, Any]] # The row data from the tables
 
 def get_db_connection():
@@ -34,7 +42,6 @@ async def submit_scrap(entry: ScrapEntry):
     
     try:
         # Example query - you will adjust this later when we design the specific database tables
-        # For now, it confirms the backend successfully receives the complex JSON from React
         insert_query = """
             INSERT INTO scrap_history (department, date, shift, category, payload) 
             VALUES (%s, %s, %s, %s, %s)
@@ -57,5 +64,3 @@ async def submit_scrap(entry: ScrapEntry):
     finally:
         cursor.close()
         conn.close()
-
-# Run locally using: uvicorn scrap_backend:app --reload

@@ -1,4 +1,6 @@
-/* Scrap.css */
+/* ==========================================================================
+   Core Layout & Typography
+   ========================================================================== */
 .scrap-module {
   font-family: 'Inter', 'Segoe UI', sans-serif;
   padding: 20px;
@@ -6,6 +8,43 @@
   min-height: 100vh;
 }
 
+/* Navigation Tab Bar */
+.sub-view-tabs {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 12px;
+}
+
+.tab-btn {
+  padding: 10px 20px;
+  background-color: #e2e8f0;
+  color: #475569;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  background-color: #cbd5e1;
+  color: #1e293b;
+}
+
+.active-tab {
+  background-color: #2563eb;
+  color: white;
+}
+
+.active-tab:hover {
+  background-color: #1d4ed8;
+  color: white;
+}
+
+/* Workspace Header Controllers */
 .module-header {
   background: white;
   padding: 20px;
@@ -57,6 +96,9 @@
   box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
 }
 
+/* ==========================================================================
+   Data Entry & Spreadsheet Grids
+   ========================================================================== */
 .table-wrapper {
   background: white;
   border-radius: 8px;
@@ -144,7 +186,6 @@
   font-weight: bold;
 }
 
-/* Specific to DGBB Table */
 .header-input {
   width: 90%;
   margin: 2px auto;
@@ -155,10 +196,14 @@
   border-radius: 2px;
 }
 
+/* Form Submission Elements */
 .action-row {
   margin-top: 20px;
   display: flex;
   justify-content: flex-end;
+  padding: 15px;
+  background-color: #f8fafc;
+  border-top: 1px solid #e2e8f0;
 }
 
 .submit-btn {
@@ -184,44 +229,9 @@
   font-style: italic;
 }
 
-.view-details-btn {
-  background-color: #475569;
-  color: white;
-  border: none;
-  padding: 5px 10px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 0.85rem;
-}
-.view-details-btn:hover {
-  background-color: #334155;
-}
-.expanded-row-data {
-  background-color: #f8fafc;
-}
-.inner-history-log {
-  padding: 15px;
-  border-left: 4px solid #2563eb;
-}
-.inner-history-log ul {
-  list-style: none;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-  gap: 8px;
-}
-.inner-history-log li {
-  font-size: 0.9rem;
-  background: white;
-  padding: 6px 10px;
-  border: 1px solid #e2e8f0;
-  border-radius: 4px;
-}
-.highlight-text {
-  color: #2563eb;
-  font-weight: bold;
-}
-/* Archive Editor Configurations */
+/* ==========================================================================
+   Historical Sheets Archive Mode
+   ========================================================================== */
 .archive-edit-mode {
   border: 2px dashed #eab308;
   padding: 10px;
@@ -255,12 +265,20 @@
   font-weight: 600;
 }
 
-/* Summary Cross Tab Grid Core Rules */
+/* ==========================================================================
+   Cross-Tab Summary Matrix Layout
+   ========================================================================== */
 .summary-matrix-wrapper {
   background: white;
   padding: 20px;
   border-radius: 8px;
   box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.summary-matrix-wrapper h3 {
+  margin-top: 0;
+  color: #1e293b;
+  margin-bottom: 15px;
 }
 
 .matrix-scroll {
@@ -284,6 +302,7 @@
   min-width: 65px;
 }
 
+/* Multi-level Sticky Header Constraints */
 .matrix-table th {
   background: #f1f5f9;
   color: #1e293b;
@@ -294,13 +313,23 @@
 }
 
 .matrix-table thead tr:nth-child(2) th {
-  top: 33px; /* Adjust if cell header padding changes */
+  top: 35px; 
 }
 
 .matrix-table .head-col {
   z-index: 4 !important;
 }
 
+.matrix-table .sub-type-header-cell {
+  background: #f1f5f9;
+  color: #1e293b;
+  font-weight: 700;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+/* Dynamic Left Frozen Columns */
 .matrix-table .sticky-col {
   position: sticky;
   left: 0;
@@ -309,6 +338,7 @@
   text-align: left;
   min-width: 180px;
   z-index: 1;
+  box-shadow: 2px 0 5px rgba(0,0,0,0.02);
 }
 
 .date-header-cell {
@@ -326,6 +356,23 @@
   color: #0f172a;
 }
 
+/* Split Ring Identifiers Styles */
+.component-cell {
+  text-align: center !important;
+  font-size: 0.8rem;
+  background-color: #ffffff;
+  border-right: 2px solid #cbd5e1 !important;
+}
+
+.ir-style {
+  color: #0284c7; 
+}
+
+.or-style {
+  color: #b45309; 
+}
+
+/* Matrix Context Highlights */
 .cell-has-value {
   background-color: #eff6ff;
   color: #1d4ed8;
@@ -336,7 +383,7 @@
   color: #94a3b8;
 }
 
-/* Totals Formatting Parameters */
+/* Horizontal & Vertical Summary Totals Matrix Rules */
 .row-total-cell {
   background-color: #f1f5f9;
   color: #0f172a;

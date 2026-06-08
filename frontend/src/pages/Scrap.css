@@ -221,3 +221,149 @@
   color: #2563eb;
   font-weight: bold;
 }
+/* Archive Editor Configurations */
+.archive-edit-mode {
+  border: 2px dashed #eab308;
+  padding: 10px;
+  border-radius: 8px;
+  background-color: #fefce8;
+}
+
+.archive-badge {
+  background: #eab308;
+  color: #854d0e;
+  font-weight: bold;
+  padding: 6px 12px;
+  display: inline-block;
+  border-radius: 4px;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+}
+
+.update-btn {
+  background-color: #eab308 !important;
+  color: #1e293b !important;
+}
+
+.update-btn:hover {
+  background-color: #ca8a04 !important;
+}
+
+.archived-selector-box select {
+  border: 2px solid #eab308 !important;
+  background-color: #fffde7;
+  font-weight: 600;
+}
+
+/* Summary Cross Tab Grid Core Rules */
+.summary-matrix-wrapper {
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+}
+
+.matrix-scroll {
+  max-height: 650px;
+  overflow: auto;
+}
+
+.matrix-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.85rem;
+}
+
+.matrix-table th, 
+.matrix-table td {
+  border-right: 1px solid #cbd5e1;
+  border-bottom: 1px solid #cbd5e1;
+  padding: 8px 12px;
+  text-align: center;
+  min-width: 65px;
+}
+
+.matrix-table th {
+  background: #f1f5f9;
+  color: #1e293b;
+  font-weight: 700;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.matrix-table thead tr:nth-child(2) th {
+  top: 33px; /* Adjust if cell header padding changes */
+}
+
+.matrix-table .head-col {
+  z-index: 4 !important;
+}
+
+.matrix-table .sticky-col {
+  position: sticky;
+  left: 0;
+  background: #f8fafc;
+  border-right: 2px solid #94a3b8;
+  text-align: left;
+  min-width: 180px;
+  z-index: 1;
+}
+
+.date-header-cell {
+  background-color: #e2e8f0 !important;
+  border-bottom: 2px solid #cbd5e1 !important;
+}
+
+.shift-sub-cell {
+  font-size: 0.75rem;
+  background-color: #f8fafc !important;
+}
+
+.type-cell {
+  background-color: #ffffff !important;
+  color: #0f172a;
+}
+
+.cell-has-value {
+  background-color: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.cell-empty {
+  color: #94a3b8;
+}
+
+/* Totals Formatting Parameters */
+.row-total-cell {
+  background-color: #f1f5f9;
+  color: #0f172a;
+  border-left: 2px solid #94a3b8;
+}
+
+.total-header-cell {
+  border-left: 2px solid #94a3b8 !important;
+  background-color: #cbd5e1 !important;
+}
+
+.grand-total-row td {
+  background-color: #e2e8f0;
+  color: #0f172a;
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  border-top: 2px solid #94a3b8;
+}
+
+.grand-total-row .sticky-col {
+  z-index: 3;
+}
+
+.grand-total-corner {
+  background-color: #2563eb !important;
+  color: white !important;
+  font-size: 1rem;
+  border-left: 2px solid #1d4ed8;
+}

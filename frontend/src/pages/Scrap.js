@@ -6,7 +6,6 @@ const Scrap = () => {
   const API_URL = process.env.REACT_APP_API_URL || 'https://scm-backend-pshv.onrender.com';
   const today = new Date().toISOString().split('T')[0];
 
-  // View state management: 'entry' (New Form), 'history' (Saved Sheets Grid), 'summary' (Dynamic Cross-tab Matrix)
   const [subView, setSubView] = useState('entry'); 
   const [department, setDepartment] = useState('Heat Treatment');
   const [date, setDate] = useState(today);
@@ -14,13 +13,11 @@ const Scrap = () => {
   const [category, setCategory] = useState('Industrial');
   const [isSubmitting, setIsSubmitting] = useState(false);
   
-  // Data Matrices
   const [tableData, setTableData] = useState({});
   const [historyRecords, setHistoryRecords] = useState([]);
   const [selectedHistoryId, setSelectedHistoryId] = useState('');
   const [loadingHistory, setLoadingHistory] = useState(false);
 
-  // Constants defining standard shop configurations
   const htFurnaces = ['Aichelin Unitherm', 'Roller', 'Birlec', 'Castlink', 'Aichelin', 'Shoei', 'Simplicity', 'Other-'];
   const htCols = ['G1_TYPE', 'G1_IR', 'G1_OR', 'G2_TYPE', 'G2_IR', 'G2_OR', 'G3_TYPE', 'G3_IR', 'G3_OR', 'G4_TYPE', 'G4_IR', 'G4_OR', 'Remark'];
 
@@ -30,14 +27,10 @@ const Scrap = () => {
   const dgbbProcesses = ["1. IR FACE GRINDING", "2. IR GROOVE GRINDING", "3. IR BORE GRINDING", "4. GRD. BURN TEST SC. IR", "5. IR AT BALL FILLING", "6. OR FACE GRINDING", "7. OR OD GRINDING", "8. OR GROOVE GRINDING", "9. OR GROOVE HONING", "10. GRD. BURN TEST SC OR", "11. OR AT BALL FILLING", "12. SEAL", "13. SHILD", "14. A SCRAP BEARING", "15. B SCRAP BEARING", "16. C SCRAP BEARING", "17. C1/CS CLEARANCE SCRAP BEARING", "18. VIBRATION SCRAP BEARING", "19. CAGES SCRAP BEARING", "20. OTHER BALLS (KG)"];
   const dgbbChannels = ["CH01", "CH02", "CH03", "CH04", "CH05", "CH05(SABB)", "CH07", "CH08", "CH11", "CH12", "CH13"];
 
-  // Clear data tables when configuration parameters change
   useEffect(() => {
-    if (subView === 'entry') {
-      setTableData({});
-    }
+    if (subView === 'entry') setTableData({});
   }, [department, category, subView]);
 
-  // Fetch all historical database records for current department
   const loadHistoryLogs = async () => {
     setLoadingHistory(true);
     try {
@@ -46,7 +39,6 @@ const Scrap = () => {
       if (result.status === 'success') {
         setHistoryRecords(result.data);
         if (result.data.length > 0 && subView === 'history') {
-          // Default load the most recent record
           mapHistoryToGrid(result.data[0]);
         }
       }
@@ -61,7 +53,6 @@ const Scrap = () => {
     loadHistoryLogs();
   }, [department, subView]);
 
-  // Convert array rows from Postgres JSON back into a key-value layout state map
   const mapHistoryToGrid = (record) => {
     if (!record) return;
     setSelectedHistoryId(record.id);
@@ -76,7 +67,6 @@ const Scrap = () => {
     setTableData(prev => ({ ...prev, [`${rowKey}::${colKey}`]: val }));
   };
 
-  // Excel keystroke movement: Enter shifts focus downward to the next row within the same column group
   const handleKeyDown = (e, currentRowIdx, colIdx, totalRows, inputIdPrefix) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -103,14 +93,12 @@ const Scrap = () => {
     try {
       let response, result;
       if (subView === 'history') {
-        // Edit Mode: Update existing database row
         response = await fetch(`${API_URL}/api/scrap/update`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id: parseInt(selectedHistoryId), payload: dataPayload })
         });
       } else {
-        // Entry Mode: Create a new database row
         response = await fetch(`${API_URL}/api/scrap/submit`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -128,18 +116,19 @@ const Scrap = () => {
         if (subView === 'entry') setTableData({});
         loadHistoryLogs();
       } else {
-        alert(`Error: ${result.detail || 'Failed process event.'}`);
+        // Displays the detailed duplicate entry error message returned by backend
+        alert(result.detail || 'Failed process event.');
       }
     } catch (err) {
-      alert("Network Error: Verify that connection variables match server configurations.");
+      alert("Network Error: Verify connection configurations.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- CROSS TAB GENERATION LOGIC ---
+  // --- CORRECTED CROSS TAB SUMMARY GENERATION LOGIC ---
   const summaryMatrix = useMemo(() => {
-    const matrix = {}; // format: { [bearing_type]: { [date]: { [shift]: sum } } }
+    const matrix = {}; // format: { [BearingType::IR_or_OR]: { [date]: { [shift]: sum } } }
     const uniqueDates = new Set();
 
     historyRecords.forEach(record => {
@@ -147,7 +136,6 @@ const Scrap = () => {
       const logShift = record.shift;
       uniqueDates.add(logDate);
 
-      // Rebuild temporary record map for clean scanning
       const dataMap = {};
       record.payload.forEach(item => {
         if (!dataMap[item.item_row]) dataMap[item.item_row] = {};
@@ -155,12 +143,13 @@ const Scrap = () => {
       });
 
       const parseVal = (v) => isNaN(parseFloat(v)) ? 0 : parseFloat(v);
-      const addValueToMatrix = (type, qty) => {
-        if (!type || type.trim() === "" || type.toUpperCase().includes("UNKNOWN") || qty <= 0) return;
-        const cleanType = type.trim().toUpperCase();
-        if (!matrix[cleanType]) matrix[cleanType] = {};
-        if (!matrix[cleanType][logDate]) matrix[cleanType][logDate] = {};
-        matrix[cleanType][logDate][logShift] = (matrix[cleanType][logDate][logShift] || 0) + qty;
+      
+      const addValueToMatrix = (type, component, qty) => {
+        if (!type || type.trim() === "" || qty <= 0) return;
+        const matrixRowKey = `${type.trim().toUpperCase()}::${component}`;
+        if (!matrix[matrixRowKey]) matrix[matrixRowKey] = {};
+        if (!matrix[matrixRowKey][logDate]) matrix[matrixRowKey][logDate] = {};
+        matrix[matrixRowKey][logDate][logShift] = (matrix[matrixRowKey][logDate][logShift] || 0) + qty;
       };
 
       if (record.department === 'Heat Treatment') {
@@ -168,8 +157,10 @@ const Scrap = () => {
           const rowData = dataMap[furnace] || {};
           [1, 2, 3, 4].forEach(g => {
             const bType = rowData[`G${g}_TYPE`];
-            const scrapQty = parseVal(rowData[`G${g}_IR`]) + parseVal(rowData[`G${g}_OR`]);
-            addValueToMatrix(bType, scrapQty);
+            const irQty = parseVal(rowData[`G${g}_IR`]);
+            const orQty = parseVal(rowData[`G${g}_OR`]);
+            if (irQty > 0) addValueToMatrix(bType, 'IR', irQty);
+            if (orQty > 0) addValueToMatrix(bType, 'OR', orQty);
           });
         });
       } else if (record.department === 'Face and OD') {
@@ -178,19 +169,30 @@ const Scrap = () => {
           const rowData = dataMap[machine] || {};
           [1, 2, 3, 4].forEach(g => {
             const bType = rowData[`G${g}_TYPE`];
-            const scrapQty = parseVal(rowData[`G${g}_IR`]) + parseVal(rowData[`G${g}_OR`]);
-            addValueToMatrix(bType, scrapQty);
+            const irQty = parseVal(rowData[`G${g}_IR`]);
+            const orQty = parseVal(rowData[`G${g}_OR`]);
+            if (irQty > 0) addValueToMatrix(bType, 'IR', irQty);
+            if (orQty > 0) addValueToMatrix(bType, 'OR', orQty);
           });
         });
       } else if (record.department === 'DGBB') {
         const headers = dataMap['HEADER'] || {};
         dgbbChannels.forEach(ch => {
           const bType = headers[`${ch}_TYPE`];
-          let channelScrapSum = 0;
+          if (!bType) return;
+
           dgbbProcesses.forEach(proc => {
-            channelScrapSum += parseVal((dataMap[proc] || {})[ch]);
+            const qty = parseVal((dataMap[proc] || {})[ch]);
+            if (qty > 0) {
+              const upperProc = proc.toUpperCase();
+              if (upperProc.includes('IR')) {
+                addValueToMatrix(bType, 'IR', qty);
+              } else if (upperProc.includes('OR')) {
+                addValueToMatrix(bType, 'OR', qty);
+              }
+              // Other un-designated reasons are skipped cleanly here
+            }
           });
-          addValueToMatrix(bType, channelScrapSum);
         });
       }
     });
@@ -199,7 +201,7 @@ const Scrap = () => {
     return { matrix, sortedDates };
   }, [historyRecords]);
 
-  // --- RENDER PATTERNS ---
+  // --- STANDARD DEPT LAYOUT RENDERS ---
   const renderHTLayout = (prefix) => (
     <div className="table-container">
       <table className="scrap-table">
@@ -330,18 +332,15 @@ const Scrap = () => {
     </div>
   );
 
-  // --- CROSS-TAB DATA COMPUTATION HANDLERS ---
   const dateList = summaryMatrix.sortedDates;
   const matrixData = summaryMatrix.matrix;
   const shifts = ['Shift 1', 'Shift 2', 'Shift 3'];
   
-  // Track cross-tab dynamic column/row totals
   let grandTotal = 0;
   const columnTotals = {};
 
   return (
     <div className="scrap-module">
-      {/* Dynamic Module Nav Toggles */}
       <div className="sub-view-tabs">
         <button className={`tab-btn ${subView === 'entry' ? 'active-tab' : ''}`} onClick={() => setSubView('entry')}>
           + Add Scrap Entry
@@ -355,7 +354,7 @@ const Scrap = () => {
       </div>
 
       <div className="module-header">
-        <h2>{department} System Workspace</h2>
+        <h2>{department} Workspace Area</h2>
         <div className="controls-row">
           <div className="control-group">
             <label>Workspace Department:</label>
@@ -414,13 +413,12 @@ const Scrap = () => {
         </div>
       </div>
 
-      {/* RENDER VIEW 1: DATA ENTRY BLOCK */}
       {subView === 'entry' && (
         <div className="table-wrapper">
           {department === 'Heat Treatment' && renderHTLayout('newht')}
           {department === 'Face and OD' && renderFODLayout('newfod')}
           {department === 'DGBB' && renderDGBBLayout('newdgbb')}
-          {department === 'TRB' && <div className="placeholder">TRB Base Configuration Blueprint Pending...</div>}
+          {department === 'TRB' && <div className="placeholder">TRB Layout Pending Configuration...</div>}
           
           <div className="action-row">
             <button className="submit-btn" onClick={saveSheetRecords} disabled={isSubmitting}>
@@ -430,7 +428,6 @@ const Scrap = () => {
         </div>
       )}
 
-      {/* RENDER VIEW 2: LOG RECORD ARCHIVE SHEET EDITOR */}
       {subView === 'history' && (
         <div className="table-wrapper archive-edit-mode">
           <div className="archive-badge">⚠️ ARCHIVE EDIT MODE ACTIVE</div>
@@ -455,10 +452,9 @@ const Scrap = () => {
         </div>
       )}
 
-      {/* RENDER VIEW 3: CROSS-TAB PRODUCTION SCRAP MATRIX COMPONENT */}
       {subView === 'summary' && (
         <div className="summary-matrix-wrapper">
-          <h3>Day & Shift Wise Cross-Tab Scrap Summary ({department})</h3>
+          <h3>Day & Shift Wise Cross-Tab Component Matrix ({department})</h3>
           {dateList.length === 0 ? (
             <p className="placeholder">No historical parameters found to generate analytical dimensions.</p>
           ) : (
@@ -466,7 +462,8 @@ const Scrap = () => {
               <table className="matrix-table">
                 <thead>
                   <tr>
-                    <th rowSpan="2" className="sticky-col head-col">Bearing Family / Type</th>
+                    <th rowSpan="2" className="sticky-col head-col">Bearing Family Type</th>
+                    <th rowSpan="2" className="sub-type-header-cell">Ring</th>
                     {dateList.map(d => (
                       <th key={d} colSpan="3" className="date-header-cell">{d}</th>
                     ))}
@@ -479,20 +476,22 @@ const Scrap = () => {
                   </tr>
                 </thead>
                 <tbody>
-                  {Object.keys(matrixData).sort().map(bearingType => {
+                  {Object.keys(matrixData).sort().map(matrixRowKey => {
+                    const [bearingType, component] = matrixRowKey.split('::');
                     let rowSum = 0;
                     return (
-                      <tr key={bearingType}>
+                      <tr key={matrixRowKey}>
                         <td className="sticky-col font-bold type-cell">{bearingType}</td>
+                        <td className={`component-cell font-bold ${component === 'IR' ? 'ir-style' : 'or-style'}`}>{component}</td>
                         {dateList.flatMap(d => shifts.map(s => {
-                          const val = matrixData[bearingType]?.[d]?.[s] || 0;
+                          const val = matrixData[matrixRowKey]?.[d]?.[s] || 0;
                           rowSum += val;
                           
                           const colKey = `${d}-${s}`;
                           columnTotals[colKey] = (columnTotals[colKey] || 0) + val;
                           
                           return (
-                            <td key={`${bearingType}-${colKey}`} className={val > 0 ? 'cell-has-value' : 'cell-empty'}>
+                            <td key={`${matrixRowKey}-${colKey}`} className={val > 0 ? 'cell-has-value' : 'cell-empty'}>
                               {val > 0 ? val : '-'}
                             </td>
                           );
@@ -502,9 +501,8 @@ const Scrap = () => {
                     );
                   })}
                   
-                  {/* BOTTOM ROW TOTALS AND THE GRAND TOTAL MATRIX CORNER */}
                   <tr className="grand-total-row">
-                    <td className="sticky-col font-bold">Total</td>
+                    <td className="sticky-col font-bold" colSpan="2">Total</td>
                     {dateList.flatMap(d => shifts.map(s => {
                       const colKey = `${d}-${s}`;
                       const colTotal = columnTotals[colKey] || 0;

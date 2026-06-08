@@ -1,7 +1,11 @@
+// Scrap.js
 import React, { useState } from 'react';
 import './Scrap.css';
 
 const Scrap = () => {
+  // Base API URL from your environment variables
+  const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+
   // Get today's date in YYYY-MM-DD format for default value
   const today = new Date().toISOString().split('T')[0];
 
@@ -9,9 +13,9 @@ const Scrap = () => {
   const [date, setDate] = useState(today);
   const [shift, setShift] = useState('Shift 1');
   const [category, setCategory] = useState('Industrial'); // Industrial or Automotive
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // --- TABLE DATA STRUCTURES BASED ON IMAGES ---
-
+  // --- TABLE DATA STRUCTURES ---
   const htFurnaces = [
     'Aichelin Unitherm', 'Roller', 'Birlec', 'Castlink', 
     'Aichelin', 'Shoei', 'Simplicity', 'Other-'
@@ -36,8 +40,45 @@ const Scrap = () => {
 
   const dgbbChannels = ["CH01", "CH02", "CH03", "CH04", "CH05", "CH05(SABB)", "CH07", "CH08", "CH11", "CH12", "CH13"];
 
-  // --- RENDER HELPERS ---
+  // --- SUBMIT LOGIC ---
+  const handleSubmit = async () => {
+    setIsSubmitting(true);
+    
+    // Note: In the next step, we will need to map through the table inputs to gather the array data.
+    // For now, it sends the top-level selections and an empty data array to verify the connection.
+    const payload = {
+      department: department,
+      date: date,
+      shift: shift,
+      category: category,
+      data: [] 
+    };
 
+    try {
+      const response = await fetch(`${API_URL}/api/scrap/submit`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const result = await response.json();
+      alert(`Success: ${result.message}`);
+      
+    } catch (error) {
+      console.error("Error submitting data:", error);
+      alert("Failed to save data. Make sure the backend is running and the API URL is correct.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // --- RENDER HELPERS ---
   const renderHeatTreatmentTable = () => (
     <div className="table-container">
       <table className="scrap-table">
@@ -187,7 +228,13 @@ const Scrap = () => {
       </div>
 
       <div className="action-row">
-        <button className="submit-btn">Save to Database</button>
+        <button 
+          className="submit-btn" 
+          onClick={handleSubmit} 
+          disabled={isSubmitting}
+        >
+          {isSubmitting ? 'Saving...' : 'Save to Database'}
+        </button>
       </div>
     </div>
   );

@@ -1,44 +1,29 @@
 # scrap_backend.py
-# Requirements: pip install fastapi uvicorn psycopg2-binary pydantic python-dotenv
+# Requirements: pip install fastapi psycopg2-binary pydantic
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
 import psycopg2
 import os
-import uvicorn
+import json
 from datetime import date
-from dotenv import load_dotenv
 
-# Load environment variables from a .env file if running locally
-load_dotenv()
+router = APIRouter()
 
-app = FastAPI()
-
-# --- CORS CONFIGURATION ---
-# This allows your Vercel frontend to successfully fetch data from your Render backend.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"], # NOTE: For better security later, replace "*" with ["https://your-vercel-domain.vercel.app"]
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Securely fetch the database URL from the environment
+# Securely fetch the database URL from Render environment variables
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Fail fast if the environment variable is missing
 if not DATABASE_URL:
-    raise ValueError("CRITICAL ERROR: DATABASE_URL environment variable is not set. Please configure it in Render/Vercel or your local .env file.")
+    raise ValueError("CRITICAL ERROR: DATABASE_URL environment variable is not set. Please configure it in Render.")
 
 class ScrapEntry(BaseModel):
     department: str
     date: date
     shift: str
-    category: str # Industrial or Automotive
-    data: List[Dict[str, Any]] # The row data from the tables
+    category: str  # Industrial or Automotive
+    data: List[Dict[str, Any]]  # The row data from the tables
 
 def get_db_connection():
     try:
@@ -47,18 +32,17 @@ def get_db_connection():
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database connection error: {e}")
 
-@app.post("/api/scrap/submit")
+# --- 1. SUBMIT DAILY SCRAP ENTRY ---
+@router.post("/scrap/submit")
 async def submit_scrap(entry: ScrapEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     
     try:
-        # Example query - you will adjust this later when we design the specific database tables
         insert_query = """
             INSERT INTO scrap_history (department, date, shift, category, payload) 
             VALUES (%s, %s, %s, %s, %s)
         """
-        import json
         cursor.execute(insert_query, (
             entry.department, 
             entry.date, 
@@ -77,9 +61,49 @@ async def submit_scrap(entry: ScrapEntry):
         cursor.close()
         conn.close()
 
-# --- RENDER PORT BINDING FIX ---
-if __name__ == "__main__":
-    # Render assigns a port dynamically via the PORT environment variable
-    # If it's not found (like when running locally), it defaults to 8000
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("scrap_backend:app", host="0.0.0.0", port=port)
+# --- 2. CHECK HISTORY (DAY AND SHIFT WISE) ---
+@router.get("/scrap/history")
+def get_scrap_history(department: str = None, shift: str = None, target_date: str = None):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # Base Query
+        query = "SELECT id, department, date, shift, category, payload FROM scrap_history WHERE 1=1"
+        params = []
+        
+        # Add dynamic filters if the frontend passes them
+        if department:
+            query += " AND department = %s"
+            params.append(department)
+        if shift:
+            query += " AND shift = %s"
+            params.append(shift)
+        if target_date:
+            query += " AND date = %s"
+            params.append(target_date)
+            
+        # Order by newest entries first
+        query += " ORDER BY date DESC, shift ASC"
+        
+        cursor.execute(query, tuple(params))
+        rows = cursor.fetchall()
+        
+        history_list = []
+        for row in rows:
+            history_list.append({
+                "id": row[0],
+                "department": row[1],
+                "date": str(row[2]),
+                "shift": row[3],
+                "category": row[4],
+                "payload": row[5] if isinstance(row[5], list) or isinstance(row[5], dict) else json.loads(row[5])
+            })
+            
+        return {"status": "success", "data": history_list}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch history: {e}")
+    finally:
+        cursor.close()
+        conn.close()

@@ -1,25 +1,26 @@
 // Scrap.js
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import './Scrap.css';
 
 const Scrap = () => {
   const API_URL = process.env.REACT_APP_API_URL || 'https://scm-backend-pshv.onrender.com';
   const today = new Date().toISOString().split('T')[0];
 
-  const [subView, setSubView] = useState('entry'); // 'entry' or 'history'
+  // View state management: 'entry' (New Form), 'history' (Saved Sheets Grid), 'summary' (Dynamic Cross-tab Matrix)
+  const [subView, setSubView] = useState('entry'); 
   const [department, setDepartment] = useState('Heat Treatment');
   const [date, setDate] = useState(today);
   const [shift, setShift] = useState('Shift 1');
   const [category, setCategory] = useState('Industrial');
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [tableData, setTableData] = useState({});
   
-  // History UI states
-  const [historyData, setHistoryData] = useState([]);
+  // Data Matrices
+  const [tableData, setTableData] = useState({});
+  const [historyRecords, setHistoryRecords] = useState([]);
+  const [selectedHistoryId, setSelectedHistoryId] = useState('');
   const [loadingHistory, setLoadingHistory] = useState(false);
-  const [expandedRow, setExpandedRow] = useState(null);
 
-  // Layout Configuration Mappings
+  // Constants defining standard shop configurations
   const htFurnaces = ['Aichelin Unitherm', 'Roller', 'Birlec', 'Castlink', 'Aichelin', 'Shoei', 'Simplicity', 'Other-'];
   const htCols = ['G1_TYPE', 'G1_IR', 'G1_OR', 'G2_TYPE', 'G2_IR', 'G2_OR', 'G3_TYPE', 'G3_IR', 'G3_OR', 'G4_TYPE', 'G4_IR', 'G4_OR', 'Remark'];
 
@@ -29,34 +30,53 @@ const Scrap = () => {
   const dgbbProcesses = ["1. IR FACE GRINDING", "2. IR GROOVE GRINDING", "3. IR BORE GRINDING", "4. GRD. BURN TEST SC. IR", "5. IR AT BALL FILLING", "6. OR FACE GRINDING", "7. OR OD GRINDING", "8. OR GROOVE GRINDING", "9. OR GROOVE HONING", "10. GRD. BURN TEST SC OR", "11. OR AT BALL FILLING", "12. SEAL", "13. SHILD", "14. A SCRAP BEARING", "15. B SCRAP BEARING", "16. C SCRAP BEARING", "17. C1/CS CLEARANCE SCRAP BEARING", "18. VIBRATION SCRAP BEARING", "19. CAGES SCRAP BEARING", "20. OTHER BALLS (KG)"];
   const dgbbChannels = ["CH01", "CH02", "CH03", "CH04", "CH05", "CH05(SABB)", "CH07", "CH08", "CH11", "CH12", "CH13"];
 
+  // Clear data tables when configuration parameters change
   useEffect(() => {
-    setTableData({});
-  }, [department, category]);
+    if (subView === 'entry') {
+      setTableData({});
+    }
+  }, [department, category, subView]);
 
-  const fetchHistory = async () => {
+  // Fetch all historical database records for current department
+  const loadHistoryLogs = async () => {
     setLoadingHistory(true);
     try {
-      const response = await fetch(`${API_URL}/api/scrap/history?department=${encodeURIComponent(department)}`);
-      const result = await response.json();
+      const res = await fetch(`${API_URL}/api/scrap/history?department=${encodeURIComponent(department)}`);
+      const result = await res.json();
       if (result.status === 'success') {
-        setHistoryData(result.data);
+        setHistoryRecords(result.data);
+        if (result.data.length > 0 && subView === 'history') {
+          // Default load the most recent record
+          mapHistoryToGrid(result.data[0]);
+        }
       }
-    } catch (error) {
-      console.error("Error pulling history logs:", error);
+    } catch (e) {
+      console.error("Failed fetching history records:", e);
     } finally {
       setLoadingHistory(false);
     }
   };
 
   useEffect(() => {
-    if (subView === 'history') fetchHistory();
-  }, [subView, department]);
+    loadHistoryLogs();
+  }, [department, subView]);
+
+  // Convert array rows from Postgres JSON back into a key-value layout state map
+  const mapHistoryToGrid = (record) => {
+    if (!record) return;
+    setSelectedHistoryId(record.id);
+    const rebuiltGrid = {};
+    record.payload.forEach(item => {
+      rebuiltGrid[`${item.item_row}::${item.configuration_column}`] = item.value;
+    });
+    setTableData(rebuiltGrid);
+  };
 
   const handleInputChange = (rowKey, colKey, val) => {
     setTableData(prev => ({ ...prev, [`${rowKey}::${colKey}`]: val }));
   };
 
-  // Excel Movement Logic (Detects Enter, drops down a row within the identical column list)
+  // Excel keystroke movement: Enter shifts focus downward to the next row within the same column group
   const handleKeyDown = (e, currentRowIdx, colIdx, totalRows, inputIdPrefix) => {
     if (e.key === 'Enter') {
       e.preventDefault();
@@ -71,48 +91,116 @@ const Scrap = () => {
     }
   };
 
-  const handleSubmit = async () => {
-    if (Object.keys(tableData).length === 0) {
-      alert("Cannot submit an empty sheet layout.");
-      return;
-    }
+  const saveSheetRecords = async () => {
+    if (Object.keys(tableData).length === 0) return alert("Cannot submit blank templates.");
     setIsSubmitting(true);
-    
-    const formattedPayload = Object.keys(tableData).map(key => {
+
+    const dataPayload = Object.keys(tableData).map(key => {
       const [row, col] = key.split('::');
       return { item_row: row, configuration_column: col, value: tableData[key] };
     });
 
-    const payload = {
-      department,
-      date,
-      shift,
-      category: (department === 'DGBB' || department === 'TRB') ? 'Standard' : category,
-      data: formattedPayload
-    };
-
     try {
-      const response = await fetch(`${API_URL}/api/scrap/submit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-      const result = await response.json();
-      if (response.ok && result.status === 'success') {
-        alert("Success: Records logged to database!");
-        setTableData({});
+      let response, result;
+      if (subView === 'history') {
+        // Edit Mode: Update existing database row
+        response = await fetch(`${API_URL}/api/scrap/update`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: parseInt(selectedHistoryId), payload: dataPayload })
+        });
       } else {
-        alert(`Failed: ${result.detail || 'Internal server anomaly'}`);
+        // Entry Mode: Create a new database row
+        response = await fetch(`${API_URL}/api/scrap/submit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            department, date, shift,
+            category: (department === 'DGBB' || department === 'TRB') ? 'Standard' : category,
+            data: dataPayload
+          })
+        });
       }
-    } catch (error) {
-      alert("Failed to save data. Make sure the backend is running and the API URL is correct.");
+
+      result = await response.json();
+      if (response.ok && result.status === 'success') {
+        alert("Records updated and saved securely to database!");
+        if (subView === 'entry') setTableData({});
+        loadHistoryLogs();
+      } else {
+        alert(`Error: ${result.detail || 'Failed process event.'}`);
+      }
+    } catch (err) {
+      alert("Network Error: Verify that connection variables match server configurations.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // --- RENDERING INDIVIDUAL DEPT SCHEMAS ---
-  const renderHeatTreatmentTable = () => (
+  // --- CROSS TAB GENERATION LOGIC ---
+  const summaryMatrix = useMemo(() => {
+    const matrix = {}; // format: { [bearing_type]: { [date]: { [shift]: sum } } }
+    const uniqueDates = new Set();
+
+    historyRecords.forEach(record => {
+      const logDate = record.date;
+      const logShift = record.shift;
+      uniqueDates.add(logDate);
+
+      // Rebuild temporary record map for clean scanning
+      const dataMap = {};
+      record.payload.forEach(item => {
+        if (!dataMap[item.item_row]) dataMap[item.item_row] = {};
+        dataMap[item.item_row][item.configuration_column] = item.value;
+      });
+
+      const parseVal = (v) => isNaN(parseFloat(v)) ? 0 : parseFloat(v);
+      const addValueToMatrix = (type, qty) => {
+        if (!type || type.trim() === "" || type.toUpperCase().includes("UNKNOWN") || qty <= 0) return;
+        const cleanType = type.trim().toUpperCase();
+        if (!matrix[cleanType]) matrix[cleanType] = {};
+        if (!matrix[cleanType][logDate]) matrix[cleanType][logDate] = {};
+        matrix[cleanType][logDate][logShift] = (matrix[cleanType][logDate][logShift] || 0) + qty;
+      };
+
+      if (record.department === 'Heat Treatment') {
+        htFurnaces.forEach(furnace => {
+          const rowData = dataMap[furnace] || {};
+          [1, 2, 3, 4].forEach(g => {
+            const bType = rowData[`G${g}_TYPE`];
+            const scrapQty = parseVal(rowData[`G${g}_IR`]) + parseVal(rowData[`G${g}_OR`]);
+            addValueToMatrix(bType, scrapQty);
+          });
+        });
+      } else if (record.department === 'Face and OD') {
+        fodMachines.forEach(machine => {
+          if (machine === 'TOTAL') return;
+          const rowData = dataMap[machine] || {};
+          [1, 2, 3, 4].forEach(g => {
+            const bType = rowData[`G${g}_TYPE`];
+            const scrapQty = parseVal(rowData[`G${g}_IR`]) + parseVal(rowData[`G${g}_OR`]);
+            addValueToMatrix(bType, scrapQty);
+          });
+        });
+      } else if (record.department === 'DGBB') {
+        const headers = dataMap['HEADER'] || {};
+        dgbbChannels.forEach(ch => {
+          const bType = headers[`${ch}_TYPE`];
+          let channelScrapSum = 0;
+          dgbbProcesses.forEach(proc => {
+            channelScrapSum += parseVal((dataMap[proc] || {})[ch]);
+          });
+          addValueToMatrix(bType, channelScrapSum);
+        });
+      }
+    });
+
+    const sortedDates = Array.from(uniqueDates).sort();
+    return { matrix, sortedDates };
+  }, [historyRecords]);
+
+  // --- RENDER PATTERNS ---
+  const renderHTLayout = (prefix) => (
     <div className="table-container">
       <table className="scrap-table">
         <thead>
@@ -135,12 +223,12 @@ const Scrap = () => {
               {htCols.map((col, cIdx) => (
                 <td key={col}>
                   <input 
-                    id={`ht-${rIdx}-${cIdx}`}
+                    id={`${prefix}-${rIdx}-${cIdx}`}
                     type="text" 
                     className="cell-input" 
                     value={tableData[`${furnace}::${col}`] || ''} 
                     onChange={(e) => handleInputChange(furnace, col, e.target.value)}
-                    onKeyDown={(e) => handleKeyDown(e, rIdx, cIdx, htFurnaces.length, 'ht')}
+                    onKeyDown={(e) => handleKeyDown(e, rIdx, cIdx, htFurnaces.length, prefix)}
                   />
                 </td>
               ))}
@@ -151,7 +239,7 @@ const Scrap = () => {
     </div>
   );
 
-  const renderFaceAndODTable = () => (
+  const renderFODLayout = (prefix) => (
     <div className="table-container">
       <table className="scrap-table">
         <thead>
@@ -174,12 +262,12 @@ const Scrap = () => {
               {fodCols.map((col, cIdx) => (
                 <td key={col}>
                   <input 
-                    id={`fod-${rIdx}-${cIdx}`}
+                    id={`${prefix}-${rIdx}-${cIdx}`}
                     type="text" 
                     className="cell-input" 
                     value={tableData[`${machine}::${col}`] || ''} 
                     onChange={(e) => handleInputChange(machine, col, e.target.value)}
-                    onKeyDown={(e) => handleKeyDown(e, rIdx, cIdx, fodMachines.length, 'fod')}
+                    onKeyDown={(e) => handleKeyDown(e, rIdx, cIdx, fodMachines.length, prefix)}
                   />
                 </td>
               ))}
@@ -190,7 +278,7 @@ const Scrap = () => {
     </div>
   );
 
-  const renderDGBBTable = () => (
+  const renderDGBBLayout = (prefix) => (
     <div className="table-container">
       <table className="scrap-table dgbb-table">
         <thead>
@@ -226,12 +314,12 @@ const Scrap = () => {
               {dgbbChannels.map((ch, cIdx) => (
                 <td key={ch}>
                   <input 
-                    id={`dgbb-${rIdx}-${cIdx}`}
+                    id={`${prefix}-${rIdx}-${cIdx}`}
                     type="number" 
                     className="cell-input" 
                     value={tableData[`${process}::${ch}`] || ''} 
                     onChange={(e) => handleInputChange(process, ch, e.target.value)}
-                    onKeyDown={(e) => handleKeyDown(e, rIdx, cIdx, dgbbProcesses.length, 'dgbb')}
+                    onKeyDown={(e) => handleKeyDown(e, rIdx, cIdx, dgbbProcesses.length, prefix)}
                   />
                 </td>
               ))}
@@ -242,23 +330,36 @@ const Scrap = () => {
     </div>
   );
 
+  // --- CROSS-TAB DATA COMPUTATION HANDLERS ---
+  const dateList = summaryMatrix.sortedDates;
+  const matrixData = summaryMatrix.matrix;
+  const shifts = ['Shift 1', 'Shift 2', 'Shift 3'];
+  
+  // Track cross-tab dynamic column/row totals
+  let grandTotal = 0;
+  const columnTotals = {};
+
   return (
     <div className="scrap-module">
+      {/* Dynamic Module Nav Toggles */}
       <div className="sub-view-tabs">
         <button className={`tab-btn ${subView === 'entry' ? 'active-tab' : ''}`} onClick={() => setSubView('entry')}>
           + Add Scrap Entry
         </button>
         <button className={`tab-btn ${subView === 'history' ? 'active-tab' : ''}`} onClick={() => setSubView('history')}>
-          📊 View History Logs
+          ✏️ View & Edit Saved Sheets
+        </button>
+        <button className={`tab-btn ${subView === 'summary' ? 'active-tab' : ''}`} onClick={() => setSubView('summary')}>
+          📊 Cross-Tab Summary Matrix
         </button>
       </div>
 
       <div className="module-header">
-        <h2>{department} Scrap Module</h2>
+        <h2>{department} System Workspace</h2>
         <div className="controls-row">
           <div className="control-group">
-            <label>Department:</label>
-            <select value={department} onChange={(e) => setDepartment(e.target.value)}>
+            <label>Workspace Department:</label>
+            <select value={department} onChange={(e) => { setDepartment(e.target.value); setSelectedHistoryId(''); }}>
               <option value="Heat Treatment">Heat Treatment</option>
               <option value="Face and OD">Face and OD Grinding</option>
               <option value="DGBB">DGBB</option>
@@ -266,18 +367,17 @@ const Scrap = () => {
             </select>
           </div>
 
-          {subView === 'entry' && (department === 'Heat Treatment' || department === 'Face and OD') && (
-            <div className="control-group">
-              <label>Category:</label>
-              <select value={category} onChange={(e) => setCategory(e.target.value)}>
-                <option value="Industrial">Industrial</option>
-                <option value="Automotive">Automotive</option>
-              </select>
-            </div>
-          )}
-
           {subView === 'entry' && (
             <>
+              {(department === 'Heat Treatment' || department === 'Face and OD') && (
+                <div className="control-group">
+                  <label>Category:</label>
+                  <select value={category} onChange={(e) => setCategory(e.target.value)}>
+                    <option value="Industrial">Industrial</option>
+                    <option value="Automotive">Automotive</option>
+                  </select>
+                </div>
+              )}
               <div className="control-group">
                 <label>Date:</label>
                 <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
@@ -292,77 +392,130 @@ const Scrap = () => {
               </div>
             </>
           )}
+
+          {subView === 'history' && (
+            <div className="control-group archived-selector-box">
+              <label>Select Saved Archive Log Sheet:</label>
+              <select 
+                value={selectedHistoryId} 
+                onChange={(e) => {
+                  const targetRecord = historyRecords.find(r => r.id === parseInt(e.target.value));
+                  mapHistoryToGrid(targetRecord);
+                }}
+              >
+                {historyRecords.map(r => (
+                  <option key={r.id} value={r.id}>
+                    [{r.date}] - {r.shift} ({r.category})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
       </div>
 
-      {subView === 'entry' ? (
+      {/* RENDER VIEW 1: DATA ENTRY BLOCK */}
+      {subView === 'entry' && (
         <div className="table-wrapper">
-          {department === 'Heat Treatment' && renderHeatTreatmentTable()}
-          {department === 'Face and OD' && renderFaceAndODTable()}
-          {department === 'DGBB' && renderDGBBTable()}
-          {department === 'TRB' && <div className="placeholder">TRB Layout Format Configuration Pending...</div>}
+          {department === 'Heat Treatment' && renderHTLayout('newht')}
+          {department === 'Face and OD' && renderFODLayout('newfod')}
+          {department === 'DGBB' && renderDGBBLayout('newdgbb')}
+          {department === 'TRB' && <div className="placeholder">TRB Base Configuration Blueprint Pending...</div>}
           
           <div className="action-row">
-            <button className="submit-btn" onClick={handleSubmit} disabled={isSubmitting}>
-              {isSubmitting ? 'Saving Sheet Data...' : 'Save Sheet Records'}
+            <button className="submit-btn" onClick={saveSheetRecords} disabled={isSubmitting}>
+              {isSubmitting ? 'Writing to database...' : 'Save New Sheet Records'}
             </button>
           </div>
         </div>
-      ) : (
-        <div className="history-wrapper">
-          <h3>Historical Records ({department})</h3>
+      )}
+
+      {/* RENDER VIEW 2: LOG RECORD ARCHIVE SHEET EDITOR */}
+      {subView === 'history' && (
+        <div className="table-wrapper archive-edit-mode">
+          <div className="archive-badge">⚠️ ARCHIVE EDIT MODE ACTIVE</div>
           {loadingHistory ? (
-            <p>Loading database history...</p>
-          ) : historyData.length === 0 ? (
-            <p className="placeholder">No history found for this section.</p>
+            <p>Loading spreadsheet layout arrays from Neon database...</p>
+          ) : historyRecords.length === 0 ? (
+            <p className="placeholder">No past sheets saved for this section.</p>
           ) : (
-            <table className="history-summary-table">
-              <thead>
-                <tr>
-                  <th>Action</th>
-                  <th>Date Logged</th>
-                  <th>Shift</th>
-                  <th>Category</th>
-                  <th>Metrics Tracked</th>
-                </tr>
-              </thead>
-              <tbody>
-                {historyData.map((hist) => (
-                  <React.Fragment key={hist.id}>
-                    <tr>
-                      <td>
-                        <button 
-                          className="view-details-btn" 
-                          onClick={() => setExpandedRow(expandedRow === hist.id ? null : hist.id)}
-                        >
-                          {expandedRow === hist.id ? 'Hide Details' : 'View Details'}
-                        </button>
-                      </td>
-                      <td><b>{hist.date}</b></td>
-                      <td>{hist.shift}</td>
-                      <td>{hist.category}</td>
-                      <td>{hist.payload?.length || 0} fields saved</td>
-                    </tr>
-                    {expandedRow === hist.id && (
-                      <tr className="expanded-row-data">
-                        <td colSpan="5">
-                          <div className="inner-history-log">
-                            <h4>Detailed Payload Records:</h4>
-                            <ul>
-                              {hist.payload.map((item, idx) => (
-                                <li key={idx}>
-                                  <strong>{item.item_row}</strong> ({item.configuration_column}): <span className="highlight-text">{item.value}</span>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
-                        </td>
+            <>
+              {department === 'Heat Treatment' && renderHTLayout('editht')}
+              {department === 'Face and OD' && renderFODLayout('editfod')}
+              {department === 'DGBB' && renderDGBBLayout('editdgbb')}
+              {department === 'TRB' && <div className="placeholder">TRB Layout Configuration Blueprint Pending...</div>}
+              
+              <div className="action-row">
+                <button className="submit-btn update-btn" onClick={saveSheetRecords} disabled={isSubmitting}>
+                  {isSubmitting ? 'Modifying database records...' : 'Update Existing Archive Records'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* RENDER VIEW 3: CROSS-TAB PRODUCTION SCRAP MATRIX COMPONENT */}
+      {subView === 'summary' && (
+        <div className="summary-matrix-wrapper">
+          <h3>Day & Shift Wise Cross-Tab Scrap Summary ({department})</h3>
+          {dateList.length === 0 ? (
+            <p className="placeholder">No historical parameters found to generate analytical dimensions.</p>
+          ) : (
+            <div className="table-container matrix-scroll">
+              <table className="matrix-table">
+                <thead>
+                  <tr>
+                    <th rowSpan="2" className="sticky-col head-col">Bearing Family / Type</th>
+                    {dateList.map(d => (
+                      <th key={d} colSpan="3" className="date-header-cell">{d}</th>
+                    ))}
+                    <th rowSpan="2" className="total-header-cell">Total</th>
+                  </tr>
+                  <tr>
+                    {dateList.flatMap(d => shifts.map(s => (
+                      <th key={`${d}-${s}`} className="shift-sub-cell">{s === 'Shift 1' ? 'S-I' : s === 'Shift 2' ? 'S-II' : 'S-III'}</th>
+                    )))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {Object.keys(matrixData).sort().map(bearingType => {
+                    let rowSum = 0;
+                    return (
+                      <tr key={bearingType}>
+                        <td className="sticky-col font-bold type-cell">{bearingType}</td>
+                        {dateList.flatMap(d => shifts.map(s => {
+                          const val = matrixData[bearingType]?.[d]?.[s] || 0;
+                          rowSum += val;
+                          
+                          const colKey = `${d}-${s}`;
+                          columnTotals[colKey] = (columnTotals[colKey] || 0) + val;
+                          
+                          return (
+                            <td key={`${bearingType}-${colKey}`} className={val > 0 ? 'cell-has-value' : 'cell-empty'}>
+                              {val > 0 ? val : '-'}
+                            </td>
+                          );
+                        }))}
+                        <td className="row-total-cell font-bold">{rowSum}</td>
                       </tr>
-                    )}
-                  </React.Fragment>
-                ))}
-              </tbody>
-            </table>
+                    );
+                  })}
+                  
+                  {/* BOTTOM ROW TOTALS AND THE GRAND TOTAL MATRIX CORNER */}
+                  <tr className="grand-total-row">
+                    <td className="sticky-col font-bold">Total</td>
+                    {dateList.flatMap(d => shifts.map(s => {
+                      const colKey = `${d}-${s}`;
+                      const colTotal = columnTotals[colKey] || 0;
+                      grandTotal += colTotal;
+                      return <td key={`total-${colKey}`} className="font-bold">{colTotal > 0 ? colTotal : '-'}</td>;
+                    }))}
+                    <td className="grand-total-corner font-bold">{grandTotal}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       )}

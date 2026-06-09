@@ -1,21 +1,26 @@
 # afterchannel_backend.py
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2
-from psycopg2.extras import RealDictCursor
 import os
 import pandas as pd
+import requests
+import io
+import threading
+import time
+import re
 
 router = APIRouter()
-
-# --- Configuration & Environment Variables ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
 TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
 
-# Global Cache Registry for Dynamic Dropdown Profiles
-master_data_cache = {}
+# --- Global Caches & State ---
+MASTER_DATA_CACHE = {}
+IS_UPDATING = False
+INITIALIZED = False
+CACHE_DURATION_MINUTES = 10
 
 # --- Pydantic Models ---
 class AccurateEntry(BaseModel):
@@ -84,70 +89,121 @@ class VibrationEntry(BaseModel):
     remark: Optional[str] = None
     lineSegment: str
 
-# --- Helper Function for DB Connections ---
+# --- Database Helper ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# --- Automated Master Sheet Cache Sync ---
-def load_master_data():
-    global master_data_cache
-    if not DGBB_MASTER_URL or not TRB_MASTER_URL:
-        print("⚠️ Environment Variables DGBB_MASTER_URL or TRB_MASTER_URL are missing!")
-        return
+# --- Excel Loading Helpers (Adapted from TBE) ---
+def find_column(df, patterns):
+    cols = [str(c).strip() for c in df.columns]
+    for p in patterns:
+        norm_p = p.lower().replace(" ", "").replace("_", "").replace("#", "")
+        for c in cols:
+            norm_c = c.lower().replace(" ", "").replace("_", "").replace("#", "")
+            if norm_c == norm_p: return c
+    return None
+
+def load_excel_sheets(url):
+    if not url: return {}
+    try:
+        resp = requests.get(url, timeout=45)
+        if resp.status_code != 200: return {}
+        content = io.BytesIO(resp.content)
+        try:
+            xls = pd.ExcelFile(content, engine='calamine')
+        except ImportError:
+            xls = pd.ExcelFile(content)
+        time.sleep(0.05)
+        # Parse all sheets
+        return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
+    except Exception as e:
+        print(f"⚠️ Error reading workbook stream for Afterchannel: {e}")
+        return {}
+
+def process_mo_sheets(sheets_dict, temp_cache):
+    for sheet_name, df in sheets_dict.items():
+        time.sleep(0.01) # Yield CPU
+        if df.empty: continue
+        
+        # Find necessary columns regardless of exact naming
+        mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
+        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
+        qty_col = find_column(df, ["qty", "quantity", "prodqty", "production", "total"])
+
+        if not mo_col or not type_col: continue
+
+        target_cols = [c for c in [mo_col, type_col, qty_col] if c]
+        df_records = df[target_cols].to_dict('records')
+
+        for row in df_records:
+            mo_val = str(row.get(mo_col, "")).strip().upper()
+            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
+            
+            type_val = str(row.get(type_col, "")).strip()
+            if not type_val or type_val.upper() in ["NAN", "NONE", ""]: continue
+
+            raw_qty = row.get(qty_col, 0) if qty_col else 0
+            try:
+                qty_val = int(float(str(raw_qty).replace(',', '')))
+            except (ValueError, TypeError):
+                qty_val = 0
+
+            if mo_val not in temp_cache:
+                temp_cache[mo_val] = []
+            
+            # Avoid duplicate variants for the same MO
+            if not any(item['type'] == type_val for item in temp_cache[mo_val]):
+                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
+
+# --- Background Task ---
+def process_master_data():
+    global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED
+    if IS_UPDATING: return
+    IS_UPDATING = True
 
     try:
-        print("🔄 Pulling live data directly from configured Google Sheet Environment URLs...")
-        df_dgbb = pd.read_csv(DGBB_MASTER_URL)
-        df_trb = pd.read_csv(TRB_MASTER_URL)
-        
-        # Merge both TRB and DGBB master entries
-        df_combined = pd.concat([df_dgbb, df_trb], ignore_index=True)
-        
-        # Clean and standardize column names to find match profiles
-        df_combined.columns = [str(col).strip().upper() for col in df_combined.columns]
-        
         temp_cache = {}
-        for _, row in df_combined.iterrows():
-            mo = str(row.get('MO', '')).strip().upper()
-            if not mo or mo == 'NAN' or mo == '': 
-                continue
-            
-            v_type = str(row.get('TYPE', '')).strip()
-            v_qty = row.get('QTY', row.get('QUANTITY', 0))
-            
-            try:
-                v_qty = int(float(v_qty))
-            except (ValueError, TypeError):
-                v_qty = 0
-                
-            if mo not in temp_cache:
-                temp_cache[mo] = []
-                
-            # Prevent duplicate rows from inflating recommendation options
-            if not any(item['type'] == v_type for item in temp_cache[mo]):
-                temp_cache[mo].append({"type": v_type, "qty": v_qty})
-                
-        master_data_cache = temp_cache
-        print(f"✅ Successfully loaded {len(master_data_cache)} unique MO variant profiles.")
-    except Exception as e:
-        print(f"❌ Failed to parse Master Sheets: {str(e)}")
+        print("🔄 Afterchannel: Fetching Excel streams...")
+        
+        dgbb_sheets = load_excel_sheets(DGBB_MASTER_URL)
+        trb_sheets = load_excel_sheets(TRB_MASTER_URL)
 
-# Initialize data cache immediately upon server module initialization
-load_master_data()
+        process_mo_sheets(dgbb_sheets, temp_cache)
+        process_mo_sheets(trb_sheets, temp_cache)
+
+        MASTER_DATA_CACHE = temp_cache
+        print(f"✅ Afterchannel: Successfully mapped {len(MASTER_DATA_CACHE)} unique MOs.")
+    except Exception as e:
+        print(f"❌ Afterchannel Cache Compilation Fault: {str(e)}")
+    finally:
+        INITIALIZED = True
+        IS_UPDATING = False
+
+def background_refresh_loop():
+    while True:
+        try:
+            process_master_data()
+        except Exception as e:
+            print(f"Afterchannel Background thread error: {e}")
+        time.sleep(CACHE_DURATION_MINUTES * 60)
+
+# Start the background thread immediately
+threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 # --- API Endpoints ---
 
 @router.get("/api/mo-lookup")
-def mo_lookup(refresh: Optional[str] = None):
-    """
-    Exposes parsed variant datasets to the frontend.
-    Pass query parameter ?refresh=true to force re-fetch the live Google Sheets.
-    """
+def mo_lookup(refresh: Optional[str] = Query(None)):
     if refresh == "true":
-        load_master_data()
+        # Run synchronous update if forced
+        process_master_data()
+    
+    if not INITIALIZED:
+        return {"status": "initializing", "message": "Compiling data matrices...", "data": {}}
+
     return {
         "status": "success",
-        "data": master_data_cache
+        "data": MASTER_DATA_CACHE
     }
 
 @router.post("/api/afterchannel/accurate")

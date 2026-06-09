@@ -10,6 +10,7 @@ import requests
 import io
 import threading
 import time
+import re
 
 router = APIRouter()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -116,16 +117,16 @@ def load_excel_sheets(url):
         time.sleep(0.05)
         return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
     except Exception as e:
-        print(f"⚠️ Error reading workbook stream: {e}")
+        print(f"⚠️ Error reading workbook stream for Afterchannel: {e}")
         return {}
 
 def process_mo_sheets(sheets_dict, temp_cache):
     for sheet_name, df in sheets_dict.items():
-        time.sleep(0.01)
+        time.sleep(0.01) 
         if df.empty: continue
         
         mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
-        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family"])
+        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
         qty_col = find_column(df, ["qty", "quantity", "prodqty", "production", "total"])
 
         if not mo_col or not type_col: continue
@@ -135,24 +136,30 @@ def process_mo_sheets(sheets_dict, temp_cache):
 
         for row in df_records:
             mo_val = str(row.get(mo_col, "")).strip().upper()
-            type_val = str(row.get(type_col, "")).strip().upper()
-            
             if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
+            
+            type_val = str(row.get(type_col, "")).strip().upper()
             if not type_val or type_val in ["NAN", "NONE", ""]: continue
 
             raw_qty = row.get(qty_col, 0) if qty_col else 0
             try:
                 qty_val = int(float(str(raw_qty).replace(',', '')))
-            except:
+            except (ValueError, TypeError):
                 qty_val = 0
 
             if mo_val not in temp_cache:
-                temp_cache[mo_val] = {}
+                temp_cache[mo_val] = []
             
-            if type_val not in temp_cache[mo_val]:
-                temp_cache[mo_val][type_val] = 0
-                
-            temp_cache[mo_val][type_val] += qty_val
+            # FIXED: Add production entries together for the same variant under that MO
+            variant_exists = False
+            for item in temp_cache[mo_val]:
+                if item['type'] == type_val:
+                    item['qty'] += qty_val
+                    variant_exists = True
+                    break
+            
+            if not variant_exists:
+                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
 
 # --- Background Task ---
 def process_master_data():
@@ -162,6 +169,8 @@ def process_master_data():
 
     try:
         temp_cache = {}
+        print("🔄 Afterchannel: Fetching Excel streams...")
+        
         dgbb_sheets = load_excel_sheets(DGBB_MASTER_URL)
         trb_sheets = load_excel_sheets(TRB_MASTER_URL)
 
@@ -190,13 +199,15 @@ threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 @router.get("/api/mo-lookup")
 def mo_lookup(refresh: Optional[str] = Query(None)):
-    if refresh == "true": process_master_data()
+    if refresh == "true":
+        process_master_data()
     if not INITIALIZED:
         return {"status": "initializing", "message": "Compiling data matrices...", "data": {}}
     return {"status": "success", "data": MASTER_DATA_CACHE}
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():
+    """Fetches and rolls up entries for variant tracking across all 4 departments."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
@@ -237,7 +248,7 @@ def submit_accurate(entry: AccurateEntry):
             VALUES (%s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
         """, (entry.mo, entry.type, entry.inDate, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
         conn.commit()
-        return {"status": "success"}
+        return {"status": "success", "message": "Accurate entry logged"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -255,7 +266,7 @@ def submit_cps(entry: CpsEntry):
             VALUES (%s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
         """, (entry.mo, entry.type, entry.item, entry.inDate, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
         conn.commit()
-        return {"status": "success"}
+        return {"status": "success", "message": "CPS entry logged"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -273,7 +284,7 @@ def submit_rework(entry: ReworkEntry):
             VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
         """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
-        return {"status": "success"}
+        return {"status": "success", "message": "Rework entry logged"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -291,7 +302,7 @@ def submit_vibration(entry: VibrationEntry):
             VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
         """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
-        return {"status": "success"}
+        return {"status": "success", "message": "Vibration entry logged"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))

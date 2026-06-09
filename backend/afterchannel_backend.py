@@ -5,9 +5,17 @@ from typing import Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import pandas as pd
 
 router = APIRouter()
+
+# --- Configuration & Environment Variables ---
 DATABASE_URL = os.getenv("DATABASE_URL")
+DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
+TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
+
+# Global Cache Registry for Dynamic Dropdown Profiles
+master_data_cache = {}
 
 # --- Pydantic Models ---
 class AccurateEntry(BaseModel):
@@ -80,7 +88,68 @@ class VibrationEntry(BaseModel):
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
+# --- Automated Master Sheet Cache Sync ---
+def load_master_data():
+    global master_data_cache
+    if not DGBB_MASTER_URL or not TRB_MASTER_URL:
+        print("⚠️ Environment Variables DGBB_MASTER_URL or TRB_MASTER_URL are missing!")
+        return
+
+    try:
+        print("🔄 Pulling live data directly from configured Google Sheet Environment URLs...")
+        df_dgbb = pd.read_csv(DGBB_MASTER_URL)
+        df_trb = pd.read_csv(TRB_MASTER_URL)
+        
+        # Merge both TRB and DGBB master entries
+        df_combined = pd.concat([df_dgbb, df_trb], ignore_index=True)
+        
+        # Clean and standardize column names to find match profiles
+        df_combined.columns = [str(col).strip().upper() for col in df_combined.columns]
+        
+        temp_cache = {}
+        for _, row in df_combined.iterrows():
+            mo = str(row.get('MO', '')).strip().upper()
+            if not mo or mo == 'NAN' or mo == '': 
+                continue
+            
+            v_type = str(row.get('TYPE', '')).strip()
+            v_qty = row.get('QTY', row.get('QUANTITY', 0))
+            
+            try:
+                v_qty = int(float(v_qty))
+            except (ValueError, TypeError):
+                v_qty = 0
+                
+            if mo not in temp_cache:
+                temp_cache[mo] = []
+                
+            # Prevent duplicate rows from inflating recommendation options
+            if not any(item['type'] == v_type for item in temp_cache[mo]):
+                temp_cache[mo].append({"type": v_type, "qty": v_qty})
+                
+        master_data_cache = temp_cache
+        print(f"✅ Successfully loaded {len(master_data_cache)} unique MO variant profiles.")
+    except Exception as e:
+        print(f"❌ Failed to parse Master Sheets: {str(e)}")
+
+# Initialize data cache immediately upon server module initialization
+load_master_data()
+
 # --- API Endpoints ---
+
+@router.get("/api/mo-lookup")
+def mo_lookup(refresh: Optional[str] = None):
+    """
+    Exposes parsed variant datasets to the frontend.
+    Pass query parameter ?refresh=true to force re-fetch the live Google Sheets.
+    """
+    if refresh == "true":
+        load_master_data()
+    return {
+        "status": "success",
+        "data": master_data_cache
+    }
+
 @router.post("/api/afterchannel/accurate")
 def submit_accurate(entry: AccurateEntry):
     conn = get_db_connection()

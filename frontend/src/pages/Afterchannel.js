@@ -45,7 +45,6 @@ const Afterchannel = () => {
     }
   };
 
-  // UPDATED: Extracts unique variants and sums all production rows
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
@@ -58,7 +57,7 @@ const Afterchannel = () => {
         const vType = uniqueVariants[0];
         setSelectedVariant(vType);
         
-        // Sum up all production quantities for this variant across all shifts/dates
+        // Sum up all production quantities for this variant
         const totalQty = rawRows
           .filter(r => r.type === vType)
           .reduce((sum, r) => sum + (Number(r.production) || Number(r.Production) || Number(r.qty) || 0), 0);
@@ -75,7 +74,6 @@ const Afterchannel = () => {
     }
   };
 
-  // UPDATED: Sums all production rows when variant is manually selected
   const handleVariantChange = (e) => {
     const variantName = e.target.value;
     setSelectedVariant(variantName);
@@ -83,7 +81,6 @@ const Afterchannel = () => {
     
     if (moCache[key]) {
       const rawRows = moCache[key];
-      // Keep adding quantities for the matched variant
       const totalQty = rawRows
         .filter(r => r.type === variantName)
         .reduce((sum, r) => sum + (Number(r.production) || Number(r.Production) || Number(r.qty) || 0), 0);
@@ -193,7 +190,8 @@ const Afterchannel = () => {
     });
   };
 
-  const MoVariantHeader = () => (
+  // FIXED: Changed from a separate Component to a standard render function to prevent input focus loss
+  const renderMoVariantHeader = () => (
     <div className="mo-variant-header" style={{display: 'flex', gap: '20px', marginBottom: '20px', background: '#f8fafc', padding: '15px', borderRadius: '8px', border: '1px solid #e2e8f0'}}>
       <div className="form-group" style={{flex: 1}}>
         <label style={{display: 'block', fontWeight: '600', marginBottom: '5px', color: '#334155'}}>MO Number</label>
@@ -217,7 +215,6 @@ const Afterchannel = () => {
     </div>
   );
 
-  // UPDATED: Summary Modal now dynamically loops unique variants and sums correctly
   const openSummaryModal = (mo) => {
     if (!moCache[mo]) return;
     
@@ -225,7 +222,6 @@ const Afterchannel = () => {
     const uniqueVariants = [...new Set(rawRows.map(r => r.type))];
     
     const variantBreakdown = uniqueVariants.map(baseVariant => {
-      // Correctly sum all production rows for this specific variant
       const prodQty = rawRows
         .filter(r => r.type === baseVariant)
         .reduce((sum, r) => sum + (Number(r.production) || Number(r.Production) || Number(r.qty) || 0), 0);
@@ -275,6 +271,20 @@ const Afterchannel = () => {
 
   return (
     <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
+      
+      {/* FIXED: Datalist added so you get auto-complete dropdowns for common station names */}
+      <datalist id="station-names">
+        <option value="Accurate" />
+        <option value="CPS" />
+        <option value="Rework" />
+        <option value="Vibration" />
+        <option value="Dismantling" />
+        <option value="Packaging" />
+        <option value="Store" />
+        <option value="Grinding" />
+        <option value="Assembly" />
+      </datalist>
+
       <div className="ac-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #cbd5e1', paddingBottom: '10px'}}>
         <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing Node Matrix</h1>
         <div className="tab-buttons" style={{display: 'flex', gap: '10px'}}>
@@ -293,20 +303,20 @@ const Afterchannel = () => {
         {/* ================= ACCURATE OPERATING GRID ================= */}
         {activeTab === 'accurate' && (
           <form className="professional-form" onSubmit={handleAccurateSubmit}>
-            <MoVariantHeader />
+            {renderMoVariantHeader()}
             <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
               <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Input Log Details</legend>
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
                   <div><label>In Date</label><input type="date" name="inDate" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
                   <div><label>PC No.</label><input type="text" name="pc" required style={{width:'100%', padding:'6px'}}/></div>
-                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input list="station-names" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
                 </div>
               </fieldset>
               <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Dispatch Target Details</legend>
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
-                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Next Station</label><input list="station-names" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
@@ -320,7 +330,7 @@ const Afterchannel = () => {
         {/* ================= CPS OPERATING GRID ================= */}
         {activeTab === 'cps' && (
           <form className="professional-form" onSubmit={handleCpsSubmit}>
-            <MoVariantHeader />
+            {renderMoVariantHeader()}
             <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
               <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Receiving Metrics</legend>
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
@@ -328,14 +338,14 @@ const Afterchannel = () => {
                   <div><label>In Date</label><input type="date" name="inDate" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
                   <div><label>RC No.</label><input type="text" name="rcNo" required style={{width:'100%', padding:'6px'}}/></div>
-                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input list="station-names" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Channel</label><input type="text" name="channel" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
                 </div>
               </fieldset>
               <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Output Routing</legend>
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
-                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Next Station</label><input list="station-names" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
@@ -349,7 +359,7 @@ const Afterchannel = () => {
         {/* ================= REWORK OPERATING GRID ================= */}
         {activeTab === 'rework' && (
           <form className="professional-form" onSubmit={handleReworkSubmit}>
-            <MoVariantHeader />
+            {renderMoVariantHeader()}
             <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
               <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Rework Entry Log</legend>
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
@@ -357,14 +367,14 @@ const Afterchannel = () => {
                   <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
                   <div><label>Channel</label><input type="text" name="channel" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Line Segment</label><input type="text" name="lineSegment" required style={{width:'100%', padding:'6px'}}/></div>
-                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input list="station-names" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Rework Activity</label><input type="text" name="reworkActivity" required style={{width:'100%', padding:'6px'}}/></div>
                 </div>
               </fieldset>
               <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Rework Resolution Output</legend>
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
-                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Next Station</label><input list="station-names" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
@@ -380,7 +390,7 @@ const Afterchannel = () => {
         {/* ================= VIBRATION/DISMANTLING OPERATING GRID ================= */}
         {activeTab === 'vibration' && (
           <form className="professional-form" onSubmit={handleVibrationSubmit}>
-            <MoVariantHeader />
+            {renderMoVariantHeader()}
             <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
               <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Breakdown Metrics</legend>
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
@@ -389,7 +399,7 @@ const Afterchannel = () => {
                   <div><label>Channel</label><input type="text" name="channel" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Line Segment</label><input type="text" name="lineSegment" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Reason</label><input type="text" name="reason" required style={{width:'100%', padding:'6px'}}/></div>
-                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input list="station-names" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Activity</label><input type="text" name="activity" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Ring Type</label><input type="text" name="ringType" required style={{width:'100%', padding:'6px'}}/></div>
@@ -399,7 +409,7 @@ const Afterchannel = () => {
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
                   <div><label>Ball Scrap</label><input type="number" name="ballScrap" defaultValue={0} style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Cage/Seal Scrap</label><input type="number" name="cageSealScrap" defaultValue={0} style={{width:'100%', padding:'6px'}}/></div>
-                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Next Station</label><input list="station-names" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
                   <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
@@ -429,20 +439,18 @@ const Afterchannel = () => {
                 </tr>
               </thead>
               <tbody>
-                {filteredMos.map(mo => {
-                  const uniqueVariantCount = moCache[mo] ? [...new Set(moCache[mo].map(v => v.type))].length : 0;
-                  return (
-                    <tr key={mo} style={{borderBottom: '1px solid #e2e8f0'}} className="summary-row-hover">
-                      <td style={{padding: '14px 12px', fontWeight: '700', color: '#1e40af'}}>{mo}</td>
-                      <td style={{padding: '14px 12px', color: '#64748b'}}>{uniqueVariantCount} Unique Variants Compiled</td>
-                      <td style={{padding: '14px 12px', textAlign: 'right'}}>
-                        <button onClick={() => openSummaryModal(mo)} style={{padding: '7px 14px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '0.9em'}}>
-                          View Detailed Pipeline {"\u2192"}
-                        </button>
-                      </td>
-                    </tr>
-                  )
-                })}
+                {/* FIXED: Restored your original safe mapping logic so it doesn't crash on invalid arrays */}
+                {filteredMos.map(mo => (
+                  <tr key={mo} style={{borderBottom: '1px solid #e2e8f0'}} className="summary-row-hover">
+                    <td style={{padding: '14px 12px', fontWeight: '700', color: '#1e40af'}}>{mo}</td>
+                    <td style={{padding: '14px 12px', color: '#64748b'}}>{moCache[mo] ? moCache[mo].length : 0} Variant Matrices Compiled</td>
+                    <td style={{padding: '14px 12px', textAlign: 'right'}}>
+                      <button onClick={() => openSummaryModal(mo)} style={{padding: '7px 14px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '0.9em'}}>
+                        View Detailed Pipeline {"\u2192"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
                 {filteredMos.length === 0 && (
                   <tr>
                     <td colSpan="3" style={{padding: '30px', textAlign: 'center', color: '#94a3b8', fontWeight: '500'}}>No master production orders located matching query parameter.</td>

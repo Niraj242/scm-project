@@ -45,14 +45,25 @@ const Afterchannel = () => {
     }
   };
 
+  // UPDATED: Extracts unique variants and sums all production rows
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
-      const variantsList = moCache[key];
-      setAvailableVariants(variantsList);
-      if (variantsList.length === 1) {
-        setSelectedVariant(variantsList[0].type);
-        setActualProductionQty(variantsList[0].qty);
+      const rawRows = moCache[key];
+      // Isolate unique variant types
+      const uniqueVariants = [...new Set(rawRows.map(r => r.type))];
+      setAvailableVariants(uniqueVariants.map(type => ({ type })));
+
+      if (uniqueVariants.length === 1) {
+        const vType = uniqueVariants[0];
+        setSelectedVariant(vType);
+        
+        // Sum up all production quantities for this variant across all shifts/dates
+        const totalQty = rawRows
+          .filter(r => r.type === vType)
+          .reduce((sum, r) => sum + (Number(r.production) || Number(r.Production) || Number(r.qty) || 0), 0);
+          
+        setActualProductionQty(totalQty);
       } else {
         setSelectedVariant('');
         setActualProductionQty(0);
@@ -64,13 +75,20 @@ const Afterchannel = () => {
     }
   };
 
+  // UPDATED: Sums all production rows when variant is manually selected
   const handleVariantChange = (e) => {
     const variantName = e.target.value;
     setSelectedVariant(variantName);
     const key = moNumber.trim().toUpperCase();
+    
     if (moCache[key]) {
-      const match = moCache[key].find(v => v.type === variantName);
-      setActualProductionQty(match ? match.qty : 0);
+      const rawRows = moCache[key];
+      // Keep adding quantities for the matched variant
+      const totalQty = rawRows
+        .filter(r => r.type === variantName)
+        .reduce((sum, r) => sum + (Number(r.production) || Number(r.Production) || Number(r.qty) || 0), 0);
+        
+      setActualProductionQty(totalQty);
     }
   };
 
@@ -199,12 +217,18 @@ const Afterchannel = () => {
     </div>
   );
 
+  // UPDATED: Summary Modal now dynamically loops unique variants and sums correctly
   const openSummaryModal = (mo) => {
     if (!moCache[mo]) return;
     
-    const variantBreakdown = moCache[mo].map(vItem => {
-      const baseVariant = vItem.type;
-      const prodQty = vItem.qty;
+    const rawRows = moCache[mo];
+    const uniqueVariants = [...new Set(rawRows.map(r => r.type))];
+    
+    const variantBreakdown = uniqueVariants.map(baseVariant => {
+      // Correctly sum all production rows for this specific variant
+      const prodQty = rawRows
+        .filter(r => r.type === baseVariant)
+        .reduce((sum, r) => sum + (Number(r.production) || Number(r.Production) || Number(r.qty) || 0), 0);
 
       const prefixMatch = baseVariant.match(/^\d+/);
       const family = prefixMatch ? prefixMatch[0] : baseVariant;
@@ -405,17 +429,20 @@ const Afterchannel = () => {
                 </tr>
               </thead>
               <tbody>
-                {filteredMos.map(mo => (
-                  <tr key={mo} style={{borderBottom: '1px solid #e2e8f0'}} className="summary-row-hover">
-                    <td style={{padding: '14px 12px', fontWeight: '700', color: '#1e40af'}}>{mo}</td>
-                    <td style={{padding: '14px 12px', color: '#64748b'}}>{moCache[mo] ? moCache[mo].length : 0} Variant Matrices Compiled</td>
-                    <td style={{padding: '14px 12px', textAlign: 'right'}}>
-                      <button onClick={() => openSummaryModal(mo)} style={{padding: '7px 14px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '0.9em'}}>
-                        View Detailed Pipeline {"\u2192"}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {filteredMos.map(mo => {
+                  const uniqueVariantCount = moCache[mo] ? [...new Set(moCache[mo].map(v => v.type))].length : 0;
+                  return (
+                    <tr key={mo} style={{borderBottom: '1px solid #e2e8f0'}} className="summary-row-hover">
+                      <td style={{padding: '14px 12px', fontWeight: '700', color: '#1e40af'}}>{mo}</td>
+                      <td style={{padding: '14px 12px', color: '#64748b'}}>{uniqueVariantCount} Unique Variants Compiled</td>
+                      <td style={{padding: '14px 12px', textAlign: 'right'}}>
+                        <button onClick={() => openSummaryModal(mo)} style={{padding: '7px 14px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '0.9em'}}>
+                          View Detailed Pipeline {"\u2192"}
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
                 {filteredMos.length === 0 && (
                   <tr>
                     <td colSpan="3" style={{padding: '30px', textAlign: 'center', color: '#94a3b8', fontWeight: '500'}}>No master production orders located matching query parameter.</td>
@@ -471,23 +498,18 @@ const Afterchannel = () => {
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', fontWeight: '700', color: '#334155'}}>{row.variant}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', fontWeight: '700', color: '#16a34a', background: '#f0fdf4', textAlign: 'center'}}>{row.prodQty ? row.prodQty.toLocaleString() : 0}</td>
                       
-                      {/* Channel IR Ledger Accumulation */}
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.irIn > 0 ? row.irIn.toLocaleString() : '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.irOut > 0 ? row.irOut.toLocaleString() : '-'}</td>
                       
-                      {/* Channel OR Ledger Accumulation */}
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.orIn > 0 ? row.orIn.toLocaleString() : '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.orOut > 0 ? row.orOut.toLocaleString() : '-'}</td>
                       
-                      {/* CPS Ledger Accumulation */}
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.cpsIn > 0 ? row.cpsIn.toLocaleString() : '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.cpsOut > 0 ? row.cpsOut.toLocaleString() : '-'}</td>
                       
-                      {/* Rework Ledger Accumulation */}
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.rwIn > 0 ? row.rwIn.toLocaleString() : '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.rwOut > 0 ? row.rwOut.toLocaleString() : '-'}</td>
                       
-                      {/* Dismantling Family-Matched Accumulation */}
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#fff5f5'}}>{row.disIn > 0 ? row.disIn.toLocaleString() : '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', color: '#dc2626', fontWeight: '700', background: '#fee2e2'}}>{row.scrapSum > 0 ? row.scrapSum.toLocaleString() : '-'}</td>
                     </tr>

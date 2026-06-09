@@ -79,6 +79,14 @@ export default function MainDashboard() {
       path: "/scrap",
       icon: "S",
     },
+
+        {
+      title: "Afetr Channel Entries",
+      desc: "Dismantling, Rework, Accurate & CPS Entry",
+      path: "/afterchannel",
+      icon: "AC",
+    },
+
   ];
 
   return (

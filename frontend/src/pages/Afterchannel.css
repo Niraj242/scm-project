@@ -1,0 +1,147 @@
+/* Afterchannel.css */
+
+/* Core Layout */
+.scrap-module {
+  font-family: 'Inter', 'Segoe UI', sans-serif;
+  padding: 20px;
+  background-color: #f8fafc;
+  min-height: 100vh;
+}
+
+/* Module Header */
+.module-header {
+  background: white;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  margin-bottom: 20px;
+}
+
+.module-header h2 {
+  margin-top: 0;
+  margin-bottom: 8px;
+  color: #1e293b;
+  font-size: 24px;
+}
+
+/* Navigation Tabs */
+.sub-view-tabs {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #e2e8f0;
+  padding-bottom: 12px;
+}
+
+.tab-btn {
+  padding: 10px 20px;
+  background-color: #e2e8f0;
+  color: #475569;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.tab-btn:hover {
+  background-color: #cbd5e1;
+  color: #1e293b;
+}
+
+.active-tab {
+  background-color: #2563eb;
+  color: white;
+}
+
+.active-tab:hover {
+  background-color: #1d4ed8;
+  color: white;
+}
+
+/* Form Container */
+.table-wrapper {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  overflow: hidden;
+}
+
+.table-wrapper h3 {
+  color: #1e293b;
+  font-size: 18px;
+  margin-top: 0;
+}
+
+/* Form Controls Layout */
+.controls-row {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.control-group {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 150px;
+}
+
+.control-group label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  margin-bottom: 6px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.control-group input, 
+.control-group select {
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 14px;
+  background-color: white;
+  color: #334155;
+  transition: all 0.2s;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.control-group input:focus, 
+.control-group select:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.control-group input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Submission Actions */
+.action-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.submit-btn {
+  background-color: #2563eb;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);
+}
+
+.submit-btn:hover {
+  background-color: #1d4ed8;
+  box-shadow: 0 4px 6px rgba(37, 99, 235, 0.3);
+}

@@ -1,3 +1,4 @@
+# afterchannel_backend.py
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
@@ -145,7 +146,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
             except:
                 qty_val = 0
 
-            # Group by MO, then by Variant, and sum the quantities
             if mo_val not in temp_cache:
                 temp_cache[mo_val] = {}
             
@@ -197,20 +197,19 @@ def mo_lookup(refresh: Optional[str] = Query(None)):
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():
-    """Fetches all ledger entries so the frontend can build the variant-wise breakdown modal."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cursor.execute("SELECT mo, bearing_type as type, qty_in, qty_sent FROM accurate_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM accurate_ledger")
         accurate = cursor.fetchall()
         
-        cursor.execute("SELECT mo, bearing_type as type, qty_in, qty_sent FROM cps_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM cps_ledger")
         cps = cursor.fetchall()
         
-        cursor.execute("SELECT mo, bearing_type as type, qty_in, qty_sent FROM rework_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM rework_ledger")
         rework = cursor.fetchall()
         
-        cursor.execute("SELECT mo, bearing_type as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
         dismantling = cursor.fetchall()
 
         return {

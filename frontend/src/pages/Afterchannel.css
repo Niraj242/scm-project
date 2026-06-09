@@ -1,41 +1,39 @@
 /* Afterchannel.css */
 
-/* Core Layout */
 .scrap-module {
-  font-family: 'Inter', 'Segoe UI', sans-serif;
-  padding: 20px;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  padding: 24px;
   background-color: #f8fafc;
   min-height: 100vh;
 }
 
-/* Module Header */
 .module-header {
-  background: white;
-  padding: 20px;
+  background: #ffffff;
+  padding: 20px 24px;
   border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-  margin-bottom: 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+  margin-bottom: 24px;
 }
 
 .module-header h2 {
-  margin-top: 0;
-  margin-bottom: 8px;
-  color: #1e293b;
+  margin: 0 0 6px 0;
+  color: #0f172a;
   font-size: 24px;
+  font-weight: 700;
 }
 
-/* Navigation Tabs */
+/* Tab Navigation System */
 .sub-view-tabs {
   display: flex;
-  gap: 12px;
-  margin-bottom: 20px;
-  border-bottom: 1px solid #e2e8f0;
-  padding-bottom: 12px;
+  gap: 8px;
+  margin-bottom: 24px;
+  border-bottom: 2px solid #e2e8f0;
+  padding-bottom: 8px;
 }
 
 .tab-btn {
-  padding: 10px 20px;
-  background-color: #e2e8f0;
+  padding: 10px 18px;
+  background-color: #f1f5f9;
   color: #475569;
   border: none;
   border-radius: 6px;
@@ -46,52 +44,61 @@
 }
 
 .tab-btn:hover {
-  background-color: #cbd5e1;
-  color: #1e293b;
+  background-color: #e2e8f0;
+  color: #0f172a;
 }
 
 .active-tab {
   background-color: #2563eb;
-  color: white;
+  color: #ffffff;
 }
 
 .active-tab:hover {
   background-color: #1d4ed8;
-  color: white;
+  color: #ffffff;
 }
 
-/* Form Container */
-.table-wrapper {
-  background: white;
+/* Split Forms Layout */
+.forms-grid-split {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.operation-card {
+  background: #ffffff;
+  padding: 24px;
   border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-  overflow: hidden;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.02);
+  border: 1px solid #e2e8f0;
 }
 
-.table-wrapper h3 {
-  color: #1e293b;
-  font-size: 18px;
+.container-inbound {
+  border-top: 4px solid #3b82f6;
+}
+
+.container-outbound {
+  border-top: 4px solid #10b981;
+}
+
+.operation-card h3 {
   margin-top: 0;
+  margin-bottom: 20px;
+  font-size: 16px;
+  color: #1e293b;
+  font-weight: 700;
 }
 
-/* Form Controls Layout */
-.controls-row {
-  display: flex;
-  gap: 20px;
-  flex-wrap: wrap;
-  align-items: flex-start;
-}
-
+/* Control Element Infrastructure */
 .control-group {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-width: 150px;
+  margin-bottom: 14px;
 }
 
 .control-group label {
-  font-size: 12px;
-  font-weight: 600;
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
   color: #64748b;
   margin-bottom: 6px;
   text-transform: uppercase;
@@ -100,48 +107,172 @@
 
 .control-group input, 
 .control-group select {
+  width: 100%;
   padding: 10px 12px;
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   font-size: 14px;
-  background-color: white;
   color: #334155;
-  transition: all 0.2s;
-  width: 100%;
+  background-color: #ffffff;
   box-sizing: border-box;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .control-group input:focus, 
 .control-group select:focus {
   outline: none;
   border-color: #3b82f6;
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
 }
 
-.control-group input[type="number"] {
-  -moz-appearance: textfield;
-}
-
-/* Submission Actions */
-.action-row {
-  display: flex;
-  justify-content: flex-end;
-}
-
+/* Dynamic Actions System Buttons */
 .submit-btn {
-  background-color: #2563eb;
-  color: white;
-  border: none;
-  padding: 12px 24px;
+  width: 100%;
+  padding: 12px;
   font-size: 14px;
   font-weight: 600;
+  border: none;
   border-radius: 6px;
   cursor: pointer;
+  margin-top: 10px;
   transition: background-color 0.2s;
-  box-shadow: 0 2px 4px rgba(37, 99, 235, 0.2);
 }
 
-.submit-btn:hover {
-  background-color: #1d4ed8;
-  box-shadow: 0 4px 6px rgba(37, 99, 235, 0.3);
+.btn-in {
+  background-color: #2563eb;
+  color: #ffffff;
+}
+
+.btn-in:hover { background-color: #1d4ed8; }
+
+.btn-out {
+  background-color: #10b981;
+  color: #ffffff;
+}
+
+.btn-out:hover { background-color: #059669; }
+
+.Trace-btn-override {
+  background-color: #0f172a;
+  color: #ffffff;
+  width: auto;
+  padding: 10px 24px;
+}
+
+.Trace-btn-override:hover { background-color: #1e293b; }
+
+/* Structural Ledger Tables Context */
+.table-wrapper {
+  background: #ffffff;
+  border-radius: 8px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+  overflow: hidden;
+}
+
+.structural-history-space h3 {
+  padding: 18px 24px;
+  margin: 0;
+  font-size: 15px;
+  color: #0f172a;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.table-wrapper table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 13px;
+}
+
+.table-wrapper th {
+  background-color: #f8fafc;
+  color: #475569;
+  font-weight: 600;
+  padding: 12px 24px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.table-wrapper td {
+  padding: 12px 24px;
+  border-bottom: 1px solid #e2e8f0;
+  color: #334155;
+}
+
+.empty-notice {
+  text-align: center;
+  color: #94a3b8;
+  padding: 32px !important;
+  font-style: italic;
+}
+
+/* Badge Layout Formatting Classes */
+.badge-indicator {
+  display: inline-block;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 4px;
+}
+
+.inbound-marker {
+  background-color: #eff6ff;
+  color: #2563eb;
+}
+
+.outbound-marker {
+  background-color: #ecfdf5;
+  color: #10b981;
+}
+
+.text-in-color { color: #2563eb; font-weight: 600; }
+.text-out-color { color: #10b981; font-weight: 600; }
+
+/* Rework & Vibration Specific Headers */
+.header-badge-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.header-badge-row h3 { margin: 0; }
+
+.line-segment-dropdown {
+  padding: 4px 8px;
+  font-weight: 700;
+  font-size: 12px;
+  color: #4f46e5;
+  background-color: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 4px;
+}
+
+/* Traceability Presentation Card Layout */
+.excel-master-tracker-card {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  padding: 20px;
+  border-radius: 6px;
+  margin-bottom: 24px;
+}
+
+.metadata-summary-flex {
+  display: flex;
+  gap: 40px;
+  flex-wrap: wrap;
+}
+
+.metadata-summary-flex p {
+  margin: 0;
+  font-size: 14px;
+  color: #166534;
+}
+
+.highlight-production-text {
+  font-weight: 800;
+  color: #15803d;
+  background-color: #dcfce7;
+  padding: 2px 8px;
+  border-radius: 4px;
 }

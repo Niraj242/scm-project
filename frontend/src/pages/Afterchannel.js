@@ -1,309 +1,506 @@
-# afterchannel_backend.py
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
-from typing import Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
-import os
-import pandas as pd
-import requests
-import io
-import threading
-import time
+import React, { useState, useEffect } from 'react';
+import './Afterchannel.css';
 
-router = APIRouter()
-DATABASE_URL = os.getenv("DATABASE_URL")
-DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
-TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
+const API = 'https://scm-backend-pshv.onrender.com';
 
-# --- Global Caches & State ---
-MASTER_DATA_CACHE = {}
-IS_UPDATING = False
-INITIALIZED = False
-CACHE_DURATION_MINUTES = 10
+const Afterchannel = () => {
+  const [activeTab, setActiveTab] = useState('accurate');
+  const [moCache, setMoCache] = useState({});
+  const [ledgers, setLedgers] = useState({ accurate: [], cps: [], rework: [], dismantling: [] });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedMoDetail, setSelectedMoDetail] = useState(null);
 
-# --- Pydantic Models ---
-class AccurateEntry(BaseModel):
-    mo: str
-    type: str
-    inDate: str
-    shiftIn: str
-    pc: str
-    materialInFrom: str
-    qtyIn: int
-    nextStation: str
-    qtySent: int
-    outDate: Optional[str] = None
-    shiftOut: str
+  // Core Operational Form State Matrix
+  const [moNumber, setMoNumber] = useState('');
+  const [availableVariants, setAvailableVariants] = useState([]);
+  const [selectedVariant, setSelectedVariant] = useState('');
+  const [actualProductionQty, setActualProductionQty] = useState(0);
 
-class CpsEntry(BaseModel):
-    mo: str
-    type: str
-    item: str
-    inDate: str
-    shiftIn: str
-    rcNo: str
-    materialInFrom: str
-    channel: str
-    qtyIn: int
-    nextStation: str
-    qtySent: int
-    outDate: Optional[str] = None
-    shiftOut: str
+  useEffect(() => {
+    fetchMasterData();
+    fetchLedgers();
+  }, []);
 
-class ReworkEntry(BaseModel):
-    mo: str
-    inDate: str
-    shiftIn: str
-    channel: str
-    type: str
-    materialInFrom: str
-    qtyIn: int
-    reworkActivity: str
-    nextStation: str
-    qtySent: int
-    outDate: Optional[str] = None
-    shiftOut: str
-    operator: Optional[str] = None
-    remark: Optional[str] = None
-    lineSegment: str
+  const fetchMasterData = async () => {
+    try {
+      const res = await fetch(`${API}/api/mo-lookup`);
+      const data = await res.json();
+      if (data.status === 'success') {
+        setMoCache(data.data || {});
+      }
+    } catch (err) {
+      console.error("Failed to fetch Master Cache Reference Matrix", err);
+    }
+  };
 
-class VibrationEntry(BaseModel):
-    mo: str
-    inDate: str
-    shiftIn: str
-    channel: str
-    type: str
-    reason: str
-    materialInFrom: str
-    qtyIn: int
-    activity: str
-    ballScrap: Optional[int] = 0
-    cageSealScrap: Optional[int] = 0
-    ringType: str
-    nextStation: str
-    qtySent: int
-    outDate: Optional[str] = None
-    shiftOut: str
-    operator: Optional[str] = None
-    remark: Optional[str] = None
-    lineSegment: str
+  const fetchLedgers = async () => {
+    try {
+      const res = await fetch(`${API}/api/afterchannel/summary_ledgers`);
+      const json = await res.json();
+      if (json.status === 'success') {
+        setLedgers(json.data);
+      }
+    } catch (err) {
+      console.error("Failed to load historical ledger summaries", err);
+    }
+  };
 
-# --- Database Helper ---
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+  const handleMoBlur = () => {
+    const key = moNumber.trim().toUpperCase();
+    if (moCache[key]) {
+      const variantsList = moCache[key];
+      setAvailableVariants(variantsList);
+      if (variantsList.length === 1) {
+        setSelectedVariant(variantsList[0].type);
+        setActualProductionQty(variantsList[0].qty);
+      } else {
+        setSelectedVariant('');
+        setActualProductionQty(0);
+      }
+    } else {
+      setAvailableVariants([]);
+      setSelectedVariant('');
+      setActualProductionQty(0);
+    }
+  };
 
-# --- Excel Loading Helpers ---
-def find_column(df, patterns):
-    cols = [str(c).strip() for c in df.columns]
-    for p in patterns:
-        norm_p = p.lower().replace(" ", "").replace("_", "").replace("#", "")
-        for c in cols:
-            norm_c = c.lower().replace(" ", "").replace("_", "").replace("#", "")
-            if norm_c == norm_p: return c
-    return None
+  const handleVariantChange = (e) => {
+    const variantName = e.target.value;
+    setSelectedVariant(variantName);
+    const key = moNumber.trim().toUpperCase();
+    if (moCache[key]) {
+      const match = moCache[key].find(v => v.type === variantName);
+      setActualProductionQty(match ? match.qty : 0);
+    }
+  };
 
-def load_excel_sheets(url):
-    if not url: return {}
-    try:
-        resp = requests.get(url, timeout=45)
-        if resp.status_code != 200: return {}
-        content = io.BytesIO(resp.content)
-        try:
-            xls = pd.ExcelFile(content, engine='calamine')
-        except ImportError:
-            xls = pd.ExcelFile(content)
-        time.sleep(0.05)
-        return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
-    except Exception as e:
-        print(f"⚠️ Error reading workbook stream for Afterchannel: {e}")
-        return {}
+  const submitForm = async (endpoint, payload) => {
+    try {
+      const response = await fetch(`${API}/api/afterchannel/${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error("Data log target rejected entry matrix");
+      alert("Operational Entry Successfully Logged!");
+      fetchLedgers();
+    } catch (err) {
+      alert("Submission Fault: " + err.message);
+    }
+  };
 
-def process_mo_sheets(sheets_dict, temp_cache):
-    for sheet_name, df in sheets_dict.items():
-        time.sleep(0.01) 
-        if df.empty: continue
-        
-        mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
-        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
-        qty_col = find_column(df, ["qty", "quantity", "prodqty", "production", "total"])
+  const handleAccurateSubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    submitForm('accurate', {
+      mo: moNumber.toUpperCase(),
+      type: selectedVariant.toUpperCase(),
+      inDate: fd.get('inDate'),
+      shiftIn: fd.get('shiftIn'),
+      pc: fd.get('pc'),
+      materialInFrom: fd.get('materialInFrom'),
+      qtyIn: Number(fd.get('qtyIn')),
+      nextStation: fd.get('nextStation'),
+      qtySent: Number(fd.get('qtySent')),
+      outDate: fd.get('outDate'),
+      shiftOut: fd.get('shiftOut')
+    });
+  };
 
-        if not mo_col or not type_col: continue
+  const handleCpsSubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    submitForm('cps', {
+      mo: moNumber.toUpperCase(),
+      type: selectedVariant.toUpperCase(),
+      item: fd.get('item'),
+      inDate: fd.get('inDate'),
+      shiftIn: fd.get('shiftIn'),
+      rcNo: fd.get('rcNo'),
+      materialInFrom: fd.get('materialInFrom'),
+      channel: fd.get('channel'),
+      qtyIn: Number(fd.get('qtyIn')),
+      nextStation: fd.get('nextStation'),
+      qtySent: Number(fd.get('qtySent')),
+      outDate: fd.get('outDate'),
+      shiftOut: fd.get('shiftOut')
+    });
+  };
 
-        target_cols = [c for c in [mo_col, type_col, qty_col] if c]
-        df_records = df[target_cols].to_dict('records')
+  const handleReworkSubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    submitForm('rework', {
+      mo: moNumber.toUpperCase(),
+      inDate: fd.get('inDate'),
+      shiftIn: fd.get('shiftIn'),
+      channel: fd.get('channel'),
+      type: selectedVariant.toUpperCase(),
+      lineSegment: fd.get('lineSegment'),
+      materialInFrom: fd.get('materialInFrom'),
+      qtyIn: Number(fd.get('qtyIn')),
+      reworkActivity: fd.get('reworkActivity'),
+      nextStation: fd.get('nextStation'),
+      qtySent: Number(fd.get('qtySent')),
+      outDate: fd.get('outDate'),
+      shiftOut: fd.get('shiftOut'),
+      operator: fd.get('operator'),
+      remark: fd.get('remark')
+    });
+  };
 
-        for row in df_records:
-            mo_val = str(row.get(mo_col, "")).strip().upper()
-            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
+  const handleVibrationSubmit = (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    submitForm('vibration', {
+      mo: moNumber.toUpperCase(),
+      inDate: fd.get('inDate'),
+      shiftIn: fd.get('shiftIn'),
+      channel: fd.get('channel'),
+      type: selectedVariant.toUpperCase(),
+      lineSegment: fd.get('lineSegment'),
+      reason: fd.get('reason'),
+      materialInFrom: fd.get('materialInFrom'),
+      qtyIn: Number(fd.get('qtyIn')),
+      activity: fd.get('activity'),
+      ballScrap: Number(fd.get('ballScrap')) || 0,
+      cageSealScrap: Number(fd.get('cageSealScrap')) || 0,
+      ringType: fd.get('ringType'),
+      nextStation: fd.get('nextStation'),
+      qtySent: Number(fd.get('qtySent')),
+      outDate: fd.get('outDate'),
+      shiftOut: fd.get('shiftOut'),
+      operator: fd.get('operator'),
+      remark: fd.get('remark')
+    });
+  };
+
+  const MoVariantHeader = () => (
+    <div className="mo-variant-header" style={{display: 'flex', gap: '20px', marginBottom: '20px', background: '#f8fafc', padding: '15px', borderRadius: '8px', border: '1px solid #e2e8f0'}}>
+      <div className="form-group" style={{flex: 1}}>
+        <label style={{display: 'block', fontWeight: '600', marginBottom: '5px', color: '#334155'}}>MO Number</label>
+        <input type="text" value={moNumber} onChange={(e) => setMoNumber(e.target.value)} onBlur={handleMoBlur} style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+      </div>
+      <div className="form-group" style={{flex: 1}}>
+        <label style={{display: 'block', fontWeight: '600', marginBottom: '5px', color: '#334155'}}>Bearing Variant (Type)</label>
+        {availableVariants.length > 0 ? (
+          <select value={selectedVariant} onChange={handleVariantChange} style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required>
+            <option value="">-- Select Variant --</option>
+            {availableVariants.map(v => <option key={v.type} value={v.type}>{v.type}</option>)}
+          </select>
+        ) : (
+          <input type="text" value={selectedVariant} onChange={(e) => setSelectedVariant(e.target.value)} placeholder="Manual Entry Override" style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+        )}
+      </div>
+      <div className="form-group" style={{flex: 1}}>
+        <label style={{display: 'block', fontWeight: '600', marginBottom: '5px', color: '#334155'}}>Actual Production Qty</label>
+        <input type="text" value={actualProductionQty > 0 ? actualProductionQty.toLocaleString() : '-'} readOnly style={{width: '100%', padding: '8px', background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: '4px', fontWeight: 'bold'}} />
+      </div>
+    </div>
+  );
+
+  const openSummaryModal = (mo) => {
+    if (!moCache[mo]) return;
+    
+    const variantBreakdown = moCache[mo].map(vItem => {
+      const baseVariant = vItem.type;
+      const prodQty = vItem.qty;
+
+      const prefixMatch = baseVariant.match(/^\d+/);
+      const family = prefixMatch ? prefixMatch[0] : baseVariant;
+
+      const accurateFilter = ledgers.accurate.filter(l => l.mo === mo && l.type.includes(family));
+      
+      const irRows = accurateFilter.filter(l => l.type.includes('IR') || l.type.includes('IM'));
+      const orRows = accurateFilter.filter(l => l.type.includes('OR') || l.type.includes('OM'));
+
+      const irIn = irRows.reduce((sum, l) => sum + (l.qty_in || 0), 0);
+      const irOut = irRows.reduce((sum, l) => sum + (l.qty_sent || 0), 0);
+      const orIn = orRows.reduce((sum, l) => sum + (l.qty_in || 0), 0);
+      const orOut = orRows.reduce((sum, l) => sum + (l.qty_sent || 0), 0);
+
+      const cpsFilter = ledgers.cps.filter(l => l.mo === mo && l.type === baseVariant);
+      const cpsIn = cpsFilter.reduce((sum, l) => sum + (l.qty_in || 0), 0);
+      const cpsOut = cpsFilter.reduce((sum, l) => sum + (l.qty_sent || 0), 0);
+
+      const rwFilter = ledgers.rework.filter(l => l.mo === mo && l.type === baseVariant);
+      const rwIn = rwFilter.reduce((sum, l) => sum + (l.qty_in || 0), 0);
+      const rwOut = rwFilter.reduce((sum, l) => sum + (l.qty_sent || 0), 0);
+
+      const disFilter = ledgers.dismantling.filter(l => l.mo === mo && (l.type === baseVariant || l.type === family || baseVariant.includes(l.type)));
+      const disIn = disFilter.reduce((sum, l) => sum + (l.qty_in || 0), 0);
+      const scrapSum = disFilter.reduce((sum, l) => sum + (l.ball_scrap || 0) + (l.cage_seal_scrap || 0), 0);
+
+      return {
+        variant: baseVariant,
+        prodQty,
+        irIn, irOut,
+        orIn, orOut,
+        cpsIn, cpsOut,
+        rwIn, rwOut,
+        disIn, scrapSum
+      };
+    });
+
+    setSelectedMoDetail({ mo, breakdown: variantBreakdown });
+  };
+
+  const filteredMos = Object.keys(moCache).filter(mo => 
+    mo.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  return (
+    <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
+      <div className="ac-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #cbd5e1', paddingBottom: '10px'}}>
+        <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing Node Matrix</h1>
+        <div className="tab-buttons" style={{display: 'flex', gap: '10px'}}>
+          {['accurate', 'cps', 'rework', 'vibration'].map(tab => (
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => setActiveTab(tab)} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
+              {tab.toUpperCase()}
+            </button>
+          ))}
+          <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === 'summary' ? '#16a34a' : '#bbf7d0', color: activeTab === 'summary' ? '#fff' : '#14532d', border: 'none', borderRadius: '4px', fontWeight: 'bold'}}>
+            📊 SYSTEM FLOW SUMMARY
+          </button>
+        </div>
+      </div>
+
+      <div className="ac-content">
+        {/* ================= ACCURATE OPERATING GRID ================= */}
+        {activeTab === 'accurate' && (
+          <form className="professional-form" onSubmit={handleAccurateSubmit}>
+            <MoVariantHeader />
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Input Log Details</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>In Date</label><input type="date" name="inDate" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                  <div><label>PC No.</label><input type="text" name="pc" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
+                </div>
+              </fieldset>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Dispatch Target Details</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                </div>
+              </fieldset>
+            </div>
+            <button type="submit" style={{marginTop:'20px', padding:'10px 20px', background:'#2563eb', color:'#fff', border:'none', borderRadius:'4px', cursor:'pointer', fontWeight:'bold'}}>Commit Accurate Record</button>
+          </form>
+        )}
+
+        {/* ================= CPS OPERATING GRID ================= */}
+        {activeTab === 'cps' && (
+          <form className="professional-form" onSubmit={handleCpsSubmit}>
+            <MoVariantHeader />
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Receiving Metrics</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>Item</label><input type="text" name="item" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>In Date</label><input type="date" name="inDate" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                  <div><label>RC No.</label><input type="text" name="rcNo" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Channel</label><input type="text" name="channel" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
+                </div>
+              </fieldset>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Output Routing</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                </div>
+              </fieldset>
+            </div>
+            <button type="submit" style={{marginTop:'20px', padding:'10px 20px', background:'#2563eb', color:'#fff', border:'none', borderRadius:'4px', cursor:'pointer', fontWeight:'bold'}}>Commit CPS Record</button>
+          </form>
+        )}
+
+        {/* ================= REWORK OPERATING GRID ================= */}
+        {activeTab === 'rework' && (
+          <form className="professional-form" onSubmit={handleReworkSubmit}>
+            <MoVariantHeader />
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Rework Entry Log</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>In Date</label><input type="date" name="inDate" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                  <div><label>Channel</label><input type="text" name="channel" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Line Segment</label><input type="text" name="lineSegment" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Rework Activity</label><input type="text" name="reworkActivity" required style={{width:'100%', padding:'6px'}}/></div>
+                </div>
+              </fieldset>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Rework Resolution Output</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                  <div><label>Operator</label><input type="text" name="operator" style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Remark</label><input type="text" name="remark" style={{width:'100%', padding:'6px'}}/></div>
+                </div>
+              </fieldset>
+            </div>
+            <button type="submit" style={{marginTop:'20px', padding:'10px 20px', background:'#2563eb', color:'#fff', border:'none', borderRadius:'4px', cursor:'pointer', fontWeight:'bold'}}>Commit Rework Record</button>
+          </form>
+        )}
+
+        {/* ================= VIBRATION/DISMANTLING OPERATING GRID ================= */}
+        {activeTab === 'vibration' && (
+          <form className="professional-form" onSubmit={handleVibrationSubmit}>
+            <MoVariantHeader />
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Breakdown Metrics</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>In Date</label><input type="date" name="inDate" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                  <div><label>Channel</label><input type="text" name="channel" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Line Segment</label><input type="text" name="lineSegment" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Reason</label><input type="text" name="reason" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Material In From</label><input type="text" name="materialInFrom" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty In</label><input type="number" name="qtyIn" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Activity</label><input type="text" name="activity" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Ring Type</label><input type="text" name="ringType" required style={{width:'100%', padding:'6px'}}/></div>
+                </div>
+              </fieldset>
+              <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', padding: '0 5px'}}>Scrap Logging & Targets</legend>
+                <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px'}}>
+                  <div><label>Ball Scrap</label><input type="number" name="ballScrap" defaultValue={0} style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Cage/Seal Scrap</label><input type="number" name="cageSealScrap" defaultValue={0} style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Next Station</label><input type="text" name="nextStation" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Qty Sent</label><input type="number" name="qtySent" required style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option>I</option><option>II</option><option>III</option></select></div>
+                  <div><label>Operator</label><input type="text" name="operator" style={{width:'100%', padding:'6px'}}/></div>
+                  <div><label>Remark</label><input type="text" name="remark" style={{width:'100%', padding:'6px'}}/></div>
+                </div>
+              </fieldset>
+            </div>
+            <button type="submit" style={{marginTop:'20px', padding:'10px 20px', background:'#2563eb', color:'#fff', border:'none', borderRadius:'4px', cursor:'pointer', fontWeight:'bold'}}>Commit Dismantling Record</button>
+          </form>
+        )}
+
+        {/* ================= SUMMARY TRACKER REFERENCE CATALOG ================= */}
+        {activeTab === 'summary' && (
+          <div className="summary-view" style={{background: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #cbd5e1'}}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px'}}>
+              <h2 style={{fontSize: '1.3em', margin: 0, color: '#1e293b'}}>Active Master Orders (MO) Reference Index</h2>
+              <input type="text" placeholder="Search Master Order (MO)..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{padding: '8px 12px', width: '320px', border: '1px solid #cbd5e1', borderRadius: '6px', fontSize: '0.95em'}} />
+            </div>
             
-            type_val = str(row.get(type_col, "")).strip().upper()
-            if not type_val or type_val in ["NAN", "NONE", ""]: continue
+            <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
+              <thead>
+                <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
+                  <th style={{padding: '12px', fontWeight: '700', color: '#475569'}}>Master Order (MO) ID</th>
+                  <th style={{padding: '12px', fontWeight: '700', color: '#475569'}}>Registered Specifications Count</th>
+                  <th style={{padding: '12px', fontWeight: '700', color: '#475569', textAlign: 'right'}}>Audit Control</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredMos.map(mo => (
+                  <tr key={mo} style={{borderBottom: '1px solid #e2e8f0'}} className="summary-row-hover">
+                    <td style={{padding: '14px 12px', fontWeight: '700', color: '#1e40af'}}>{mo}</td>
+                    <td style={{padding: '14px 12px', color: '#64748b'}}>{moCache[mo] ? moCache[mo].length : 0} Variant Matrices Compiled</td>
+                    <td style={{padding: '14px 12px', textAlign: 'right'}}>
+                      <button onClick={() => openSummaryModal(mo)} style={{padding: '7px 14px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600', fontSize: '0.9em'}}>
+                        View Detailed Pipeline {"\u2192"}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {filteredMos.length === 0 && (
+                  <tr>
+                    <td colSpan="3" style={{padding: '30px', textAlign: 'center', color: '#94a3b8', fontWeight: '500'}}>No master production orders located matching query parameter.</td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
-            raw_qty = row.get(qty_col, 0) if qty_col else 0
-            try:
-                qty_val = int(float(str(raw_qty).replace(',', '')))
-            except (ValueError, TypeError):
-                qty_val = 0
-
-            if mo_val not in temp_cache:
-                temp_cache[mo_val] = []
+      {/* ================= TBE ARCHITECTURE PROFESSIONAL INTERACTIVE GRID MODAL ================= */}
+      {selectedMoDetail && (
+        <div className="modal-backdrop" style={{position: 'fixed', top:0, left:0, width:'100vw', height:'100vh', background:'rgba(15, 23, 42, 0.6)', display:'flex', justifyContent:'center', alignItems:'center', zIndex: 1000, backdropFilter: 'blur(2px)'}}>
+          <div className="modal-window" style={{background:'#fff', padding:'25px', borderRadius:'8px', width:'95%', maxWidth:'1500px', maxHeight:'85vh', overflowY:'auto', boxShadow:'0 20px 25px -5px rgba(0,0,0,0.15)'}}>
             
-            # Sum actual production values for the variant match
-            variant_exists = False
-            for item in temp_cache[mo_val]:
-                if item['type'] == type_val:
-                    item['qty'] += qty_val
-                    variant_exists = True
-                    break
-            
-            if not variant_exists:
-                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'2px solid #cbd5e1', paddingBottom:'15px', marginBottom:'20px'}}>
+              <div>
+                <h2 style={{margin: 0, fontSize: '1.4em', color: '#0f172a'}}>Cross-Department Flow Trace Analysis</h2>
+                <p style={{margin: '4px 0 0 0', color: '#64748b', fontSize: '0.95em'}}>Target Master Order Vector Reference: <strong style={{color:'#1e40af'}}>{selectedMoDetail.mo}</strong></p>
+              </div>
+              <button onClick={() => setSelectedMoDetail(null)} style={{background:'#f1f5f9', border:'none', fontSize:'1.4em', cursor:'pointer', color:'#64748b', width:'36px', height:'36px', borderRadius:'4px', display:'flex', alignItems:'center', justifyContent:'center', fontWeight:'bold'}}>{"\u00D7"}</button>
+            </div>
 
-# --- Background Task ---
-def process_master_data():
-    global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED
-    if IS_UPDATING: return
-    IS_UPDATING = True
+            <div style={{overflowX: 'auto'}}>
+              <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.88em', minWidth: '1200px'}}>
+                <thead>
+                  <tr style={{background: '#f8fafc', borderTop: '1px solid #cbd5e1'}}>
+                    <th rowSpan="2" style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'left', color: '#334155'}}>Variant Model Specification</th>
+                    <th rowSpan="2" style={{border: '1px solid #cbd5e1', padding: '12px', background: '#f0fdf4', color: '#166534', textAlign: 'center'}}>Actual Prod Qty (Master)</th>
+                    <th colSpan="2" style={{border: '1px solid #cbd5e1', padding: '8px', background: '#eff6ff', color: '#1e40af', textAlign: 'center'}}>Channel (Accurate) - IR/IM</th>
+                    <th colSpan="2" style={{border: '1px solid #cbd5e1', padding: '8px', background: '#f0f9ff', color: '#0369a1', textAlign: 'center'}}>Channel (Accurate) - OR/OM</th>
+                    <th colSpan="2" style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fffbeb', color: '#9a3412', textAlign: 'center'}}>Assembly (CPS Center)</th>
+                    <th colSpan="2" style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fdf4ff', color: '#86198f', textAlign: 'center'}}>Rework Segment</th>
+                    <th colSpan="2" style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fef2f2', color: '#991b1b', textAlign: 'center'}}>Dismantling Area</th>
+                  </tr>
+                  <tr style={{background: '#f8fafc'}}>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#eff6ff', color: '#1e40af', textAlign: 'center'}}>Total In</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#eff6ff', color: '#1e40af', textAlign: 'center'}}>Total Out</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#f0f9ff', color: '#0369a1', textAlign: 'center'}}>Total In</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#f0f9ff', color: '#0369a1', textAlign: 'center'}}>Total Out</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fffbeb', color: '#9a3412', textAlign: 'center'}}>Total In</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fffbeb', color: '#9a3412', textAlign: 'center'}}>Total Out</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fdf4ff', color: '#86198f', textAlign: 'center'}}>Total In</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fdf4ff', color: '#86198f', textAlign: 'center'}}>Total Out</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fef2f2', color: '#991b1b', textAlign: 'center'}}>Total In</th>
+                    <th style={{border: '1px solid #cbd5e1', padding: '8px', background: '#fee2e2', color: '#991b1b', textAlign: 'center'}}>Scrap Sum</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedMoDetail.breakdown.map((row, i) => (
+                    <tr key={i} style={{borderBottom: '1px solid #e2e8f0'}} className="summary-modal-row">
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', fontWeight: '700', color: '#334155'}}>{row.variant}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', fontWeight: '700', color: '#16a34a', background: '#f0fdf4', textAlign: 'center'}}>{row.prodQty ? row.prodQty.toLocaleString() : 0}</td>
+                      
+                      {/* Channel IR Ledger Accumulation */}
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.irIn > 0 ? row.irIn.toLocaleString() : '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.irOut > 0 ? row.irOut.toLocaleString() : '-'}</td>
+                      
+                      {/* Channel OR Ledger Accumulation */}
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.orIn > 0 ? row.orIn.toLocaleString() : '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.orOut > 0 ? row.orOut.toLocaleString() : '-'}</td>
+                      
+                      {/* CPS Ledger Accumulation */}
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.cpsIn > 0 ? row.cpsIn.toLocaleString() : '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#f8fafc'}}>{row.cpsOut > 0 ? row.cpsOut.toLocaleString() : '-'}</td>
+                      
+                      {/* Rework Ledger Accumulation */}
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.rwIn > 0 ? row.rwIn.toLocaleString() : '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center'}}>{row.rwOut > 0 ? row.rwOut.toLocaleString() : '-'}</td>
+                      
+                      {/* Dismantling Family-Matched Accumulation */}
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', background: '#fff5f5'}}>{row.disIn > 0 ? row.disIn.toLocaleString() : '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '12px', textAlign: 'center', color: '#dc2626', fontWeight: '700', background: '#fee2e2'}}>{row.scrapSum > 0 ? row.scrapSum.toLocaleString() : '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
-    try:
-        temp_cache = {}
-        print("🔄 Afterchannel: Syncing production master streams...")
-        
-        dgbb_sheets = load_excel_sheets(DGBB_MASTER_URL)
-        trb_sheets = load_excel_sheets(TRB_MASTER_URL)
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
 
-        process_mo_sheets(dgbb_sheets, temp_cache)
-        process_mo_sheets(trb_sheets, temp_cache)
-
-        MASTER_DATA_CACHE = temp_cache
-        print(f"✅ Afterchannel: Compiled {len(MASTER_DATA_CACHE)} unique production keys.")
-    except Exception as e:
-        print(f"❌ Afterchannel Cache Fault: {str(e)}")
-    finally:
-        INITIALIZED = True
-        IS_UPDATING = False
-
-def background_refresh_loop():
-    while True:
-        try:
-            process_master_data()
-        except Exception as e:
-            print(f"Afterchannel background worker error: {e}")
-        time.sleep(CACHE_DURATION_MINUTES * 60)
-
-threading.Thread(target=background_refresh_loop, daemon=True).start()
-
-# --- API Endpoints ---
-
-@router.get("/api/mo-lookup")
-def mo_lookup(refresh: Optional[str] = Query(None)):
-    if refresh == "true":
-        process_master_data()
-    if not INITIALIZED:
-        return {"status": "initializing", "message": "Compiling data matrices...", "data": {}}
-    return {"status": "success", "data": MASTER_DATA_CACHE}
-
-@router.get("/api/afterchannel/summary_ledgers")
-def get_summary_ledgers():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    try:
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM accurate_ledger")
-        accurate = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM cps_ledger")
-        cps = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM rework_ledger")
-        rework = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
-        dismantling = cursor.fetchall()
-
-        return {
-            "status": "success",
-            "data": {
-                "accurate": accurate,
-                "cps": cps,
-                "rework": rework,
-                "dismantling": dismantling
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-@router.post("/api/afterchannel/accurate")
-def submit_accurate(entry: AccurateEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            INSERT INTO accurate_ledger (mo, bearing_type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
-        """, (entry.mo, entry.type, entry.inDate, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
-        conn.commit()
-        return {"status": "success", "message": "Accurate entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-@router.post("/api/afterchannel/cps")
-def submit_cps(entry: CpsEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            INSERT INTO cps_ledger (mo, bearing_type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
-        """, (entry.mo, entry.type, entry.item, entry.inDate, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
-        conn.commit()
-        return {"status": "success", "message": "CPS entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-@router.post("/api/afterchannel/rework")
-def submit_rework(entry: ReworkEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            INSERT INTO rework_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
-        """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
-        conn.commit()
-        return {"status": "success", "message": "Rework entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-@router.post("/api/afterchannel/vibration")
-def submit_vibration(entry: VibrationEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute("""
-            INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
-        """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
-        conn.commit()
-        return {"status": "success", "message": "Vibration entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+export default Afterchannel;

@@ -1,15 +1,14 @@
-# afterchannel_backend.py
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2
+from psycopg2.extras import RealDictCursor
 import os
 import pandas as pd
 import requests
 import io
 import threading
 import time
-import re
 
 router = APIRouter()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -93,7 +92,7 @@ class VibrationEntry(BaseModel):
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-# --- Excel Loading Helpers (Adapted from TBE) ---
+# --- Excel Loading Helpers ---
 def find_column(df, patterns):
     cols = [str(c).strip() for c in df.columns]
     for p in patterns:
@@ -114,20 +113,18 @@ def load_excel_sheets(url):
         except ImportError:
             xls = pd.ExcelFile(content)
         time.sleep(0.05)
-        # Parse all sheets
         return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
     except Exception as e:
-        print(f"⚠️ Error reading workbook stream for Afterchannel: {e}")
+        print(f"⚠️ Error reading workbook stream: {e}")
         return {}
 
 def process_mo_sheets(sheets_dict, temp_cache):
     for sheet_name, df in sheets_dict.items():
-        time.sleep(0.01) # Yield CPU
+        time.sleep(0.01)
         if df.empty: continue
         
-        # Find necessary columns regardless of exact naming
         mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
-        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
+        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family"])
         qty_col = find_column(df, ["qty", "quantity", "prodqty", "production", "total"])
 
         if not mo_col or not type_col: continue
@@ -137,23 +134,25 @@ def process_mo_sheets(sheets_dict, temp_cache):
 
         for row in df_records:
             mo_val = str(row.get(mo_col, "")).strip().upper()
-            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
+            type_val = str(row.get(type_col, "")).strip().upper()
             
-            type_val = str(row.get(type_col, "")).strip()
-            if not type_val or type_val.upper() in ["NAN", "NONE", ""]: continue
+            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
+            if not type_val or type_val in ["NAN", "NONE", ""]: continue
 
             raw_qty = row.get(qty_col, 0) if qty_col else 0
             try:
                 qty_val = int(float(str(raw_qty).replace(',', '')))
-            except (ValueError, TypeError):
+            except:
                 qty_val = 0
 
+            # Group by MO, then by Variant, and sum the quantities
             if mo_val not in temp_cache:
-                temp_cache[mo_val] = []
+                temp_cache[mo_val] = {}
             
-            # Avoid duplicate variants for the same MO
-            if not any(item['type'] == type_val for item in temp_cache[mo_val]):
-                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
+            if type_val not in temp_cache[mo_val]:
+                temp_cache[mo_val][type_val] = 0
+                
+            temp_cache[mo_val][type_val] += qty_val
 
 # --- Background Task ---
 def process_master_data():
@@ -163,8 +162,6 @@ def process_master_data():
 
     try:
         temp_cache = {}
-        print("🔄 Afterchannel: Fetching Excel streams...")
-        
         dgbb_sheets = load_excel_sheets(DGBB_MASTER_URL)
         trb_sheets = load_excel_sheets(TRB_MASTER_URL)
 
@@ -187,24 +184,49 @@ def background_refresh_loop():
             print(f"Afterchannel Background thread error: {e}")
         time.sleep(CACHE_DURATION_MINUTES * 60)
 
-# Start the background thread immediately
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 # --- API Endpoints ---
 
 @router.get("/api/mo-lookup")
 def mo_lookup(refresh: Optional[str] = Query(None)):
-    if refresh == "true":
-        # Run synchronous update if forced
-        process_master_data()
-    
+    if refresh == "true": process_master_data()
     if not INITIALIZED:
         return {"status": "initializing", "message": "Compiling data matrices...", "data": {}}
+    return {"status": "success", "data": MASTER_DATA_CACHE}
 
-    return {
-        "status": "success",
-        "data": MASTER_DATA_CACHE
-    }
+@router.get("/api/afterchannel/summary_ledgers")
+def get_summary_ledgers():
+    """Fetches all ledger entries so the frontend can build the variant-wise breakdown modal."""
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT mo, bearing_type as type, qty_in, qty_sent FROM accurate_ledger")
+        accurate = cursor.fetchall()
+        
+        cursor.execute("SELECT mo, bearing_type as type, qty_in, qty_sent FROM cps_ledger")
+        cps = cursor.fetchall()
+        
+        cursor.execute("SELECT mo, bearing_type as type, qty_in, qty_sent FROM rework_ledger")
+        rework = cursor.fetchall()
+        
+        cursor.execute("SELECT mo, bearing_type as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
+        dismantling = cursor.fetchall()
+
+        return {
+            "status": "success",
+            "data": {
+                "accurate": accurate,
+                "cps": cps,
+                "rework": rework,
+                "dismantling": dismantling
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 @router.post("/api/afterchannel/accurate")
 def submit_accurate(entry: AccurateEntry):
@@ -216,7 +238,7 @@ def submit_accurate(entry: AccurateEntry):
             VALUES (%s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
         """, (entry.mo, entry.type, entry.inDate, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
         conn.commit()
-        return {"status": "success", "message": "Accurate entry logged"}
+        return {"status": "success"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -234,7 +256,7 @@ def submit_cps(entry: CpsEntry):
             VALUES (%s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
         """, (entry.mo, entry.type, entry.item, entry.inDate, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
         conn.commit()
-        return {"status": "success", "message": "CPS entry logged"}
+        return {"status": "success"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -252,7 +274,7 @@ def submit_rework(entry: ReworkEntry):
             VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
         """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
-        return {"status": "success", "message": "Rework entry logged"}
+        return {"status": "success"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
@@ -270,7 +292,7 @@ def submit_vibration(entry: VibrationEntry):
             VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
         """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
-        return {"status": "success", "message": "Vibration entry logged"}
+        return {"status": "success"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))

@@ -124,13 +124,12 @@ const Afterchannel = () => {
       
       alert("Operational Record Logged Successfully!");
       e.target.reset();
-      fetchLedgers(); // Refresh data table
+      fetchLedgers(); 
     } catch (err) {
       alert("Submission Error: " + err.message);
     }
   };
 
-  // --- RESTORED SUMMARY LOGIC ---
   const filteredMos = Object.keys(moCache).filter(mo => 
     mo.toUpperCase().includes(searchQuery.toUpperCase())
   );
@@ -364,30 +363,30 @@ const Afterchannel = () => {
           </form>
         )}
 
-        {/* ================= SUMMARY & MODAL (RESTORED) ================= */}
+        {/* ================= RESTORED & UPGRADED SUMMARY VIEW ================= */}
         {activeTab === 'summary' && (
-          <div className="summary-view" style={{background: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #cbd5e1'}}>
+          <div className="summary-view" style={{background: '#fff', padding: '25px', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)', border: '1px solid #e2e8f0'}}>
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px'}}>
-              <h2 style={{fontSize: '1.3em', margin: 0, color: '#1e293b'}}>Active Master Orders (MO) Reference Index</h2>
-              <input type="text" placeholder="Search Master Order (MO)..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{padding: '8px 12px', width: '320px', border: '1px solid #cbd5e1', borderRadius: '6px'}} />
+              <h2 style={{fontSize: '1.4em', margin: 0, color: '#0f172a', fontWeight: 'bold'}}>Active Master Orders (MO) Reference Index</h2>
+              <input type="text" placeholder="Search Master Order (MO)..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{padding: '10px 15px', width: '350px', border: '2px solid #cbd5e1', borderRadius: '6px', outline: 'none', transition: 'border-color 0.2s'}} onFocus={(e) => e.target.style.borderColor = '#2563eb'} onBlur={(e) => e.target.style.borderColor = '#cbd5e1'} />
             </div>
             
-            <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
+            <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em', border: '1px solid #cbd5e1'}}>
               <thead>
-                <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
-                  <th style={{padding: '12px', fontWeight: '700', color: '#475569'}}>Master Order (MO) ID</th>
-                  <th style={{padding: '12px', fontWeight: '700', color: '#475569'}}>Registered Specifications Count</th>
-                  <th style={{padding: '12px', fontWeight: '700', color: '#475569', textAlign: 'right'}}>Audit Control</th>
+                <tr style={{background: '#1e293b', color: '#f8fafc'}}>
+                  <th style={{padding: '15px', fontWeight: '600', borderRight: '1px solid #334155'}}>Master Order (MO) ID</th>
+                  <th style={{padding: '15px', fontWeight: '600', borderRight: '1px solid #334155'}}>Registered Specifications Count</th>
+                  <th style={{padding: '15px', fontWeight: '600', textAlign: 'center'}}>Audit Control</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredMos.map(mo => (
-                  <tr key={mo} style={{borderBottom: '1px solid #e2e8f0'}}>
-                    <td style={{padding: '14px 12px', fontWeight: '700', color: '#1e40af'}}>{mo}</td>
-                    <td style={{padding: '14px 12px', color: '#64748b'}}>{moCache[mo] ? moCache[mo].length : 0} Variant Matrices Compiled</td>
-                    <td style={{padding: '14px 12px', textAlign: 'right'}}>
-                      <button onClick={() => openSummaryModal(mo)} style={{padding: '7px 14px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: '600'}}>
-                        View Detailed Pipeline →
+                {filteredMos.map((mo, index) => (
+                  <tr key={mo} style={{background: index % 2 === 0 ? '#ffffff' : '#f8fafc', borderBottom: '1px solid #cbd5e1', transition: 'background 0.2s'}} onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'} onMouseLeave={(e) => e.currentTarget.style.background = index % 2 === 0 ? '#ffffff' : '#f8fafc'}>
+                    <td style={{padding: '15px', fontWeight: 'bold', color: '#2563eb', borderRight: '1px solid #cbd5e1'}}>{mo}</td>
+                    <td style={{padding: '15px', color: '#475569', borderRight: '1px solid #cbd5e1'}}>{moCache[mo] ? moCache[mo].length : 0} Variant Matrices Compiled</td>
+                    <td style={{padding: '15px', textAlign: 'center'}}>
+                      <button onClick={() => openSummaryModal(mo)} style={{padding: '8px 16px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', boxShadow: '0 2px 4px rgba(0,0,0,0.1)'}}>
+                        View Detailed Pipeline
                       </button>
                     </td>
                   </tr>
@@ -399,36 +398,45 @@ const Afterchannel = () => {
       </div>
 
       {selectedMoDetail && (
-        <div className="modal-backdrop" style={{position: 'fixed', top:0, left:0, width:'100vw', height:'100vh', background:'rgba(15, 23, 42, 0.6)', display:'flex', justifyContent:'center', alignItems:'center', zIndex: 1000}}>
-          <div className="modal-window" style={{background:'#fff', padding:'25px', borderRadius:'8px', width:'95%', maxWidth:'1200px', maxHeight:'85vh', overflowY:'auto'}}>
-            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'2px solid #cbd5e1', paddingBottom:'15px', marginBottom:'20px'}}>
-              <h2>Cross-Department Flow Trace Analysis ({selectedMoDetail.mo})</h2>
-              <button onClick={() => setSelectedMoDetail(null)} style={{fontSize:'1.5em', cursor:'pointer', border:'none', background:'none'}}>×</button>
+        <div className="modal-backdrop" style={{position: 'fixed', top:0, left:0, width:'100vw', height:'100vh', background:'rgba(15, 23, 42, 0.75)', display:'flex', justifyContent:'center', alignItems:'center', zIndex: 1000}}>
+          <div className="modal-window" style={{background:'#fff', padding:'30px', borderRadius:'10px', width:'95%', maxWidth:'1300px', maxHeight:'85vh', overflowY:'auto', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'}}>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'3px solid #0f172a', paddingBottom:'15px', marginBottom:'25px'}}>
+              <h2 style={{margin: 0, color: '#0f172a'}}>Cross-Department Flow Trace: <span style={{color: '#2563eb'}}>{selectedMoDetail.mo}</span></h2>
+              <button onClick={() => setSelectedMoDetail(null)} style={{fontSize:'2em', cursor:'pointer', border:'none', background:'none', color: '#64748b', lineHeight: '1'}}>&times;</button>
             </div>
-            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.88em'}}>
+            
+            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.9em', border: '1px solid #94a3b8'}}>
               <thead>
-                <tr style={{background: '#f8fafc'}}>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Variant Model</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Actual Prod Qty</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Accurate In</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Accurate Out</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>CPS In</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>CPS Out</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Rework In</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Rework Out</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Dismantle In</th>
-                  <th style={{border: '1px solid #cbd5e1', padding: '10px'}}>Scrap Sum</th>
+                <tr style={{background: '#334155', color: '#fff'}}>
+                  <th style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>Variant Model</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#166534'}}>Actual Prod Qty</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Accurate In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Accurate Out</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS Out</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>Rework In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>Rework Out</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dismantle In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#991b1b'}}>Scrap Sum</th>
                 </tr>
               </thead>
               <tbody>
                 {selectedMoDetail.breakdown.map((row, i) => (
-                  <tr key={i} style={{borderBottom: '1px solid #e2e8f0', textAlign: 'center'}}>
-                    <td style={{padding:'10px', fontWeight:'bold', textAlign:'left'}}>{row.variant}</td>
-                    <td style={{padding:'10px', background:'#f0fdf4', color:'#16a34a', fontWeight:'bold'}}>{row.prodQty.toLocaleString()}</td>
-                    <td style={{padding:'10px'}}>{row.accIn || '-'}</td><td style={{padding:'10px'}}>{row.accOut || '-'}</td>
-                    <td style={{padding:'10px'}}>{row.cpsIn || '-'}</td><td style={{padding:'10px'}}>{row.cpsOut || '-'}</td>
-                    <td style={{padding:'10px'}}>{row.rwIn || '-'}</td><td style={{padding:'10px'}}>{row.rwOut || '-'}</td>
-                    <td style={{padding:'10px'}}>{row.disIn || '-'}</td><td style={{padding:'10px', color:'#dc2626', fontWeight: 'bold'}}>{row.scrapSum || '-'}</td>
+                  <tr key={i} style={{background: i % 2 === 0 ? '#fff' : '#f1f5f9', borderBottom: '1px solid #cbd5e1', textAlign: 'center'}}>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', fontWeight:'bold', textAlign:'left', color: '#334155'}}>{row.variant}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', background:'#dcfce7', color:'#166534', fontWeight:'bold'}}>{row.prodQty > 0 ? row.prodQty.toLocaleString() : '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accOut || '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsOut || '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwOut || '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', background: '#fee2e2', color:'#991b1b', fontWeight: 'bold'}}>{row.scrapSum || '-'}</td>
                   </tr>
                 ))}
               </tbody>

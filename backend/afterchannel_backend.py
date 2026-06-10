@@ -1,4 +1,4 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2
@@ -10,12 +10,8 @@ import io
 import threading
 import time
 import re
-import uvicorn
 
-# --- SERVER ENGINE OVERRIDE (This was missing!) ---
-app = FastAPI()
 router = APIRouter()
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
 TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
@@ -26,307 +22,306 @@ IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
 
-# --- Pydantic Models ---
+# --- Pydantic Models (ALL OPTIONAL FIELDS TO ALLOW SPLIT IN/OUT LOGS) ---
 class AccurateEntry(BaseModel):
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    pc: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
+    mo: str
+    type: str
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    pc: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
+    outDate: Optional[str] = None
+    shiftOut: Optional[str] = None
 
 class CpsEntry(BaseModel):
-    mo: str
-    type: str
-    item: Optional[str] = None
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    rcNo: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    channel: Optional[str] = None
-    qtyIn: Optional[int] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
+    mo: str
+    type: str
+    item: Optional[str] = None
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    rcNo: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    channel: Optional[str] = None
+    qtyIn: Optional[int] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
+    outDate: Optional[str] = None
+    shiftOut: Optional[str] = None
 
 class ReworkEntry(BaseModel):
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    channel: Optional[str] = None
-    lineSegment: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    reworkActivity: Optional[str] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-    operator: Optional[str] = None
-    remark: Optional[str] = None
+    mo: str
+    type: str
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    channel: Optional[str] = None
+    lineSegment: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    reworkActivity: Optional[str] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
+    outDate: Optional[str] = None
+    shiftOut: Optional[str] = None
+    operator: Optional[str] = None
+    remark: Optional[str] = None
 
 class VibrationEntry(BaseModel):
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    channel: Optional[str] = None
-    lineSegment: Optional[str] = None
-    reason: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    activity: Optional[str] = None
-    ballScrap: Optional[int] = None
-    cageSealScrap: Optional[int] = None
-    ringType: Optional[str] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-    operator: Optional[str] = None
-    remark: Optional[str] = None
+    mo: str
+    type: str
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    channel: Optional[str] = None
+    lineSegment: Optional[str] = None
+    reason: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    activity: Optional[str] = None
+    ballScrap: Optional[int] = None
+    cageSealScrap: Optional[int] = None
+    ringType: Optional[str] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
+    outDate: Optional[str] = None
+    shiftOut: Optional[str] = None
+    operator: Optional[str] = None
+    remark: Optional[str] = None
 
 # --- Database Helper ---
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    return psycopg2.connect(DATABASE_URL)
 
 # --- Excel Loading Helpers ---
+
 def find_column(df, patterns):
-    cols = [str(c).strip() for c in df.columns]
-    for p in patterns:
-        norm_p = re.sub(r'[^a-z0-9]', '', p.lower())
-        for c in cols:
-            norm_c = re.sub(r'[^a-z0-9]', '', c.lower())
-            if norm_c == norm_p: 
-                return c
-    return None
+    cols = [str(c).strip() for c in df.columns]
+    for p in patterns:
+        # Aggressively strip all punctuation, spaces, and casing to force a match
+        norm_p = re.sub(r'[^a-z0-9]', '', p.lower())
+        for c in cols:
+            norm_c = re.sub(r'[^a-z0-9]', '', c.lower())
+            if norm_c == norm_p: 
+                return c
+    return None
+
 
 def load_excel_sheets(url):
-    if not url: return {}
-    try:
-        resp = requests.get(url, timeout=45)
-        if resp.status_code != 200: return {}
-        content = io.BytesIO(resp.content)
-        try:
-            xls = pd.ExcelFile(content, engine='calamine')
-        except ImportError:
-            xls = pd.ExcelFile(content)
-        time.sleep(0.05)
-        return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
-    except Exception as e:
-        print(f"⚠️ Error reading workbook stream for Afterchannel: {e}")
-        return {}
+    if not url: return {}
+    try:
+        resp = requests.get(url, timeout=45)
+        if resp.status_code != 200: return {}
+        content = io.BytesIO(resp.content)
+        try:
+            xls = pd.ExcelFile(content, engine='calamine')
+        except ImportError:
+            xls = pd.ExcelFile(content)
+        time.sleep(0.05)
+        return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
+    except Exception as e:
+        print(f"⚠️ Error reading workbook stream for Afterchannel: {e}")
+        return {}
 
 def process_mo_sheets(sheets_dict, temp_cache):
-    for sheet_name, df in sheets_dict.items():
-        time.sleep(0.01) 
-        if df.empty: continue
-        
-        mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
-        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
-        qty_col = find_column(df, ["qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "production", "total", "reqqty", "required"])
+    for sheet_name, df in sheets_dict.items():
+        time.sleep(0.01) 
+        if df.empty: continue
+        
+        mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
+        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
+        # EXPANDED QTY SEARCH to fix the "0 Target Qty" bug
+        qty_col = find_column(df, ["qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "production", "total", "reqqty", "required"])
 
-        if not mo_col or not type_col: continue
+        if not mo_col or not type_col: continue
 
-        target_cols = [c for c in [mo_col, type_col, qty_col] if c]
-        df_records = df[target_cols].to_dict('records')
+        target_cols = [c for c in [mo_col, type_col, qty_col] if c]
+        df_records = df[target_cols].to_dict('records')
 
-        for row in df_records:
-            mo_val = str(row.get(mo_col, "")).strip().upper()
-            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
-            
-            type_val = str(row.get(type_col, "")).strip().upper()
-            if not type_val or type_val in ["NAN", "NONE", ""]: continue
+        for row in df_records:
+            mo_val = str(row.get(mo_col, "")).strip().upper()
+            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
+            
+            type_val = str(row.get(type_col, "")).strip().upper()
+            if not type_val or type_val in ["NAN", "NONE", ""]: continue
 
-            raw_qty = row.get(qty_col, 0) if qty_col else 0
-            try:
-                qty_val = int(float(str(raw_qty).replace(',', '')))
-            except (ValueError, TypeError):
-                qty_val = 0
+            raw_qty = row.get(qty_col, 0) if qty_col else 0
+            try:
+                qty_val = int(float(str(raw_qty).replace(',', '')))
+            except (ValueError, TypeError):
+                qty_val = 0
 
-            if mo_val not in temp_cache:
-                temp_cache[mo_val] = []
-            
-            variant_exists = False
-            for item in temp_cache[mo_val]:
-                if item['type'] == type_val:
-                    item['qty'] += qty_val
-                    variant_exists = True
-                    break
-            
-            if not variant_exists:
-                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
+            if mo_val not in temp_cache:
+                temp_cache[mo_val] = []
+            
+            variant_exists = False
+            for item in temp_cache[mo_val]:
+                if item['type'] == type_val:
+                    item['qty'] += qty_val
+                    variant_exists = True
+                    break
+            
+            if not variant_exists:
+                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
 
 # --- Background Task ---
 def process_master_data():
-    global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED
-    if IS_UPDATING: return
-    IS_UPDATING = True
+    global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED
+    if IS_UPDATING: return
+    IS_UPDATING = True
 
-    try:
-        temp_cache = {}
-        print("🔄 Afterchannel: Fetching Excel streams...")
-        
-        dgbb_sheets = load_excel_sheets(DGBB_MASTER_URL)
-        trb_sheets = load_excel_sheets(TRB_MASTER_URL)
+    try:
+        temp_cache = {}
+        print("🔄 Afterchannel: Fetching Excel streams...")
+        
+        dgbb_sheets = load_excel_sheets(DGBB_MASTER_URL)
+        trb_sheets = load_excel_sheets(TRB_MASTER_URL)
 
-        process_mo_sheets(dgbb_sheets, temp_cache)
-        process_mo_sheets(trb_sheets, temp_cache)
+        process_mo_sheets(dgbb_sheets, temp_cache)
+        process_mo_sheets(trb_sheets, temp_cache)
 
-        MASTER_DATA_CACHE = temp_cache
-        print(f"✅ Afterchannel: Successfully mapped {len(MASTER_DATA_CACHE)} unique MOs.")
-    except Exception as e:
-        print(f"❌ Afterchannel Cache Compilation Fault: {str(e)}")
-    finally:
-        INITIALIZED = True
-        IS_UPDATING = False
+        MASTER_DATA_CACHE = temp_cache
+        print(f"✅ Afterchannel: Successfully mapped {len(MASTER_DATA_CACHE)} unique MOs.")
+    except Exception as e:
+        print(f"❌ Afterchannel Cache Compilation Fault: {str(e)}")
+    finally:
+        INITIALIZED = True
+        IS_UPDATING = False
 
 def background_refresh_loop():
-    while True:
-        try:
-            process_master_data()
-        except Exception as e:
-            print(f"Afterchannel Background thread error: {e}")
-        time.sleep(CACHE_DURATION_MINUTES * 60)
+    while True:
+        try:
+            process_master_data()
+        except Exception as e:
+            print(f"Afterchannel Background thread error: {e}")
+        time.sleep(CACHE_DURATION_MINUTES * 60)
 
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 # --- API Endpoints ---
+
 @router.get("/api/mo-lookup")
 def mo_lookup(refresh: Optional[str] = Query(None)):
-    if refresh == "true":
-        process_master_data()
-    if not INITIALIZED:
-        return {"status": "initializing", "message": "Compiling data matrices...", "data": {}}
-    return {"status": "success", "data": MASTER_DATA_CACHE}
+    if refresh == "true":
+        process_master_data()
+    if not INITIALIZED:
+        return {"status": "initializing", "message": "Compiling data matrices...", "data": {}}
+    return {"status": "success", "data": MASTER_DATA_CACHE}
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    try:
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM accurate_ledger")
-        accurate = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM cps_ledger")
-        cps = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM rework_ledger")
-        rework = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
-        dismantling = cursor.fetchall()
+    conn = get_db_connection()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    try:
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM accurate_ledger")
+        accurate = cursor.fetchall()
+        
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM cps_ledger")
+        cps = cursor.fetchall()
+        
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM rework_ledger")
+        rework = cursor.fetchall()
+        
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
+        dismantling = cursor.fetchall()
 
-        return {
-            "status": "success",
-            "data": {
-                "accurate": accurate,
-                "cps": cps,
-                "rework": rework,
-                "dismantling": dismantling
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+        return {
+            "status": "success",
+            "data": {
+                "accurate": accurate,
+                "cps": cps,
+                "rework": rework,
+                "dismantling": dismantling
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
+# FIXED 500 ERRORS: Removed NULLIF, explicitly casted dates in Python to prevent Postgres type ambiguity
 @router.post("/api/afterchannel/accurate")
 def submit_accurate(entry: AccurateEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
 
-        cursor.execute("""
-            INSERT INTO accurate_ledger (mo, bearing_type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s::date, %s)
-        """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-        conn.commit()
-        return {"status": "success", "message": "Accurate entry logged"}
-    except Exception as e:
-        conn.rollback()
-        print("DB Error:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+        cursor.execute("""
+            INSERT INTO accurate_ledger (mo, bearing_type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
+            VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s::date, %s)
+        """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
+        conn.commit()
+        return {"status": "success", "message": "Accurate entry logged"}
+    except Exception as e:
+        conn.rollback()
+        print("DB Error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 @router.post("/api/afterchannel/cps")
 def submit_cps(entry: CpsEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
 
-        cursor.execute("""
-            INSERT INTO cps_ledger (mo, bearing_type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s::date, %s)
-        """, (entry.mo, entry.type, entry.item, in_d, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-        conn.commit()
-        return {"status": "success", "message": "CPS entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+        cursor.execute("""
+            INSERT INTO cps_ledger (mo, bearing_type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out)
+            VALUES (%s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s::date, %s)
+        """, (entry.mo, entry.type, entry.item, in_d, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
+        conn.commit()
+        return {"status": "success", "message": "CPS entry logged"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 @router.post("/api/afterchannel/rework")
 def submit_rework(entry: ReworkEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
 
-        cursor.execute("""
-            INSERT INTO rework_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
-        conn.commit()
-        return {"status": "success", "message": "Rework entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
+        cursor.execute("""
+            INSERT INTO rework_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark)
+            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
+        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+        conn.commit()
+        return {"status": "success", "message": "Rework entry logged"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
 
 @router.post("/api/afterchannel/vibration")
 def submit_vibration(entry: VibrationEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
 
-        cursor.execute("""
-            INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
-        conn.commit()
-        return {"status": "success", "message": "Vibration entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-# --- ATTACH ROUTER AND BIND PORT (Also missing!) ---
-app.include_router(router)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+        cursor.execute("""
+            INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
+            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
+        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+        conn.commit()
+        return {"status": "success", "message": "Vibration entry logged"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()

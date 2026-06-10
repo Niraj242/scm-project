@@ -1,4 +1,3 @@
-# afterchannel_backend.py
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
@@ -23,8 +22,7 @@ IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
 
-# --- Pydantic Models (FIXED FOR 422 ERRORS) ---
-# All operational fields are now Optional so IN/OUT can be submitted separately
+# --- Pydantic Models (ALL OPTIONAL FIELDS TO ALLOW SPLIT IN/OUT LOGS) ---
 class AccurateEntry(BaseModel):
     mo: str
     type: str
@@ -237,19 +235,24 @@ def get_summary_ledgers():
         cursor.close()
         conn.close()
 
+# FIXED 500 ERRORS: Removed NULLIF, explicitly casted dates in Python to prevent Postgres type ambiguity
 @router.post("/api/afterchannel/accurate")
 def submit_accurate(entry: AccurateEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
+
         cursor.execute("""
             INSERT INTO accurate_ledger (mo, bearing_type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
-        """, (entry.mo, entry.type, entry.inDate, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
+            VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s::date, %s)
+        """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
         conn.commit()
         return {"status": "success", "message": "Accurate entry logged"}
     except Exception as e:
         conn.rollback()
+        print("DB Error:", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
@@ -260,10 +263,13 @@ def submit_cps(entry: CpsEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
+
         cursor.execute("""
             INSERT INTO cps_ledger (mo, bearing_type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s)
-        """, (entry.mo, entry.type, entry.item, entry.inDate, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut))
+            VALUES (%s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s::date, %s)
+        """, (entry.mo, entry.type, entry.item, in_d, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
         conn.commit()
         return {"status": "success", "message": "CPS entry logged"}
     except Exception as e:
@@ -278,10 +284,13 @@ def submit_rework(entry: ReworkEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
+
         cursor.execute("""
             INSERT INTO rework_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
-        """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
+            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
+        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
         return {"status": "success", "message": "Rework entry logged"}
     except Exception as e:
@@ -296,10 +305,13 @@ def submit_vibration(entry: VibrationEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
+        in_d = entry.inDate if entry.inDate else None
+        out_d = entry.outDate if entry.outDate else None
+
         cursor.execute("""
             INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, NULLIF(%s, '')::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NULLIF(%s, '')::date, %s, %s, %s)
-        """, (entry.mo, entry.inDate, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, entry.outDate, entry.shiftOut, entry.operator, entry.remark))
+            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
+        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
         return {"status": "success", "message": "Vibration entry logged"}
     except Exception as e:

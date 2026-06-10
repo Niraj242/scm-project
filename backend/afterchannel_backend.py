@@ -94,14 +94,18 @@ def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 # --- Excel Loading Helpers ---
+
 def find_column(df, patterns):
     cols = [str(c).strip() for c in df.columns]
     for p in patterns:
-        norm_p = p.lower().replace(" ", "").replace("_", "").replace("#", "")
+        # Aggressively strip all punctuation, spaces, and casing to force a match
+        norm_p = re.sub(r'[^a-z0-9]', '', p.lower())
         for c in cols:
-            norm_c = c.lower().replace(" ", "").replace("_", "").replace("#", "")
-            if norm_c == norm_p: return c
+            norm_c = re.sub(r'[^a-z0-9]', '', c.lower())
+            if norm_c == norm_p: 
+                return c
     return None
+
 
 def load_excel_sheets(url):
     if not url: return {}
@@ -124,9 +128,10 @@ def process_mo_sheets(sheets_dict, temp_cache):
         time.sleep(0.01) 
         if df.empty: continue
         
-        mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
-        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
-        qty_col = find_column(df, ["qty", "quantity", "prodqty", "production", "total"])
+        mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
+        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
+        # EXPANDED QTY SEARCH to fix the "0 Target Qty" bug
+        qty_col = find_column(df, ["qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "production", "total", "reqqty", "required"])
 
         if not mo_col or not type_col: continue
 

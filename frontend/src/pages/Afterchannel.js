@@ -18,6 +18,7 @@ const Afterchannel = () => {
   
   // PATCH: Added State to hold the record currently being edited
   const [editingRecord, setEditingRecord] = useState(null);
+  const [ledgerSearchQuery, setLedgerSearchQuery] = useState(''); // NEW
 
   useEffect(() => {
     fetchMasterData();
@@ -243,30 +244,38 @@ const Afterchannel = () => {
 
   // --- DYNAMIC DEPARTMENT LEDGER ENTRY TABLE ---
   const renderDepartmentLedger = (deptKey, deptName) => {
-    if (!moNumber || !selectedVariant) return null;
+    const deptData = ledgers[deptKey] || [];
     
-    // Filter records safely
-    const records = (ledgers[deptKey] || []).filter(l => 
-      (l.mo || '').toUpperCase() === moNumber.toUpperCase() && 
-      matchVariant(l, selectedVariant)
-    );
+    // Filter records safely based on search query, not moNumber/selectedVariant
+    const records = deptData.filter(l => {
+      const search = ledgerSearchQuery.toUpperCase();
+      const moMatch = (l.mo || '').toUpperCase().includes(search);
+      const typeMatch = (l.bearing_type || l.type || l.bearingType || l.variant || l.item_type || '').toUpperCase().includes(search);
+      return moMatch || typeMatch;
+    });
 
     if (records.length === 0) return (
       <div style={{marginTop: '30px', padding: '20px', textAlign: 'center', background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: '8px', color: '#64748b'}}>
-        No entries found for MO: {moNumber} | Variant: {selectedVariant} in {deptName} yet.
+        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px'}}>
+          <span style={{fontWeight: 'bold', color: '#0f172a', fontSize: '1.2em'}}>{deptName} - Global Entry Log</span>
+          <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: '4px', width: '300px'}} />
+        </div>
+        No entries found.
       </div>
     );
 
     return (
       <div style={{marginTop: '30px', background: '#fff', borderRadius: '8px', border: '1px solid #cbd5e1', overflow: 'hidden', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)'}}>
-        <div style={{background: '#0f172a', padding: '15px 20px', color: '#fff', fontWeight: 'bold', fontSize: '1.2em', display: 'flex', justifyContent: 'space-between'}}>
-          <span>{deptName} - Entry Log</span>
-          <span style={{color: '#94a3b8', fontSize: '0.8em'}}>MO: {moNumber} | {selectedVariant}</span>
+        <div style={{background: '#0f172a', padding: '15px 20px', color: '#fff', fontWeight: 'bold', fontSize: '1.2em', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+          <span>{deptName} - Global Entry Log</span>
+          <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: '4px', width: '300px', outline: 'none', color: '#000'}} />
         </div>
         <div style={{overflowX: 'auto'}}>
           <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
             <thead>
               <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>MO</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Variant</th>
                 <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date IN</th>
                 <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Material From</th>
                 <th style={{padding: '12px 15px', color: '#1d4ed8', borderRight: '2px solid #cbd5e1', background: '#eff6ff'}}>Qty IN</th>
@@ -282,6 +291,8 @@ const Afterchannel = () => {
                 const isScrap = isScrapStation(r.next_station || r.nextStation);
                 return (
                   <tr key={i} style={{borderBottom: '1px solid #e2e8f0', background: i % 2 === 0 ? '#fff' : '#f8fafc', transition: 'background 0.2s'}} onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'} onMouseLeave={(e) => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#f8fafc'}>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.mo || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.bearing_type || r.type || r.bearingType || r.variant || r.item_type || '-'}</td>
                     <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.in_date || r.inDate || '-'}</td>
                     <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.material_in_from || r.materialInFrom || '-'}</td>
                     <td style={{padding: '12px 15px', borderRight: '2px solid #cbd5e1', fontWeight: 'bold', color: '#1d4ed8', background: '#eff6ff'}}>{r.qty_in || r.qtyIn || '-'}</td>
@@ -327,11 +338,11 @@ const Afterchannel = () => {
         <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing</h1>
         <div className="tab-buttons" style={{display: 'flex', gap: '10px'}}>
           {['accurate', 'cps', 'rework', 'vibration'].map(tab => (
-            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null);}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery('');}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
               {tab.toUpperCase()}
             </button>
           ))}
-          <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === 'summary' ? '#16a34a' : '#bbf7d0', color: activeTab === 'summary' ? '#fff' : '#14532d', border: 'none', borderRadius: '4px', fontWeight: 'bold'}}>
+          <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => {setActiveTab('summary'); setLedgerSearchQuery('');}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === 'summary' ? '#16a34a' : '#bbf7d0', color: activeTab === 'summary' ? '#fff' : '#14532d', border: 'none', borderRadius: '4px', fontWeight: 'bold'}}>
             📊 SUMMARY
           </button>
         </div>

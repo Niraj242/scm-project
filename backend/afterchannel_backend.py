@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import FastAPI, APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2
@@ -10,17 +10,23 @@ import io
 import threading
 import time
 import re
+import uvicorn
 
+# --- SERVER ENGINE OVERRIDE (This was missing!) ---
+app = FastAPI()
 router = APIRouter()
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
 TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
 
+# --- Global Caches & State ---
 MASTER_DATA_CACHE = {}
 IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
 
+# --- Pydantic Models ---
 class AccurateEntry(BaseModel):
     mo: str
     type: str
@@ -87,9 +93,11 @@ class VibrationEntry(BaseModel):
     operator: Optional[str] = None
     remark: Optional[str] = None
 
+# --- Database Helper ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
+# --- Excel Loading Helpers ---
 def find_column(df, patterns):
     cols = [str(c).strip() for c in df.columns]
     for p in patterns:
@@ -156,6 +164,7 @@ def process_mo_sheets(sheets_dict, temp_cache):
             if not variant_exists:
                 temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
 
+# --- Background Task ---
 def process_master_data():
     global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED
     if IS_UPDATING: return
@@ -189,6 +198,7 @@ def background_refresh_loop():
 
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
+# --- API Endpoints ---
 @router.get("/api/mo-lookup")
 def mo_lookup(refresh: Optional[str] = Query(None)):
     if refresh == "true":
@@ -202,17 +212,16 @@ def get_summary_ledgers():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # FIXED: Selecting ALL columns so the frontend can see dates, stations, and IDs
-        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM accurate_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM accurate_ledger")
         accurate = cursor.fetchall()
         
-        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM cps_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM cps_ledger")
         cps = cursor.fetchall()
         
-        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM rework_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM rework_ledger")
         rework = cursor.fetchall()
         
-        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM vibration_dismantling_ledger")
+        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
         dismantling = cursor.fetchall()
 
         return {
@@ -225,31 +234,6 @@ def get_summary_ledgers():
             }
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        cursor.close()
-        conn.close()
-
-# NEW: DELETE ENDPOINT SO FRONTEND BUTTONS WORK
-@router.delete("/api/afterchannel/{dept}/{record_id}")
-def delete_record(dept: str, record_id: int):
-    table_map = {
-        "accurate": "accurate_ledger",
-        "cps": "cps_ledger",
-        "rework": "rework_ledger",
-        "dismantling": "vibration_dismantling_ledger"
-    }
-    if dept not in table_map:
-        raise HTTPException(status_code=400, detail="Invalid department")
-    
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    try:
-        cursor.execute(f"DELETE FROM {table_map[dept]} WHERE id = %s", (record_id,))
-        conn.commit()
-        return {"status": "success", "message": f"Deleted record {record_id} from {dept}"}
-    except Exception as e:
-        conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
@@ -339,3 +323,10 @@ def submit_vibration(entry: VibrationEntry):
     finally:
         cursor.close()
         conn.close()
+
+# --- ATTACH ROUTER AND BIND PORT (Also missing!) ---
+app.include_router(router)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

@@ -22,8 +22,6 @@ IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
 
-# --- Pydantic Models (ALL OPTIONAL FIELDS TO ALLOW SPLIT IN/OUT LOGS) ---
-# PATCH: Added optional 'id' field to all models to allow editing existing rows
 class AccurateEntry(BaseModel):
     id: Optional[int] = None
     mo: str
@@ -61,7 +59,7 @@ class ReworkEntry(BaseModel):
     inDate: Optional[str] = None
     shiftIn: Optional[str] = None
     channel: Optional[str] = None
-    lineSegment: Optional[str] = None
+    lineType: Optional[str] = None  # PATCHED: Matched to frontend form name
     materialInFrom: Optional[str] = None
     qtyIn: Optional[int] = None
     reworkActivity: Optional[str] = None
@@ -79,7 +77,7 @@ class VibrationEntry(BaseModel):
     inDate: Optional[str] = None
     shiftIn: Optional[str] = None
     channel: Optional[str] = None
-    lineSegment: Optional[str] = None
+    lineType: Optional[str] = None  # PATCHED: Matched to frontend form name
     reason: Optional[str] = None
     materialInFrom: Optional[str] = None
     qtyIn: Optional[int] = None
@@ -132,7 +130,9 @@ def process_mo_sheets(sheets_dict, temp_cache):
         
         mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
         type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
-        qty_col = find_column(df, ["qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "production", "total", "reqqty", "required"])
+        
+        # PATCHED: Prioritized "production" so it pulls Actual Prod Qty correctly
+        qty_col = find_column(df, ["production", "productionqty", "qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "total", "reqqty", "required"])
         
         if not mo_col or not type_col: continue
 
@@ -146,7 +146,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
             type_val = str(row.get(type_col, "")).strip().upper()
             if not type_val or type_val in ["NAN", "NONE", ""]: continue
 
-            # PATCH: Safely strip out '-' dashes and explicit NaNs to stop zeroing out Qty
             raw_qty = row.get(qty_col, 0) if qty_col else 0
             if pd.isna(raw_qty) or str(raw_qty).strip() in ['-', 'NAN', 'NONE', '']:
                 raw_qty = 0
@@ -203,7 +202,6 @@ def background_refresh_loop():
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 # --- API Endpoints ---
-
 @router.get("/api/mo-lookup")
 def mo_lookup(refresh: Optional[str] = Query(None)):
     if refresh == "true":
@@ -217,17 +215,16 @@ def get_summary_ledgers():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # PATCH: Selecting ALL columns so the frontend table shows data and the Scrap sum triggers correctly
         cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out FROM accurate_ledger")
         accurate = cursor.fetchall()
         
         cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out FROM cps_ledger")
         cps = cursor.fetchall()
         
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, channel, line_type as line_segment, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark FROM rework_ledger")
+        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, channel, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark FROM rework_ledger")
         rework = cursor.fetchall()
         
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, channel, line_type as line_segment, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark FROM vibration_dismantling_ledger")
+        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, channel, line_type, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark FROM vibration_dismantling_ledger")
         dismantling = cursor.fetchall()
 
         return {
@@ -245,7 +242,6 @@ def get_summary_ledgers():
         cursor.close()
         conn.close()
 
-
 @router.post("/api/afterchannel/accurate")
 def submit_accurate(entry: AccurateEntry):
     conn = get_db_connection()
@@ -254,7 +250,6 @@ def submit_accurate(entry: AccurateEntry):
         in_d = entry.inDate if entry.inDate else None
         out_d = entry.outDate if entry.outDate else None
 
-        # PATCH: If 'id' is sent, do an UPDATE for editing. Otherwise INSERT.
         if entry.id:
             cursor.execute("""
                 UPDATE accurate_ledger SET 
@@ -270,7 +265,6 @@ def submit_accurate(entry: AccurateEntry):
         return {"status": "success", "message": "Accurate entry logged"}
     except Exception as e:
         conn.rollback()
-        print("DB Error:", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
@@ -317,12 +311,12 @@ def submit_rework(entry: ReworkEntry):
                 UPDATE rework_ledger SET 
                 mo=%s, in_date=%s::date, shift_in=%s, channel=%s, bearing_type=%s, line_type=%s, material_in_from=%s, qty_in=%s, rework_activity=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, operator=%s, remark=%s 
                 WHERE id=%s
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
+            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineType, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO rework_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark)
                 VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineType, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
         return {"status": "success", "message": "Rework entry logged"}
     except Exception as e:
@@ -345,12 +339,12 @@ def submit_vibration(entry: VibrationEntry):
                 UPDATE vibration_dismantling_ledger SET 
                 mo=%s, in_date=%s::date, shift_in=%s, channel=%s, bearing_type=%s, line_type=%s, reason=%s, material_in_from=%s, qty_in=%s, activity=%s, ball_scrap=%s, cage_seal_scrap=%s, ring_type=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, operator=%s, remark=%s 
                 WHERE id=%s
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
+            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
                 VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
         conn.commit()
         return {"status": "success", "message": "Vibration entry logged"}
     except Exception as e:
@@ -360,7 +354,6 @@ def submit_vibration(entry: VibrationEntry):
         cursor.close()
         conn.close()
 
-# PATCH: Added Delete Endpoints for all 4 modules
 @router.delete("/api/afterchannel/{dept}/{record_id}")
 def delete_ledger_entry(dept: str, record_id: int):
     conn = get_db_connection()
@@ -370,7 +363,8 @@ def delete_ledger_entry(dept: str, record_id: int):
             "accurate": "accurate_ledger", 
             "cps": "cps_ledger", 
             "rework": "rework_ledger", 
-            "vibration": "vibration_dismantling_ledger"
+            "vibration": "vibration_dismantling_ledger",
+            "dismantling": "vibration_dismantling_ledger" # Fallback just in case
         }
         if dept not in table_map: raise HTTPException(status_code=400, detail="Invalid dept")
         table = table_map[dept]

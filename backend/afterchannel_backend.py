@@ -23,72 +23,73 @@ IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
 
-# --- Pydantic Models ---
+# --- Pydantic Models (FIXED FOR 422 ERRORS) ---
+# All operational fields are now Optional so IN/OUT can be submitted separately
 class AccurateEntry(BaseModel):
     mo: str
     type: str
-    inDate: str
-    shiftIn: str
-    pc: str
-    materialInFrom: str
-    qtyIn: int
-    nextStation: str
-    qtySent: int
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    pc: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
     outDate: Optional[str] = None
-    shiftOut: str
+    shiftOut: Optional[str] = None
 
 class CpsEntry(BaseModel):
     mo: str
     type: str
-    item: str
-    inDate: str
-    shiftIn: str
-    rcNo: str
-    materialInFrom: str
-    channel: str
-    qtyIn: int
-    nextStation: str
-    qtySent: int
+    item: Optional[str] = None
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    rcNo: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    channel: Optional[str] = None
+    qtyIn: Optional[int] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
     outDate: Optional[str] = None
-    shiftOut: str
+    shiftOut: Optional[str] = None
 
 class ReworkEntry(BaseModel):
     mo: str
-    inDate: str
-    shiftIn: str
-    channel: str
     type: str
-    materialInFrom: str
-    qtyIn: int
-    reworkActivity: str
-    nextStation: str
-    qtySent: int
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    channel: Optional[str] = None
+    lineSegment: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    reworkActivity: Optional[str] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
     outDate: Optional[str] = None
-    shiftOut: str
+    shiftOut: Optional[str] = None
     operator: Optional[str] = None
     remark: Optional[str] = None
-    lineSegment: str
 
 class VibrationEntry(BaseModel):
     mo: str
-    inDate: str
-    shiftIn: str
-    channel: str
     type: str
-    reason: str
-    materialInFrom: str
-    qtyIn: int
-    activity: str
-    ballScrap: Optional[int] = 0
-    cageSealScrap: Optional[int] = 0
-    ringType: str
-    nextStation: str
-    qtySent: int
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    channel: Optional[str] = None
+    lineSegment: Optional[str] = None
+    reason: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    activity: Optional[str] = None
+    ballScrap: Optional[int] = None
+    cageSealScrap: Optional[int] = None
+    ringType: Optional[str] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
     outDate: Optional[str] = None
-    shiftOut: str
+    shiftOut: Optional[str] = None
     operator: Optional[str] = None
     remark: Optional[str] = None
-    lineSegment: str
 
 # --- Database Helper ---
 def get_db_connection():
@@ -150,7 +151,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
             if mo_val not in temp_cache:
                 temp_cache[mo_val] = []
             
-            # FIXED: Add production entries together for the same variant under that MO
             variant_exists = False
             for item in temp_cache[mo_val]:
                 if item['type'] == type_val:
@@ -207,7 +207,6 @@ def mo_lookup(refresh: Optional[str] = Query(None)):
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():
-    """Fetches and rolls up entries for variant tracking across all 4 departments."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:

@@ -16,13 +16,11 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
 TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
 
-# --- Global Caches & State ---
 MASTER_DATA_CACHE = {}
 IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
 
-# --- Pydantic Models (ALL OPTIONAL FIELDS TO ALLOW SPLIT IN/OUT LOGS) ---
 class AccurateEntry(BaseModel):
     mo: str
     type: str
@@ -89,23 +87,18 @@ class VibrationEntry(BaseModel):
     operator: Optional[str] = None
     remark: Optional[str] = None
 
-# --- Database Helper ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
-
-# --- Excel Loading Helpers ---
 
 def find_column(df, patterns):
     cols = [str(c).strip() for c in df.columns]
     for p in patterns:
-        # Aggressively strip all punctuation, spaces, and casing to force a match
         norm_p = re.sub(r'[^a-z0-9]', '', p.lower())
         for c in cols:
             norm_c = re.sub(r'[^a-z0-9]', '', c.lower())
             if norm_c == norm_p: 
                 return c
     return None
-
 
 def load_excel_sheets(url):
     if not url: return {}
@@ -130,7 +123,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
         
         mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
         type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
-        # EXPANDED QTY SEARCH to fix the "0 Target Qty" bug
         qty_col = find_column(df, ["qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "production", "total", "reqqty", "required"])
 
         if not mo_col or not type_col: continue
@@ -164,7 +156,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
             if not variant_exists:
                 temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
 
-# --- Background Task ---
 def process_master_data():
     global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED
     if IS_UPDATING: return
@@ -198,8 +189,6 @@ def background_refresh_loop():
 
 threading.Thread(target=background_refresh_loop, daemon=True).start()
 
-# --- API Endpoints ---
-
 @router.get("/api/mo-lookup")
 def mo_lookup(refresh: Optional[str] = Query(None)):
     if refresh == "true":
@@ -213,16 +202,17 @@ def get_summary_ledgers():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM accurate_ledger")
+        # FIXED: Selecting ALL columns so the frontend can see dates, stations, and IDs
+        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM accurate_ledger")
         accurate = cursor.fetchall()
         
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM cps_ledger")
+        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM cps_ledger")
         cps = cursor.fetchall()
         
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM rework_ledger")
+        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM rework_ledger")
         rework = cursor.fetchall()
         
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
+        cursor.execute("SELECT *, upper(mo) as mo, upper(bearing_type) as type FROM vibration_dismantling_ledger")
         dismantling = cursor.fetchall()
 
         return {
@@ -240,7 +230,31 @@ def get_summary_ledgers():
         cursor.close()
         conn.close()
 
-# FIXED 500 ERRORS: Removed NULLIF, explicitly casted dates in Python to prevent Postgres type ambiguity
+# NEW: DELETE ENDPOINT SO FRONTEND BUTTONS WORK
+@router.delete("/api/afterchannel/{dept}/{record_id}")
+def delete_record(dept: str, record_id: int):
+    table_map = {
+        "accurate": "accurate_ledger",
+        "cps": "cps_ledger",
+        "rework": "rework_ledger",
+        "dismantling": "vibration_dismantling_ledger"
+    }
+    if dept not in table_map:
+        raise HTTPException(status_code=400, detail="Invalid department")
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(f"DELETE FROM {table_map[dept]} WHERE id = %s", (record_id,))
+        conn.commit()
+        return {"status": "success", "message": f"Deleted record {record_id} from {dept}"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        cursor.close()
+        conn.close()
+
 @router.post("/api/afterchannel/accurate")
 def submit_accurate(entry: AccurateEntry):
     conn = get_db_connection()

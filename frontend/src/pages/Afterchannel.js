@@ -1,370 +1,552 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import './Afterchannel.css';
 
-const API_BASE_URL = "/api/afterchannel";
+const API = 'https://scm-backend-pshv.onrender.com';
 
-export default function AfterChannelModule() {
-  const [activeTab, setActiveTab] = useState('accurate'); 
-  const [entries, setEntries] = useState([]);
-  const [summaryData, setSummaryData] = useState([]);
-  
-  const [formData, setFormData] = useState({
-    mo_number: '',
-    bearing_variant: '',
-    quantity: '',
-    next_channel: 'Next Process',
-    remarks: ''
-  });
-  
-  const [masterMeta, setMasterMeta] = useState({ qty: '-', variant: '-' });
-  const [editingId, setEditingId] = useState(null);
-  const [loading, setLoading] = useState(false);
+const Afterchannel = () => {
+  const [activeTab, setActiveTab] = useState('accurate');
+  const [entryMode, setEntryMode] = useState('IN'); 
+  const [moCache, setMoCache] = useState({});
+  const [ledgers, setLedgers] = useState({ accurate: [], cps: [], rework: [], dismantling: [] });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedMoDetail, setSelectedMoDetail] = useState(null);
 
-  // Load existing records for the active channel tab
-  const fetchEntries = useCallback(async (channel) => {
-    try {
-      setLoading(true);
-      const res = await fetch(`${API_BASE_URL}/entries/${channel}`);
-      if (res.ok) {
-        const data = await res.json();
-        setEntries(data);
-      }
-    } catch (err) {
-      console.error("Error fetching channel logs:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  // Load the final master summary view data
-  const fetchSummary = useCallback(async () => {
-    try {
-      setLoading(true);
-      const res = await fetch(`${API_BASE_URL}/summary`);
-      if (res.ok) {
-        const data = await res.json();
-        setSummaryData(data);
-      }
-    } catch (err) {
-      console.error("Error fetching master summary matrix:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const resetForm = useCallback(() => {
-    setFormData({
-      mo_number: '',
-      bearing_variant: '',
-      quantity: '',
-      next_channel: 'Next Process',
-      remarks: ''
-    });
-    setMasterMeta({ qty: '-', variant: '-' });
-    setEditingId(null);
-  }, []);
+  const [moNumber, setMoNumber] = useState('');
+  const [availableVariants, setAvailableVariants] = useState([]);
+  const [selectedVariant, setSelectedVariant] = useState('');
+  const [actualProductionQty, setActualProductionQty] = useState(0);
 
   useEffect(() => {
-    if (activeTab === 'summary') {
-      fetchSummary();
-    } else {
-      fetchEntries(activeTab);
-    }
-    resetForm();
-  }, [activeTab, fetchEntries, fetchSummary, resetForm]);
+    fetchMasterData();
+    fetchLedgers();
+  }, []);
 
-  // Live lookup check when user leaves the MO input field
-  const handleMoBlur = async (moValue) => {
-    const cleanMo = (moValue || '').trim();
-    if (!cleanMo) return;
-    
+  const fetchMasterData = async () => {
     try {
-      const res = await fetch(`${API_BASE_URL}/lookup-mo?mo_number=${encodeURIComponent(cleanMo)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.found) {
-          setMasterMeta({
-            qty: data.qty !== null ? data.qty : '0',
-            variant: data.bearing_variant || 'Unknown'
-          });
-          setFormData(prev => ({
-            ...prev,
-            bearing_variant: data.bearing_variant || ''
-          }));
-        } else {
-          setMasterMeta({ qty: '0', variant: 'Not Found' });
-          setFormData(prev => ({ ...prev, bearing_variant: 'Not Found' }));
-        }
+      const res = await fetch(`${API}/api/mo-lookup`);
+      const data = await res.json();
+      if (data.status === 'success') {
+        console.log("MASTER DATA LOADED:", data.data); // Open your F12 console to see the exact keys
+        setMoCache(data.data || {});
       }
     } catch (err) {
-      console.error("Error running MO master sheet check:", err);
+      console.error("Master Reference Load Failure:", err);
     }
   };
 
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+  const fetchLedgers = async () => {
+    try {
+      const res = await fetch(`${API}/api/afterchannel/summary_ledgers`);
+      const json = await res.json();
+      console.log("LEDGERS LOADED:", json); // Open your F12 console to check the saved data
+      if (json.status === 'success' || json.data) {
+        setLedgers({
+          accurate: json.data?.accurate || json.data?.Accurate || [],
+          cps: json.data?.cps || json.data?.CPS || [],
+          rework: json.data?.rework || json.data?.Rework || [],
+          dismantling: json.data?.dismantling || json.data?.Dismantling || json.data?.vibration || []
+        });
+      }
+    } catch (err) {
+      console.error("Ledger Sync Failure:", err);
+    }
   };
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!formData.mo_number.trim()) return;
+  // --- BLIND-PROOF DATA EXTRACTORS ---
+  // Scans every key in the object. If the key contains "prod", "qty", "target", it grabs the number.
+  const getQtyFromRow = (row) => {
+    for (const key in row) {
+      const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (['qty', 'quantity', 'production', 'target', 'plan', 'total'].some(w => cleanKey.includes(w))) {
+        const val = parseFloat(String(row[key]).replace(/,/g, ''));
+        if (!isNaN(val) && val > 0) return val;
+      }
+    }
+    return 0; // Fallback if absolutely nothing is found
+  };
 
+  // Scans every key for "type", "variant", "model", "bearing"
+  const getTypeFromRow = (row) => {
+    for (const key in row) {
+      const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (['type', 'variant', 'model', 'bearing', 'item'].some(w => cleanKey.includes(w))) {
+        return String(row[key]).trim();
+      }
+    }
+    return 'UNKNOWN_VARIANT'; 
+  };
+
+  const calculateProduction = (rawRows, variantToMatch) => {
+    if (!rawRows || !Array.isArray(rawRows)) return 0;
+    const cleanMatch = String(variantToMatch || '').trim().toUpperCase();
+    
+    return rawRows.reduce((sum, r) => {
+      const rowType = getTypeFromRow(r).toUpperCase();
+      if (rowType === cleanMatch) {
+        return sum + getQtyFromRow(r);
+      }
+      return sum;
+    }, 0);
+  };
+
+  const handleMoBlur = () => {
+    const key = moNumber.trim().toUpperCase();
+    if (moCache[key]) {
+      const rawRows = moCache[key];
+      const uniqueVariants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
+      setAvailableVariants(uniqueVariants.map(type => ({ type })));
+
+      if (uniqueVariants.length === 1) {
+        const vType = uniqueVariants[0];
+        setSelectedVariant(vType);
+        setActualProductionQty(calculateProduction(rawRows, vType));
+      } else {
+        setSelectedVariant('');
+        setActualProductionQty(0);
+      }
+    } else {
+      setAvailableVariants([]);
+      setSelectedVariant('');
+      setActualProductionQty(0);
+    }
+  };
+
+  const handleVariantChange = (e) => {
+    const variantName = e.target.value;
+    setSelectedVariant(variantName);
+    const key = moNumber.trim().toUpperCase();
+    if (moCache[key]) {
+      setActualProductionQty(calculateProduction(moCache[key], variantName));
+    }
+  };
+
+  const handleFormSubmit = async (e, endpoint) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    
+    // Send both camelCase and snake_case to guarantee the backend accepts it
     const payload = {
-      mo_number: formData.mo_number.trim(),
-      bearing_variant: formData.bearing_variant.trim() || masterMeta.variant,
-      quantity: parseFloat(formData.quantity) || 0,
-      next_channel: formData.next_channel,
-      remarks: formData.remarks.trim()
+      mo: moNumber.toUpperCase(),
+      bearing_type: selectedVariant.toUpperCase(),
+      type: selectedVariant.toUpperCase()
     };
 
-    try {
-      let url = `${API_BASE_URL}/entries/${activeTab}`;
-      let method = 'POST';
+    const numFields = ['qtyIn', 'qtySent', 'qty_in', 'qty_sent', 'ballScrap', 'cageSealScrap', 'ball_scrap', 'cage_seal_scrap'];
 
-      if (editingId) {
-        url = `${API_BASE_URL}/entries/${activeTab}/${editingId}`;
-        method = 'PUT';
+    for (let [key, value] of fd.entries()) {
+      const finalValue = numFields.includes(key) ? (Number(value) || 0) : (value || null);
+      payload[key] = finalValue;
+      
+      // Auto-generate snake_case (e.g., qtyIn -> qty_in) just in case
+      const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+      if (snakeKey !== key) {
+        payload[snakeKey] = finalValue;
       }
+    }
 
-      const res = await fetch(url, {
-        method: method,
+    try {
+      const response = await fetch(`${API}/api/afterchannel/${endpoint}`, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
-
-      if (res.ok) {
-        resetForm();
-        fetchEntries(activeTab);
-      }
+      
+      if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+      
+      alert("Operational Record Logged Successfully!");
+      e.target.reset();
+      await fetchLedgers(); // Refresh tables immediately
     } catch (err) {
-      console.error("Error saving channel submission entry:", err);
+      alert("Submission Error: " + err.message);
     }
   };
 
-  const handleEdit = (row) => {
-    setEditingId(row.id);
-    setFormData({
-      mo_number: row.mo_number,
-      bearing_variant: row.bearing_variant || '',
-      quantity: row.quantity,
-      next_channel: row.next_channel || 'Next Process',
-      remarks: row.remarks || ''
-    });
-    setMasterMeta({
-      qty: 'Editing Record...',
-      variant: row.bearing_variant || 'Stored'
-    });
+  // Ultra-forgiving match logic for the tables
+  const isScrapStation = (val) => String(val || '').trim().toLowerCase().includes('scrap');
+  const matchVariant = (l, v) => {
+    const lType = String(l.bearing_type || l.type || l.bearingType || l.variant || '').replace(/\s+/g, '').toUpperCase();
+    const vType = String(v).replace(/\s+/g, '').toUpperCase();
+    // If the backend failed to save the type, show the row anyway so it's not totally hidden
+    return lType === vType || lType === ''; 
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm("Are you sure you want to delete this record entry?")) return;
-    try {
-      const res = await fetch(`${API_BASE_URL}/entries/${activeTab}/${id}`, {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        fetchEntries(activeTab);
-        if (editingId === id) resetForm();
-      }
-    } catch (err) {
-      console.error("Error executing row deletion process:", err);
-    }
+  const openSummaryModal = (mo) => {
+    const rawRows = moCache[mo] || [];
+    const variants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
+    
+    const breakdown = variants.map(v => {
+      const prodQty = calculateProduction(rawRows, v);
+      
+      const accLedger = ledgers.accurate.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+      const accIn = accLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+      const accOut = accLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
+      const accScrap = accLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
+
+      const cpsLedger = ledgers.cps.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+      const cpsIn = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+      const cpsOut = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
+      const cpsScrap = cpsLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
+
+      const rwLedger = ledgers.rework.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+      const rwIn = rwLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+      const rwOut = rwLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
+      const rwScrap = rwLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
+
+      const disLedger = ledgers.dismantling.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+      const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+      const disScrap = disLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
+      const disInternalScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap || l.ballScrap) || 0) + (Number(l.cage_seal_scrap || l.cageSealScrap) || 0), 0);
+
+      const scrapSum = accScrap + cpsScrap + rwScrap + disScrap + disInternalScrap;
+
+      return {
+        variant: v, prodQty,
+        accIn, accOut,
+        cpsIn, cpsOut,
+        rwIn, rwOut,
+        disIn, scrapSum
+      };
+    });
+
+    setSelectedMoDetail({ mo, breakdown });
   };
+
+  // --- DYNAMIC DEPARTMENT LEDGER ENTRY TABLE ---
+  const renderDepartmentLedger = (deptKey, deptName) => {
+    if (!moNumber || !selectedVariant) return null;
+    
+    // Filter records safely
+    const records = (ledgers[deptKey] || []).filter(l => 
+      (l.mo || '').toUpperCase() === moNumber.toUpperCase() && 
+      matchVariant(l, selectedVariant)
+    );
+
+    if (records.length === 0) return (
+      <div style={{marginTop: '30px', padding: '20px', textAlign: 'center', background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: '8px', color: '#64748b'}}>
+        No entries found for MO: {moNumber} | Variant: {selectedVariant} in {deptName} yet.
+      </div>
+    );
+
+    return (
+      <div style={{marginTop: '30px', background: '#fff', borderRadius: '8px', border: '1px solid #cbd5e1', overflow: 'hidden', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)'}}>
+        <div style={{background: '#0f172a', padding: '15px 20px', color: '#fff', fontWeight: 'bold', fontSize: '1.2em', display: 'flex', justifyContent: 'space-between'}}>
+          <span>{deptName} - Entry Log</span>
+          <span style={{color: '#94a3b8', fontSize: '0.8em'}}>MO: {moNumber} | {selectedVariant}</span>
+        </div>
+        <div style={{overflowX: 'auto'}}>
+          <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
+            <thead>
+              <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date IN</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Material From</th>
+                <th style={{padding: '12px 15px', color: '#1d4ed8', borderRight: '2px solid #cbd5e1', background: '#eff6ff'}}>Qty IN</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date OUT</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Next Station</th>
+                <th style={{padding: '12px 15px', color: '#b45309', background: '#fffbeb'}}>Qty OUT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r, i) => {
+                const isScrap = isScrapStation(r.next_station || r.nextStation);
+                return (
+                  <tr key={i} style={{borderBottom: '1px solid #e2e8f0', background: i % 2 === 0 ? '#fff' : '#f8fafc', transition: 'background 0.2s'}} onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'} onMouseLeave={(e) => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#f8fafc'}>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.in_date || r.inDate || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.material_in_from || r.materialInFrom || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '2px solid #cbd5e1', fontWeight: 'bold', color: '#1d4ed8', background: '#eff6ff'}}>{r.qty_in || r.qtyIn || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.out_date || r.outDate || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', color: isScrap ? '#dc2626' : '#334155', fontWeight: isScrap ? 'bold' : 'normal'}}>
+                      {r.next_station || r.nextStation || '-'}
+                      {isScrap && <span style={{marginLeft: '5px', fontSize: '0.8em'}}>⚠️</span>}
+                    </td>
+                    <td style={{padding: '12px 15px', fontWeight: 'bold', color: '#b45309', background: '#fffbeb'}}>{r.qty_sent || r.qtySent || '-'}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
+  const filteredMos = Object.keys(moCache).filter(mo => 
+    mo.toUpperCase().includes(searchQuery.toUpperCase())
+  );
 
   return (
-    <div className="scrap-module">
-      <div className="module-header">
-        <h2>After Channel Module</h2>
+    <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
+      
+      <datalist id="depts-list">
+        <option value="Channel" /><option value="Accurate" /><option value="CPS" />
+        <option value="Rework" /><option value="Dismantling" /><option value="Packaging" />
+        <option value="FPS" /><option value="Scrap" />
+      </datalist>
+
+      <datalist id="channels-list">
+        {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
+      </datalist>
+
+      <div className="ac-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #cbd5e1', paddingBottom: '10px'}}>
+        <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing</h1>
+        <div className="tab-buttons" style={{display: 'flex', gap: '10px'}}>
+          {['accurate', 'cps', 'rework', 'vibration'].map(tab => (
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => setActiveTab(tab)} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
+              {tab.toUpperCase()}
+            </button>
+          ))}
+          <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === 'summary' ? '#16a34a' : '#bbf7d0', color: activeTab === 'summary' ? '#fff' : '#14532d', border: 'none', borderRadius: '4px', fontWeight: 'bold'}}>
+            📊 SUMMARY
+          </button>
+        </div>
       </div>
 
-      {/* Navigation Tabs Bar */}
-      <div className="sub-view-tabs">
-        <button className={`tab-btn ${activeTab === 'accurate' ? 'active-tab' : ''}`} onClick={() => setActiveTab('accurate')}>Accurate</button>
-        <button className={`tab-btn ${activeTab === 'cps' ? 'active-tab' : ''}`} onClick={() => setActiveTab('cps')}>CPS</button>
-        <button className={`tab-btn ${activeTab === 'rework' ? 'active-tab' : ''}`} onClick={() => setActiveTab('rework')}>Rework</button>
-        <button className={`tab-btn ${activeTab === 'vibration' ? 'active-tab' : ''}`} onClick={() => setActiveTab('vibration')}>Vibration</button>
-        <button className={`tab-btn ${activeTab === 'summary' ? 'active-tab' : ''}`} onClick={() => setActiveTab('summary')}>Summary</button>
-      </div>
-
-      {activeTab !== 'summary' ? (
-        <>
-          {editingId && (
-            <div className="edit-banner-alert">
-              Currently updating Log Record Reference ID: #{editingId}
+      {activeTab !== 'summary' && (
+        <div style={{marginBottom: '20px', background: '#f8fafc', padding: '15px', borderRadius: '8px', border: '1px solid #e2e8f0'}}>
+          <div style={{display: 'flex', gap: '20px'}}>
+            <div style={{flex: 1}}>
+              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>MO Number</label>
+              <input type="text" value={moNumber} onChange={(e) => setMoNumber(e.target.value)} onBlur={handleMoBlur} style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
             </div>
-          )}
-
-          {/* Master Sheet Sync Banner Cards */}
-          <div className="excel-master-tracker-card">
-            <div className="metadata-summary-flex">
-              <p>Master Sheet Variant: <span className="highlight-production-text">{masterMeta.variant}</span></p>
-              <p>Master Original Qty: <span className="highlight-production-text">{masterMeta.qty}</span></p>
+            <div style={{flex: 1}}>
+              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Variant</label>
+              {availableVariants.length > 0 ? (
+                <select value={selectedVariant} onChange={handleVariantChange} style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required>
+                  <option value="">-- Select Variant --</option>
+                  {availableVariants.map(v => <option key={v.type} value={v.type}>{v.type}</option>)}
+                </select>
+              ) : (
+                <input type="text" value={selectedVariant} onChange={(e) => setSelectedVariant(e.target.value)} placeholder="Manual Entry" style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+              )}
             </div>
-          </div>
-
-          <div className="forms-grid-split">
-            {/* Left Column Input Panel Form */}
-            <div className={`operation-card ${activeTab === 'accurate' || activeTab === 'rework' ? 'container-inbound' : 'container-outbound'}`}>
-              <h3>{activeTab.toUpperCase()} Entry Panel</h3>
-              <form onSubmit={handleSubmit}>
-                <div className="control-group">
-                  <label>MO Number</label>
-                  <input 
-                    type="text" 
-                    name="mo_number" 
-                    value={formData.mo_number} 
-                    onChange={handleInputChange}
-                    onBlur={(e) => handleMoBlur(e.target.value)}
-                    placeholder="Enter MO Number..." 
-                    required 
-                  />
-                </div>
-
-                <div className="control-group">
-                  <label>Bearing Variant</label>
-                  <input 
-                    type="text" 
-                    name="bearing_variant" 
-                    value={formData.bearing_variant} 
-                    onChange={handleInputChange}
-                    placeholder="Auto-filled from master sheets..." 
-                  />
-                </div>
-
-                <div className="control-group">
-                  <label>Quantity</label>
-                  <input 
-                    type="number" 
-                    name="quantity" 
-                    value={formData.quantity} 
-                    onChange={handleInputChange} 
-                    placeholder="Enter process volume..." 
-                    min="0"
-                    step="any"
-                    required 
-                  />
-                </div>
-
-                <div className="control-group">
-                  <label>Next Channel</label>
-                  <select name="next_channel" value={formData.next_channel} onChange={handleInputChange}>
-                    <option value="Next Process">Next Process</option>
-                    <option value="Scrap">Scrap</option>
-                    <option value="Rework">Rework</option>
-                    <option value="Hold">Hold</option>
-                  </select>
-                </div>
-
-                <div className="control-group">
-                  <label>Remarks</label>
-                  <input 
-                    type="text" 
-                    name="remarks" 
-                    value={formData.remarks} 
-                    onChange={handleInputChange} 
-                    placeholder="Enter additional log data notes..." 
-                  />
-                </div>
-
-                <button type="submit" className={`submit-btn ${activeTab === 'accurate' || activeTab === 'rework' ? 'btn-in' : 'btn-out'}`}>
-                  {editingId ? "Update Entry Log" : "Save Channel Entry"}
-                </button>
-                
-                {editingId && (
-                  <button type="button" className="submit-btn Trace-btn-override" onClick={resetForm} style={{ marginTop: '8px' }}>
-                    Cancel Edit
-                  </button>
-                )}
-              </form>
-            </div>
-
-            {/* Right Column Continuous Log Records Table */}
-            <div className="table-wrapper structural-history-space">
-              <h3>Recent Channel Submissions Log</h3>
-              <div className="scrollable-summary-viewport">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>MO Number</th>
-                      <th>Variant</th>
-                      <th>Quantity</th>
-                      <th>Next Channel</th>
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {loading ? (
-                      <tr><td colSpan="5" className="empty-notice">Loading production tracking data records...</td></tr>
-                    ) : entries.length === 0 ? (
-                      <tr><td colSpan="5" className="empty-notice">No stored logging files available for this section view.</td></tr>
-                    ) : (
-                      entries.map((item) => (
-                        <tr key={item.id}>
-                          <td><strong>{item.mo_number}</strong></td>
-                          <td>{item.bearing_variant || '-'}</td>
-                          <td className={item.next_channel === 'Scrap' ? 'text-out-color' : 'text-in-color'}>
-                            {item.quantity}
-                          </td>
-                          <td>
-                            <span className={`badge-indicator ${item.next_channel === 'Scrap' ? 'outbound-marker' : 'inbound-marker'}`}>
-                              {item.next_channel}
-                            </span>
-                          </td>
-                          <td>
-                            <button className="row-action-btn edit-tint" title="Edit" onClick={() => handleEdit(item)}>✏️</button>
-                            <button className="row-action-btn delete-tint" title="Delete" onClick={() => handleDelete(item.id)}>🗑️</button>
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
+            <div style={{flex: 1}}>
+              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Target Production Qty</label>
+              <input type="text" value={actualProductionQty > 0 ? actualProductionQty.toLocaleString() : '0'} readOnly style={{width: '100%', padding: '8px', background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: '4px', fontWeight: 'bold', color: '#16a34a'}} />
             </div>
           </div>
-        </>
-      ) : (
-        /* Summary Grid View Table Matrix layout pane */
-        <div className="table-wrapper structural-history-space">
-          <div className="header-badge-row">
-            <h3>Master Aggregate Channels Summary</h3>
+
+          <div style={{display: 'flex', gap: '20px', marginTop: '15px', paddingTop: '15px', borderTop: '1px dashed #cbd5e1'}}>
+            <button type="button" onClick={() => setEntryMode('IN')} style={{padding: '8px 20px', background: entryMode === 'IN' ? '#2563eb' : '#fff', color: entryMode === 'IN' ? '#fff' : '#2563eb', border: '2px solid #2563eb', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer'}}>
+              📥 LOG IN (Receiving)
+            </button>
+            <button type="button" onClick={() => setEntryMode('OUT')} style={{padding: '8px 20px', background: entryMode === 'OUT' ? '#ea580c' : '#fff', color: entryMode === 'OUT' ? '#fff' : '#ea580c', border: '2px solid #ea580c', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer'}}>
+              📤 LOG OUT (Dispatch)
+            </button>
           </div>
-          <div className="scrollable-summary-viewport" style={{ maxHeight: '520px' }}>
-            <table>
+        </div>
+      )}
+
+      <div className="ac-content">
+        
+        {/* ================= ACCURATE TAB ================= */}
+        {activeTab === 'accurate' && (
+          <div>
+            <form onSubmit={(e) => handleFormSubmit(e, 'accurate')}>
+              {entryMode === 'IN' ? (
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Accurate - Receiving Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>In Date</label><input type="date" name="inDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>PC No</label><input type="text" name="pcNo" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Material In From</label><input list="depts-list" name="materialInFrom" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty In</label><input type="number" name="qtyIn" style={{width:'100%', padding:'6px'}} required/></div>
+                  </div>
+                </fieldset>
+              ) : (
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>Accurate - Dispatch Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Next Station</label><input list="depts-list" name="nextStation" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                  </div>
+                </fieldset>
+              )}
+              <button type="submit" style={{marginTop:'15px', padding:'10px 25px', background: entryMode==='IN'?'#2563eb':'#ea580c', color:'#fff', border:'none', borderRadius:'4px', fontWeight:'bold', cursor:'pointer'}}>Save Entry</button>
+            </form>
+            {renderDepartmentLedger('accurate', 'Accurate Processing')}
+          </div>
+        )}
+
+        {/* ================= CPS TAB ================= */}
+        {activeTab === 'cps' && (
+          <div>
+            <form onSubmit={(e) => handleFormSubmit(e, 'cps')}>
+              {entryMode === 'IN' ? (
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>CPS Assembly - Receiving Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Item</label><select name="itemType" style={{width:'100%', padding:'6px'}}><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>
+                    <div><label>In Date</label><input type="date" name="inDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift In</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>RC No</label><input type="text" name="rcNo" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Material In From</label><input list="depts-list" name="materialInFrom" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Channel</label><input list="channels-list" name="channel" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty In</label><input type="number" name="qtyIn" style={{width:'100%', padding:'6px'}} required/></div>
+                  </div>
+                </fieldset>
+              ) : (
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>CPS Assembly - Dispatch Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Next Station</label><input list="depts-list" name="nextStation" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift Out</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                  </div>
+                </fieldset>
+              )}
+              <button type="submit" style={{marginTop:'15px', padding:'10px 25px', background: entryMode==='IN'?'#2563eb':'#ea580c', color:'#fff', border:'none', borderRadius:'4px', fontWeight:'bold', cursor:'pointer'}}>Save Entry</button>
+            </form>
+            {renderDepartmentLedger('cps', 'CPS Assembly')}
+          </div>
+        )}
+
+        {/* ================= REWORK TAB ================= */}
+        {activeTab === 'rework' && (
+          <div>
+            <form onSubmit={(e) => handleFormSubmit(e, 'rework')}>
+              {entryMode === 'IN' ? (
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Rework Station - Receiving Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>In Date</label><input type="date" name="inDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Channel</label><input list="channels-list" name="channel" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Line Segment</label><input type="text" name="lineType" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Material In From</label><input list="depts-list" name="materialInFrom" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty In</label><input type="number" name="qtyIn" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Rework Activity</label><input type="text" name="reworkActivity" style={{width:'100%', padding:'6px'}}/></div>
+                  </div>
+                </fieldset>
+              ) : (
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>Rework Station - Dispatch Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Next Station</label><input list="depts-list" name="nextStation" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Operator</label><input type="text" name="operator" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Remark</label><input type="text" name="remark" style={{width:'100%', padding:'6px'}}/></div>
+                  </div>
+                </fieldset>
+              )}
+              <button type="submit" style={{marginTop:'15px', padding:'10px 25px', background: entryMode==='IN'?'#2563eb':'#ea580c', color:'#fff', border:'none', borderRadius:'4px', fontWeight:'bold', cursor:'pointer'}}>Save Entry</button>
+            </form>
+            {renderDepartmentLedger('rework', 'Rework Station')}
+          </div>
+        )}
+
+        {/* ================= VIBRATION / DISMANTLING TAB ================= */}
+        {activeTab === 'vibration' && (
+          <div>
+            <form onSubmit={(e) => handleFormSubmit(e, 'dismantling')}>
+              {entryMode === 'IN' ? (
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Vibration Dismantling - Receiving Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>In Date</label><input type="date" name="inDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift</label><select name="shiftIn" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Channel</label><input list="channels-list" name="channel" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Line Segment</label><input type="text" name="lineType" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Reason</label><select name="reason" style={{width:'100%', padding:'6px'}}><option></option><option>D4</option><option>OD Mark</option></select></div>
+                    <div><label>Material In From</label><input list="depts-list" name="materialInFrom" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty In</label><input type="number" name="qtyIn" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Activity</label><select name="activity" style={{width:'100%', padding:'6px'}}><option></option><option>Ball Remove</option><option>Rivet Press</option></select></div>
+                    <div><label>Ring Type</label><select name="ringType" style={{width:'100%', padding:'6px'}}><option></option><option>IR</option><option>OR</option></select></div>
+                  </div>
+                </fieldset>
+              ) : (
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>Vibration Dismantling - Output Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Ball Scrap</label><input type="number" name="ballScrap" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Cage/Seal Scrap</label><input type="number" name="cageSealScrap" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Next Station</label><input list="depts-list" name="nextStation" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift</label><select name="shiftOut" style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Operator</label><input type="text" name="operator" style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Remark</label><input type="text" name="remark" style={{width:'100%', padding:'6px'}}/></div>
+                  </div>
+                </fieldset>
+              )}
+              <button type="submit" style={{marginTop:'15px', padding:'10px 25px', background: entryMode==='IN'?'#2563eb':'#ea580c', color:'#fff', border:'none', borderRadius:'4px', fontWeight:'bold', cursor:'pointer'}}>Save Entry</button>
+            </form>
+            {renderDepartmentLedger('dismantling', 'Vibration/Dismantling')}
+          </div>
+        )}
+
+        {/* ================= SUMMARY VIEW ================= */}
+        {activeTab === 'summary' && (
+          <div className="summary-view" style={{background: '#fff', padding: '25px', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)', border: '1px solid #e2e8f0'}}>
+            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px'}}>
+              <h2 style={{fontSize: '1.4em', margin: 0, color: '#0f172a', fontWeight: 'bold'}}>Active Master Orders (MO) Reference Index</h2>
+              <input type="text" placeholder="Search Master Order (MO)..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{padding: '10px 15px', width: '350px', border: '2px solid #cbd5e1', borderRadius: '6px', outline: 'none', transition: 'border-color 0.2s'}} onFocus={(e) => e.target.style.borderColor = '#2563eb'} onBlur={(e) => e.target.style.borderColor = '#cbd5e1'} />
+            </div>
+            
+            <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em', border: '1px solid #cbd5e1'}}>
               <thead>
-                <tr>
-                  <th>MO Number</th>
-                  <th>Bearing Variant</th>
-                  <th>Original Qty</th>
-                  <th>Accurate Qty</th>
-                  <th>CPS Qty</th>
-                  <th>Rework Qty</th>
-                  <th>Vibration Qty</th>
-                  <th style={{ backgroundColor: '#fee2e2', color: '#b91c1c' }}>Total Scrap Sum</th>
+                <tr style={{background: '#1e293b', color: '#f8fafc'}}>
+                  <th style={{padding: '15px', fontWeight: '600', borderRight: '1px solid #334155'}}>Master Order (MO) ID</th>
+                  <th style={{padding: '15px', fontWeight: '600', borderRight: '1px solid #334155'}}>Registered Specifications Count</th>
+                  <th style={{padding: '15px', fontWeight: '600', textAlign: 'center'}}>Audit Control</th>
                 </tr>
               </thead>
               <tbody>
-                {loading ? (
-                  <tr><td colSpan="8" className="empty-notice">Calculating matching database row metrics...</td></tr>
-                ) : summaryData.length === 0 ? (
-                  <tr><td colSpan="8" className="empty-notice">No records found to compile matrix.</td></tr>
-                ) : (
-                  summaryData.map((row, idx) => (
-                    <tr key={idx}>
-                      <td><strong>{row.mo_number}</strong></td>
-                      <td>{row.bearing_variant}</td>
-                      <td>{row.original_qty}</td>
-                      <td>{row.accurate_qty}</td>
-                      <td>{row.cps_qty}</td>
-                      <td>{row.rework_qty}</td>
-                      <td>{row.vibration_qty}</td>
-                      <td style={{ backgroundColor: '#fef2f2', fontWeight: 'bold', color: '#dc2626' }}>
-                        {row.scrap_sum}
-                      </td>
-                    </tr>
-                  ))
-                )}
+                {filteredMos.map((mo, index) => (
+                  <tr key={mo} style={{background: index % 2 === 0 ? '#ffffff' : '#f8fafc', borderBottom: '1px solid #cbd5e1', transition: 'background 0.2s'}} onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'} onMouseLeave={(e) => e.currentTarget.style.background = index % 2 === 0 ? '#ffffff' : '#f8fafc'}>
+                    <td style={{padding: '15px', fontWeight: 'bold', color: '#2563eb', borderRight: '1px solid #cbd5e1'}}>{mo}</td>
+                    <td style={{padding: '15px', color: '#475569', borderRight: '1px solid #cbd5e1'}}>{moCache[mo] ? moCache[mo].length : 0} Variant Matrices Compiled</td>
+                    <td style={{padding: '15px', textAlign: 'center'}}>
+                      <button onClick={() => openSummaryModal(mo)} style={{padding: '8px 16px', background: '#0284c7', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', boxShadow: '0 2px 4px rgba(0,0,0,0.1)'}}>
+                        View Detailed Pipeline
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {selectedMoDetail && (
+        <div className="modal-backdrop" style={{position: 'fixed', top:0, left:0, width:'100vw', height:'100vh', background:'rgba(15, 23, 42, 0.75)', display:'flex', justifyContent:'center', alignItems:'center', zIndex: 1000}}>
+          <div className="modal-window" style={{background:'#fff', padding:'30px', borderRadius:'10px', width:'95%', maxWidth:'1300px', maxHeight:'85vh', overflowY:'auto', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'}}>
+            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'3px solid #0f172a', paddingBottom:'15px', marginBottom:'25px'}}>
+              <h2 style={{margin: 0, color: '#0f172a'}}>Cross-Department Flow Trace: <span style={{color: '#2563eb'}}>{selectedMoDetail.mo}</span></h2>
+              <button onClick={() => setSelectedMoDetail(null)} style={{fontSize:'2em', cursor:'pointer', border:'none', background:'none', color: '#64748b', lineHeight: '1'}}>&times;</button>
+            </div>
+            
+            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.9em', border: '1px solid #94a3b8'}}>
+              <thead>
+                <tr style={{background: '#334155', color: '#fff'}}>
+                  <th style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>Variant Model</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#166534'}}>Actual Prod Qty</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Accurate In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Accurate Out</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS Out</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>Rework In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>Rework Out</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dismantle In</th>
+                  <th style={{border: '1px solid #475569', padding: '12px', background: '#991b1b'}}>Scrap Sum</th>
+                </tr>
+              </thead>
+              <tbody>
+                {selectedMoDetail.breakdown.map((row, i) => (
+                  <tr key={i} style={{background: i % 2 === 0 ? '#fff' : '#f1f5f9', borderBottom: '1px solid #cbd5e1', textAlign: 'center'}}>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', fontWeight:'bold', textAlign:'left', color: '#334155'}}>{row.variant}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', background:'#dcfce7', color:'#166534', fontWeight:'bold'}}>{row.prodQty > 0 ? row.prodQty.toLocaleString() : '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accOut || '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsOut || '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwOut || '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disIn || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', background: '#fee2e2', color:'#991b1b', fontWeight: 'bold'}}>{row.scrapSum || '-'}</td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -372,4 +554,6 @@ export default function AfterChannelModule() {
       )}
     </div>
   );
-}
+};
+
+export default Afterchannel;

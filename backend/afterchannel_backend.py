@@ -1,328 +1,323 @@
-from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
-from typing import Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import os
+import io
+import time
+from typing import Optional, List
 import pandas as pd
 import requests
-import io
-import threading
-import time
-import re
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from fastapi import APIRouter, HTTPException, Query, Path
+from pydantic import BaseModel
 
 router = APIRouter()
+
+# Environment Configurations
 DATABASE_URL = os.getenv("DATABASE_URL")
 DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
 TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
 
-# --- Global Caches & State ---
-MASTER_DATA_CACHE = {}
-IS_UPDATING = False
-INITIALIZED = False
-CACHE_DURATION_MINUTES = 10
+# Isolated Local Caches to prevent memory collision
+MASTER_DATA_CACHE = {"dgbb": None, "trb": None, "last_updated": 0}
+CACHE_DURATION_SECONDS = 300  # 5 Minutes cache TTL
 
-# --- Pydantic Models (ALL OPTIONAL FIELDS TO ALLOW SPLIT IN/OUT LOGS) ---
-class AccurateEntry(BaseModel):
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    pc: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-
-class CpsEntry(BaseModel):
-    mo: str
-    type: str
-    item: Optional[str] = None
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    rcNo: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    channel: Optional[str] = None
-    qtyIn: Optional[int] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-
-class ReworkEntry(BaseModel):
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    channel: Optional[str] = None
-    lineSegment: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    reworkActivity: Optional[str] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-    operator: Optional[str] = None
-    remark: Optional[str] = None
-
-class VibrationEntry(BaseModel):
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    channel: Optional[str] = None
-    lineSegment: Optional[str] = None
-    reason: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    activity: Optional[str] = None
-    ballScrap: Optional[int] = None
-    cageSealScrap: Optional[int] = None
-    ringType: Optional[str] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-    operator: Optional[str] = None
-    remark: Optional[str] = None
-
-# --- Database Helper ---
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
-# --- Excel Loading Helpers ---
-def find_column(df, patterns):
-    cols = [str(c).strip() for c in df.columns]
-    for p in patterns:
-        # Aggressively strip all punctuation, spaces, and casing to force a match
-        norm_p = re.sub(r'[^a-z0-9]', '', p.lower())
-        for c in cols:
-            norm_c = re.sub(r'[^a-z0-9]', '', c.lower())
-            if norm_c == norm_p: 
-                return c
-    return None
-
-
-
-def load_excel_sheets(url):
-    if not url: return {}
+def init_db():
+    """Initializes dedicated isolated persistent storage for each department."""
+    if not DATABASE_URL:
+        print("Warning: DATABASE_URL environment variable is not defined.")
+        return
     try:
-        resp = requests.get(url, timeout=45)
-        if resp.status_code != 200: return {}
-        content = io.BytesIO(resp.content)
-        try:
-            xls = pd.ExcelFile(content, engine='calamine')
-        except ImportError:
-            xls = pd.ExcelFile(content)
-        time.sleep(0.05)
-        return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor()
+        departments = ["accurate", "cps", "rework", "vibration"]
+        for dept in departments:
+            cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS {dept}_entries (
+                    id SERIAL PRIMARY KEY,
+                    mo_number VARCHAR(100) NOT NULL,
+                    bearing_variant VARCHAR(255),
+                    quantity NUMERIC DEFAULT 0,
+                    next_channel VARCHAR(100),
+                    remarks TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+        conn.commit()
+        cursor.close()
+        conn.close()
     except Exception as e:
-        print(f"⚠️ Error reading workbook stream for Afterchannel: {e}")
-        return {}
+        print(f"Database initialization error: {e}")
 
-def process_mo_sheets(sheets_dict, temp_cache):
-    for sheet_name, df in sheets_dict.items():
-        time.sleep(0.01) 
-        if df.empty: continue
+# Run database setup automatically on initialization
+init_db()
+
+def fetch_master_sheets():
+    """Fetches and caches master production tracking spreadsheets."""
+    now = time.time()
+    if MASTER_DATA_CACHE["last_updated"] + CACHE_DURATION_SECONDS > now and MASTER_DATA_CACHE["dgbb"] is not None:
+        return MASTER_DATA_CACHE["dgbb"], MASTER_DATA_CACHE["trb"]
+
+    dgbb_df = pd.DataFrame()
+    trb_df = pd.DataFrame()
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    if DGBB_MASTER_URL:
+        try:
+            r = requests.get(DGBB_MASTER_URL, headers=headers, timeout=15)
+            if r.status_code == 200:
+                if DGBB_MASTER_URL.endswith('.csv'):
+                    dgbb_df = pd.read_csv(io.BytesIO(r.content))
+                else:
+                    dgbb_df = pd.read_excel(io.BytesIO(r.content))
+        except Exception as e:
+            print(f"Error reading DGBB Master: {e}")
+
+    if TRB_MASTER_URL:
+        try:
+            r = requests.get(TRB_MASTER_URL, headers=headers, timeout=15)
+            if r.status_code == 200:
+                if TRB_MASTER_URL.endswith('.csv'):
+                    trb_df = pd.read_csv(io.BytesIO(r.content))
+                else:
+                    trb_df = pd.read_excel(io.BytesIO(r.content))
+        except Exception as e:
+            print(f"Error reading TRB Master: {e}")
+
+    MASTER_DATA_CACHE["dgbb"] = dgbb_df
+    MASTER_DATA_CACHE["trb"] = trb_df
+    MASTER_DATA_CACHE["last_updated"] = now
+    return dgbb_df, trb_df
+
+def find_mo_metadata(mo_number: str):
+    """
+    Scans data sheets to parse total original quantities and bearing variants.
+    Standardizes casing and handles potential text format padding.
+    """
+    dgbb_df, trb_df = fetch_master_sheets()
+    target_mo = str(mo_number).strip().lower()
+
+    if not target_mo:
+        return {"found": False, "qty": 0, "bearing_variant": "Not Found"}
+
+    for df in [dgbb_df, trb_df]:
+        if df is None or df.empty:
+            continue
         
-        mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
-        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
-        # EXPANDED QTY SEARCH to fix the "0 Target Qty" bug
-        qty_col = find_column(df, ["qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "production", "total", "reqqty", "required"])
+        # Normalize column maps to handle variations like 'MO No' or 'Qty'
+        normalized_cols = {str(col).strip().lower(): col for col in df.columns}
         
+        # Locate MO identification column
+        mo_col_key = None
+        for cand in ['mo number', 'mo_number', 'mo no', 'mo_no', 'mo', 'manufacturing order', 'mono']:
+            if cand in normalized_cols:
+                mo_col_key = normalized_cols[cand]
+                break
+        
+        if not mo_col_key:
+            continue
 
-        if not mo_col or not type_col: continue
-
-        target_cols = [c for c in [mo_col, type_col, qty_col] if c]
-        df_records = df[target_cols].to_dict('records')
-
-        for row in df_records:
-            mo_val = str(row.get(mo_col, "")).strip().upper()
-            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
+        # Look for matching row entries
+        matched_rows = df[df[mo_col_key].astype(str).str.strip().str.lower() == target_mo]
+        if not matched_rows.empty:
+            target_row = matched_rows.iloc[0]
             
-            type_val = str(row.get(type_col, "")).strip().upper()
-            if not type_val or type_val in ["NAN", "NONE", ""]: continue
-
-            raw_qty = row.get(qty_col, 0) if qty_col else 0
-            try:
-                qty_val = int(float(str(raw_qty).replace(',', '')))
-            except (ValueError, TypeError):
-                qty_val = 0
-
-            if mo_val not in temp_cache:
-                temp_cache[mo_val] = []
-            
-            variant_exists = False
-            for item in temp_cache[mo_val]:
-                if item['type'] == type_val:
-                    item['qty'] += qty_val
-                    variant_exists = True
+            # Locate quantity data target
+            qty_col_key = None
+            for cand in ['qty', 'quantity', 'mo qty', 'mo_qty', 'order qty', 'production qty', 'volume']:
+                if cand in normalized_cols:
+                    qty_col_key = normalized_cols[cand]
                     break
             
-            if not variant_exists:
-                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
+            # Locate bearing model target
+            variant_col_key = None
+            for cand in ['bearing', 'variant', 'bearing_variant', 'bearing variant', 'part number', 'part_number', 'model']:
+                if cand in normalized_cols:
+                    variant_col_key = normalized_cols[cand]
+                    break
 
-# --- Background Task ---
-def process_master_data():
-    global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED
-    if IS_UPDATING: return
-    IS_UPDATING = True
+            # Parse structural metrics safely
+            parsed_qty = 0
+            if qty_col_key:
+                try:
+                    val = target_row[qty_col_key]
+                    parsed_qty = float(pd.to_numeric(val, errors='coerce'))
+                    if pd.isna(parsed_qty):
+                        parsed_qty = 0
+                except:
+                    parsed_qty = 0
 
+            parsed_variant = "Unknown"
+            if variant_col_key:
+                parsed_variant = str(target_row[variant_col_key]).strip()
+
+            return {"found": True, "qty": parsed_qty, "bearing_variant": parsed_variant}
+            
+    return {"found": False, "qty": 0, "bearing_variant": "Not Found"}
+
+# Data Schemas
+class DepartmentEntryPayload(BaseModel):
+    mo_number: str
+    bearing_variant: Optional[str] = None
+    quantity: float
+    next_channel: Optional[str] = None
+    remarks: Optional[str] = None
+
+@router.get("/lookup-mo")
+def lookup_mo(mo_number: str = Query(..., description="The MO reference string")):
+    """Exposes real-time verification to prevent manual data tracking mistakes."""
+    return find_mo_metadata(mo_number)
+
+@router.get("/entries/{dept}")
+def get_department_entries(dept: str = Path(..., description="Target department standard name")):
+    if dept not in ["accurate", "cps", "rework", "vibration"]:
+        raise HTTPException(status_code=400, detail="Invalid department tracking target context.")
     try:
-        temp_cache = {}
-        print("🔄 Afterchannel: Fetching Excel streams...")
-        
-        dgbb_sheets = load_excel_sheets(DGBB_MASTER_URL)
-        trb_sheets = load_excel_sheets(TRB_MASTER_URL)
-
-        process_mo_sheets(dgbb_sheets, temp_cache)
-        process_mo_sheets(trb_sheets, temp_cache)
-
-        MASTER_DATA_CACHE = temp_cache
-        print(f"✅ Afterchannel: Successfully mapped {len(MASTER_DATA_CACHE)} unique MOs.")
-    except Exception as e:
-        print(f"❌ Afterchannel Cache Compilation Fault: {str(e)}")
-    finally:
-        INITIALIZED = True
-        IS_UPDATING = False
-
-def background_refresh_loop():
-    while True:
-        try:
-            process_master_data()
-        except Exception as e:
-            print(f"Afterchannel Background thread error: {e}")
-        time.sleep(CACHE_DURATION_MINUTES * 60)
-
-threading.Thread(target=background_refresh_loop, daemon=True).start()
-
-# --- API Endpoints ---
-
-@router.get("/api/mo-lookup")
-def mo_lookup(refresh: Optional[str] = Query(None)):
-    if refresh == "true":
-        process_master_data()
-    if not INITIALIZED:
-        return {"status": "initializing", "message": "Compiling data matrices...", "data": {}}
-    return {"status": "success", "data": MASTER_DATA_CACHE}
-
-@router.get("/api/afterchannel/summary_ledgers")
-def get_summary_ledgers():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
-    try:
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM accurate_ledger")
-        accurate = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM cps_ledger")
-        cps = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, qty_sent FROM rework_ledger")
-        rework = cursor.fetchall()
-        
-        cursor.execute("SELECT upper(mo) as mo, upper(bearing_type) as type, qty_in, ball_scrap, cage_seal_scrap FROM vibration_dismantling_ledger")
-        dismantling = cursor.fetchall()
-
-        return {
-            "status": "success",
-            "data": {
-                "accurate": accurate,
-                "cps": cps,
-                "rework": rework,
-                "dismantling": dismantling
-            }
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
+        cursor.execute(f"SELECT * FROM {dept}_entries ORDER BY id DESC;")
+        records = cursor.fetchall()
         cursor.close()
         conn.close()
+        return records
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# FIXED 500 ERRORS: Removed NULLIF, explicitly casted dates in Python to prevent Postgres type ambiguity
-@router.post("/api/afterchannel/accurate")
-def submit_accurate(entry: AccurateEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+@router.post("/entries/{dept}")
+def create_department_entry(dept: str, payload: DepartmentEntryPayload):
+    if dept not in ["accurate", "cps", "rework", "vibration"]:
+        raise HTTPException(status_code=400, detail="Invalid department selection context.")
+    
+    # Fallback to master file if frontend does not send variant explicitly
+    meta = find_mo_metadata(payload.mo_number)
+    variant = payload.bearing_variant or (meta["bearing_variant"] if meta["found"] else "Unknown")
+
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
-
-        cursor.execute("""
-            INSERT INTO accurate_ledger (mo, bearing_type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s::date, %s)
-        """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            INSERT INTO {dept}_entries (mo_number, bearing_variant, quantity, next_channel, remarks)
+            VALUES (%s, %s, %s, %s, %s) RETURNING *;
+        """, (payload.mo_number, variant, payload.quantity, payload.next_channel, payload.remarks))
+        inserted_row = cursor.fetchone()
         conn.commit()
-        return {"status": "success", "message": "Accurate entry logged"}
-    except Exception as e:
-        conn.rollback()
-        print("DB Error:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
         cursor.close()
         conn.close()
+        return inserted_row
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/afterchannel/cps")
-def submit_cps(entry: CpsEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+@router.put("/entries/{dept}/{entry_id}")
+def update_department_entry(dept: str, entry_id: int, payload: DepartmentEntryPayload):
+    if dept not in ["accurate", "cps", "rework", "vibration"]:
+        raise HTTPException(status_code=400, detail="Invalid department context.")
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
-
-        cursor.execute("""
-            INSERT INTO cps_ledger (mo, bearing_type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out)
-            VALUES (%s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s::date, %s)
-        """, (entry.mo, entry.type, entry.item, in_d, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            UPDATE {dept}_entries 
+            SET mo_number = %s, bearing_variant = %s, quantity = %s, next_channel = %s, remarks = %s
+            WHERE id = %s RETURNING *;
+        """, (payload.mo_number, payload.bearing_variant, payload.quantity, payload.next_channel, payload.remarks, entry_id))
+        updated_row = cursor.fetchone()
+        if not updated_row:
+            cursor.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Requested record was not found.")
         conn.commit()
-        return {"status": "success", "message": "CPS entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
         cursor.close()
         conn.close()
+        return updated_row
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/afterchannel/rework")
-def submit_rework(entry: ReworkEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+@router.delete("/entries/{dept}/{entry_id}")
+def delete_department_entry(dept: str, entry_id: int):
+    if dept not in ["accurate", "cps", "rework", "vibration"]:
+        raise HTTPException(status_code=400, detail="Invalid operational department context.")
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
-
-        cursor.execute("""
-            INSERT INTO rework_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
+        cursor.execute(f"DELETE FROM {dept}_entries WHERE id = %s RETURNING id;", (entry_id,))
+        deleted_record = cursor.fetchone()
+        if not deleted_record:
+            cursor.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail="Target record not located.")
         conn.commit()
-        return {"status": "success", "message": "Rework entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
         cursor.close()
         conn.close()
+        return {"success": True, "deleted_id": entry_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/api/afterchannel/vibration")
-def submit_vibration(entry: VibrationEntry):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+@router.get("/summary")
+def get_master_summary_ledger():
+    """
+    Compiles distinct active orders and aggregates department quantities.
+    Calculates total scrap summation across all four operations.
+    """
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
-
-        cursor.execute("""
-            INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, line_type, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
-            VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-        """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.lineSegment, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.cageSealScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
-        conn.commit()
-        return {"status": "success", "message": "Vibration entry logged"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        cursor = conn.cursor()
+        
+        departments = ["accurate", "cps", "rework", "vibration"]
+        store = {}
+        distinct_mos = set()
+        
+        for dept in departments:
+            cursor.execute(f"SELECT * FROM {dept}_entries;")
+            rows = cursor.fetchall()
+            store[dept] = rows
+            for r in rows:
+                if r.get("mo_number"):
+                    distinct_mos.add(str(r["mo_number"]).strip())
+                    
         cursor.close()
         conn.close()
+        
+        compiled_output = []
+        
+        for mo in sorted(distinct_mos):
+            meta = find_mo_metadata(mo)
+            sheet_qty = meta["qty"] if meta["found"] else 0
+            variant_name = meta["bearing_variant"] if meta["found"] else "Unknown"
+            
+            # Sum regular quantities per station context
+            acc_total = sum(float(x["quantity"] or 0) for x in store["accurate"] if str(x["mo_number"]).strip() == mo)
+            cps_total = sum(float(x["quantity"] or 0) for x in store["cps"] if str(x["mo_number"]).strip() == mo)
+            rew_total = sum(float(x["quantity"] or 0) for x in store["rework"] if str(x["mo_number"]).strip() == mo)
+            vib_total = sum(float(x["quantity"] or 0) for x in store["vibration"] if str(x["mo_number"]).strip() == mo)
+            
+            # Calculate aggregate scrap values across all 4 departments for this MO
+            total_scrap_sum = 0
+            for dept in departments:
+                for record in store[dept]:
+                    if str(record["mo_number"]).strip() == mo:
+                        channel_value = str(record.get("next_channel") or "").strip().lower()
+                        if channel_value == "scrap":
+                            total_scrap_sum += float(record["quantity"] or 0)
+            
+            # Fallback for variant resolution
+            if variant_name == "Unknown" or variant_name == "Not Found":
+                for dept in departments:
+                    for x in store[dept]:
+                        if str(x["mo_number"]).strip() == mo and x.get("bearing_variant"):
+                            variant_name = x["bearing_variant"]
+                            break
+                    if variant_name != "Unknown" and variant_name != "Not Found":
+                        break
+
+            compiled_output.append({
+                "mo_number": mo,
+                "bearing_variant": variant_name,
+                "original_qty": sheet_qty,
+                "accurate_qty": acc_total,
+                "cps_qty": cps_total,
+                "rework_qty": rew_total,
+                "vibration_qty": vib_total,
+                "scrap_sum": total_scrap_sum
+            })
+            
+        return compiled_output
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

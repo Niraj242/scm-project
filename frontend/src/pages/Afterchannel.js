@@ -45,16 +45,28 @@ const Afterchannel = () => {
     }
   };
 
+  // --- NEW AGGRESSIVE DATA EXTRACTORS ---
+  // Searches the JSON for ANY key that looks like a quantity or type
+  const getQtyFromRow = (row) => {
+    const key = Object.keys(row).find(k => /qty|quantity|target|plan|prod|total/i.test(k.replace(/[^a-zA-Z]/g, '')));
+    let val = key ? row[key] : 0;
+    if (typeof val === 'string') val = val.replace(/,/g, '');
+    return parseFloat(val) || 0;
+  };
+
+  const getTypeFromRow = (row) => {
+    const key = Object.keys(row).find(k => /type|variant|bearing|item|desc|part/i.test(k.replace(/[^a-zA-Z]/g, '')));
+    return key ? String(row[key]).trim() : '';
+  };
+
   const calculateProduction = (rawRows, variantToMatch) => {
     if (!rawRows || !Array.isArray(rawRows)) return 0;
     const cleanMatch = String(variantToMatch || '').trim().toUpperCase();
     
     return rawRows.reduce((sum, r) => {
-      const rowType = String(r.type || r.Type || '').trim().toUpperCase();
+      const rowType = getTypeFromRow(r).toUpperCase();
       if (rowType === cleanMatch) {
-        let val = r.qty || r.production || 0;
-        if (typeof val === 'string') val = val.replace(/,/g, '');
-        return sum + (parseFloat(val) || 0);
+        return sum + getQtyFromRow(r);
       }
       return sum;
     }, 0);
@@ -64,7 +76,7 @@ const Afterchannel = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
       const rawRows = moCache[key];
-      const uniqueVariants = [...new Set(rawRows.map(r => String(r.type || '').trim()))].filter(Boolean);
+      const uniqueVariants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
       setAvailableVariants(uniqueVariants.map(type => ({ type })));
 
       if (uniqueVariants.length === 1) {
@@ -136,26 +148,35 @@ const Afterchannel = () => {
 
   const openSummaryModal = (mo) => {
     const rawRows = moCache[mo] || [];
-    const variants = [...new Set(rawRows.map(r => String(r.type || '').trim()))].filter(Boolean);
+    const variants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
     
+    const isScrapStation = (station) => String(station || '').trim().toUpperCase() === 'SCRAP';
+
     const breakdown = variants.map(v => {
       const prodQty = calculateProduction(rawRows, v);
       
       const accLedger = ledgers.accurate.filter(l => l.mo === mo && l.type === v);
       const accIn = accLedger.reduce((sum, l) => sum + (Number(l.qty_in) || 0), 0);
       const accOut = accLedger.reduce((sum, l) => sum + (Number(l.qty_sent) || 0), 0);
+      const accScrap = accLedger.reduce((sum, l) => isScrapStation(l.next_station) ? sum + (Number(l.qty_sent) || 0) : sum, 0);
 
       const cpsLedger = ledgers.cps.filter(l => l.mo === mo && l.type === v);
       const cpsIn = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_in) || 0), 0);
       const cpsOut = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_sent) || 0), 0);
+      const cpsScrap = cpsLedger.reduce((sum, l) => isScrapStation(l.next_station) ? sum + (Number(l.qty_sent) || 0) : sum, 0);
 
       const rwLedger = ledgers.rework.filter(l => l.mo === mo && l.type === v);
       const rwIn = rwLedger.reduce((sum, l) => sum + (Number(l.qty_in) || 0), 0);
       const rwOut = rwLedger.reduce((sum, l) => sum + (Number(l.qty_sent) || 0), 0);
+      const rwScrap = rwLedger.reduce((sum, l) => isScrapStation(l.next_station) ? sum + (Number(l.qty_sent) || 0) : sum, 0);
 
       const disLedger = ledgers.dismantling.filter(l => l.mo === mo && l.type === v);
       const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in) || 0), 0);
-      const scrapSum = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap) || 0) + (Number(l.cage_seal_scrap) || 0), 0);
+      const disScrap = disLedger.reduce((sum, l) => isScrapStation(l.next_station) ? sum + (Number(l.qty_sent) || 0) : sum, 0);
+      const disInternalScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap) || 0) + (Number(l.cage_seal_scrap) || 0), 0);
+
+      // Total scrap sum now includes internal dismantling scrap PLUS everything sent to "Scrap" from other depts
+      const scrapSum = accScrap + cpsScrap + rwScrap + disScrap + disInternalScrap;
 
       return {
         variant: v, prodQty,

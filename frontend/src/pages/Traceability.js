@@ -115,8 +115,11 @@ const Traceability = () => {
 
       {/* MAIN DASHBOARD */}
       {!loading && !isInitializing && (
-        <div className="table-wrapper">
-          <table className="trace-table">
+        /* 1. Add inline styles to your existing table-wrapper div */
+        <div className="table-wrapper" style={{ width: '100%', maxWidth: '100%', overflowX: 'auto', WebkitOverflowScrolling: 'touch', boxSizing: 'border-box' }}>
+          
+          /* 2. Add inline styles to your existing trace-table */
+          <table className="trace-table" style={{ minWidth: 'max-content', width: '100%', whiteSpace: 'nowrap', borderCollapse: 'collapse' }}>
             <thead>
               {/* Fixed colSpan Math: 4 + 2 + 2 + 2 + 1 = 11 */}
               <tr className="super-header">
@@ -126,6 +129,7 @@ const Traceability = () => {
                 <th colSpan="2" className="ch-head">Channel Section</th>
                 <th className="meta-head">Overall Status</th>
               </tr>
+       
               {/* Exactly 11 headers underneath */}
               <tr className="sub-header">
                 <th>MO Number</th>

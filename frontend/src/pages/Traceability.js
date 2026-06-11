@@ -82,7 +82,7 @@ const Traceability = () => {
   };
 
   return (
-    <div id="traceability-scoped-root" className="traceability-container" style={{ width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
+    <div className="traceability-container">
       <div className="header-section">
         <div>
           <h1>MO Traceability Tracking</h1>
@@ -115,30 +115,31 @@ const Traceability = () => {
 
       {/* MAIN DASHBOARD */}
       {!loading && !isInitializing && (
-        <div className="table-wrapper" style={{ overflowX: 'auto', width: '100%', WebkitOverflowScrolling: 'touch' }}>
-          <table className="trace-table" style={{ width: '100%', minWidth: 'max-content', borderCollapse: 'collapse' }}>
-            <thead>
+        /* Added vertical scroll height restriction here */
+        <div className="table-wrapper" style={{ maxHeight: '650px', overflowY: 'auto', position: 'relative' }}>
+          <table className="trace-table">
+            <thead style={{ position: 'sticky', top: 0, zIndex: 2 }}>
               {/* Fixed colSpan Math: 4 + 2 + 2 + 2 + 1 = 11 */}
               <tr className="super-header">
-                <th colSpan="4" className="meta-head" style={{ whiteSpace: 'nowrap' }}>Order Details</th>
-                <th colSpan="2" className="sho-head" style={{ whiteSpace: 'nowrap' }}>SHO Target</th>
-                <th colSpan="2" className="tb-head" style={{ whiteSpace: 'nowrap' }}>Transit Buffer</th>
-                <th colSpan="2" className="ch-head" style={{ whiteSpace: 'nowrap' }}>Channel Section</th>
-                <th className="meta-head" style={{ whiteSpace: 'nowrap' }}>Overall Status</th>
+                <th colSpan="4" className="meta-head">Order Details</th>
+                <th colSpan="2" className="sho-head">SHO Target</th>
+                <th colSpan="2" className="tb-head">Transit Buffer</th>
+                <th colSpan="2" className="ch-head">Channel Section</th>
+                <th className="meta-head">Overall Status</th>
               </tr>
               {/* Exactly 11 headers underneath */}
               <tr className="sub-header">
-                <th style={{ whiteSpace: 'nowrap' }}>MO Number</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Family / Base Product</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Component</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Target Qty</th>
-                <th style={{ whiteSpace: 'nowrap' }}>SHO Qty</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Date</th>
-                <th style={{ whiteSpace: 'nowrap' }}>TB Qty</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Date</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Chan Qty</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Date</th>
-                <th style={{ whiteSpace: 'nowrap' }}>Status</th>
+                <th>MO Number</th>
+                <th>Family / Base Product</th>
+                <th>Component</th>
+                <th>Target Qty</th>
+                <th>SHO Qty</th>
+                <th>Date</th>
+                <th>TB Qty</th>
+                <th>Date</th>
+                <th>Chan Qty</th>
+                <th>Date</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>
@@ -152,39 +153,39 @@ const Traceability = () => {
                         rowSpan={moSpan} 
                         className="merged-mo-cell fw-bold text-primary clickable-family-cell"
                         title="Click to view full variant breakdown"
-                        style={{ cursor: 'pointer', color: '#0284c7', whiteSpace: 'nowrap' }}
+                        style={{ cursor: 'pointer', color: '#0284c7' }}
                         onClick={() => handleViewDetail(row.mo)}
                       >
                         {row.mo}
                       </td>
                     )}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-mo-cell fw-bold" style={{ whiteSpace: 'nowrap' }}>
+                      <td rowSpan={moSpan} className="merged-mo-cell fw-bold">
                         {row.base_product}
                       </td>
                     )}
                     
                     {/* IM/OM Split Rows (These loop independently of moSpan) */}
-                    <td style={{ fontWeight: 600, color: row.component === 'IM' ? '#0369a1' : '#b45309', whiteSpace: 'nowrap' }}>
+                    <td style={{ fontWeight: 600, color: row.component === 'IM' ? '#0369a1' : '#b45309' }}>
                       {row.component}
                     </td>
-                    <td className="qty-cell" style={{ whiteSpace: 'nowrap' }}>{row.qty_req > 0 ? Number(row.qty_req).toLocaleString() : '-'}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>{row.sho_date || '-'}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
-                    <td style={{ whiteSpace: 'nowrap' }}>{row.tb_date || '-'}</td>
+                    <td className="qty-cell">{row.qty_req > 0 ? Number(row.qty_req).toLocaleString() : '-'}</td>
+                    <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
+                    <td>{row.sho_date || '-'}</td>
+                    <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
+                    <td>{row.tb_date || '-'}</td>
                     
                     {/* Re-Merged Channel Output */}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-channel-cell fw-bold text-success" style={{ whiteSpace: 'nowrap' }}>
+                      <td rowSpan={moSpan} className="merged-channel-cell fw-bold text-success">
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}
                       </td>
                     )}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-channel-cell" style={{ whiteSpace: 'nowrap' }}>{row.ch_date || '-'}</td>
+                      <td rowSpan={moSpan} className="merged-channel-cell">{row.ch_date || '-'}</td>
                     )}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-channel-cell" style={{ whiteSpace: 'nowrap' }}>
+                      <td rowSpan={moSpan} className="merged-channel-cell">
                         <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : ''}`}>
                           {row.status || 'In Process'}
                         </span>
@@ -195,7 +196,7 @@ const Traceability = () => {
               })}
               {filteredSummary.length === 0 && (
                 <tr>
-                  <td colSpan="11" className="empty-state" style={{ whiteSpace: 'nowrap', textAlign: 'center' }}>
+                  <td colSpan="11" className="empty-state">
                     No records found matching the current search criteria.
                   </td>
                 </tr>
@@ -207,8 +208,8 @@ const Traceability = () => {
 
       {/* DRILLDOWN MODAL - EXACT TBE SEQUENTIAL FORMAT */}
       {selectedMoFlow && (
-        <div className="modal-overlay" onClick={() => setSelectedMoFlow(null)} style={{ zIndex: 1000 }}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
+        <div className="modal-overlay" onClick={() => setSelectedMoFlow(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <div>
                 <h3>Variant Specific Location Breakdown</h3>
@@ -216,7 +217,7 @@ const Traceability = () => {
               </div>
               <button className="close-modal-btn" onClick={() => setSelectedMoFlow(null)}>&times;</button>
             </div>
-            <div className="modal-body" style={{ overflowY: 'auto', flex: 1 }}>
+            <div className="modal-body">
               {detailLoading ? (
                 <div className="detail-loading-box">
                   <div className="spinner"></div>
@@ -225,33 +226,33 @@ const Traceability = () => {
               ) : selectedMoFlow.flow_data.length === 0 ? (
                 <div className="empty-state">No independent deployment logs located for this MO structure.</div>
               ) : (
-                <div className="modal-table-wrapper" style={{ overflowX: 'auto', width: '100%', WebkitOverflowScrolling: 'touch' }}>
-                  <table className="detail-variant-table" style={{ width: '100%', minWidth: 'max-content', borderCollapse: 'collapse' }}>
-                    <thead>
+                <div className="modal-table-wrapper" style={{ maxHeight: '400px', overflowY: 'auto' }}>
+                  <table className="detail-variant-table">
+                    <thead style={{ position: 'sticky', top: 0, backgroundColor: '#fff', zIndex: 1 }}>
                       <tr>
-                        <th style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>MO / Channel Reference</th>
-                        <th style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>Department / Specific Location</th>
-                        <th style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>Product / Part Sub Variant</th>
-                        <th style={{ whiteSpace: 'nowrap' }}>In Date</th>
-                        <th style={{ whiteSpace: 'nowrap' }}>Out Date</th>
-                        <th style={{ whiteSpace: 'nowrap' }}>Qty</th>
-                        <th style={{ whiteSpace: 'nowrap' }}>Execution Status</th>
+                        <th style={{textAlign: 'left'}}>MO / Channel Reference</th>
+                        <th style={{textAlign: 'left'}}>Department / Specific Location</th>
+                        <th style={{textAlign: 'left'}}>Product / Part Sub Variant</th>
+                        <th>In Date</th>
+                        <th>Out Date</th>
+                        <th>Qty</th>
+                        <th>Execution Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {selectedMoFlow.flow_data.map((vRow, vIdx) => (
                         <tr key={vIdx} className="modal-data-row">
-                          <td className="text-start text-muted" style={{ fontSize: '0.95em', whiteSpace: 'nowrap' }}>{vRow.mo_ref || selectedMoFlow.mo}</td>
-                          <td className="text-start" style={{ whiteSpace: 'nowrap' }}>
+                          <td className="text-start text-muted" style={{fontSize: '0.95em'}}>{vRow.mo_ref || selectedMoFlow.mo}</td>
+                          <td className="text-start">
                             <span className={`dept-tag ${vRow.department ? vRow.department.toLowerCase().replace(/\s+/g, '-') : ''}`}>
                               {vRow.department || '-'}
                             </span>
                           </td>
-                          <td className="text-start fw-bold" style={{ color: '#0f172a', whiteSpace: 'nowrap' }}>{vRow.variant || '-'}</td>
-                          <td style={{ whiteSpace: 'nowrap' }}>{vRow.in_date || '-'}</td>
-                          <td style={{ whiteSpace: 'nowrap' }}>{vRow.out_date || '-'}</td>
-                          <td className="fw-bold" style={{ whiteSpace: 'nowrap' }}>{vRow.qty ? Number(vRow.qty).toLocaleString() : '0'}</td>
-                          <td style={{ whiteSpace: 'nowrap' }}>
+                          <td className="text-start fw-bold" style={{color: '#0f172a'}}>{vRow.variant || '-'}</td>
+                          <td>{vRow.in_date || '-'}</td>
+                          <td>{vRow.out_date || '-'}</td>
+                          <td className="fw-bold">{vRow.qty ? Number(vRow.qty).toLocaleString() : '0'}</td>
+                          <td>
                             <span className="execution-status-dot">{vRow.status || '-'}</span>
                           </td>
                         </tr>

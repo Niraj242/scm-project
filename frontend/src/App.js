@@ -17,7 +17,7 @@ import SupplierChatbot from "./pages/SupplierChatbot";
 import Traceability from "./pages/Traceability";
 // Import the NEW TBE Module
 import TBE from "./pages/TBE"; // <-- Added this import
-import Scrap from "./pages/Scrap";
+
 
 
 // 🔒 THE BOUNCER
@@ -43,7 +43,7 @@ function App() {
         {/* TRACEABILITY & TBE ROUTES */}
         <Route path="/traceability" element={<ProtectedRoute><Traceability /></ProtectedRoute>} />
         <Route path="/tbe" element={<ProtectedRoute><TBE /></ProtectedRoute>} /> 
-        <Route path="/scrap" element={<ProtectedRoute><Scrap /></ProtectedRoute>} />  
+         
 
         <Route path="/inventory" element={<ProtectedRoute><Inventory /></ProtectedRoute>} />
         <Route path="/production" element={<ProtectedRoute><Production /></ProtectedRoute>} />

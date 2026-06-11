@@ -134,7 +134,7 @@ const TBE = () => {
   };
 
   return (
-    <div className="traceability-container">
+    <div id="tbe-scoped-root" className="traceability-container" style={{ width: '100%', maxWidth: '100%', boxSizing: 'border-box' }}>
       <div className="header-section">
         <div>
           <h1>TBE Tracking Log</h1>
@@ -184,29 +184,29 @@ const TBE = () => {
       {loading && !isInitializing && <div className="loading-spinner">Querying server memory buffer...</div>}
 
       {!loading && !isInitializing && (
-        <div className="table-wrapper">
-          <table className="trace-table">
+        <div className="table-wrapper" style={{ overflowX: 'auto', width: '100%', WebkitOverflowScrolling: 'touch' }}>
+          <table className="trace-table" style={{ width: '100%', minWidth: 'max-content', borderCollapse: 'collapse' }}>
             <thead>
               <tr className="super-header">
-                <th colSpan="4" className="meta-head">Connection Mapping</th>
-                <th colSpan="2" className="sho-head">SHO Department (Split)</th>
-                <th colSpan="2" className="tb-head">Transit Buffer (Split)</th>
-                <th colSpan="3" className="ch-head">Channel Section (Combined Rollup)</th>
-                <th className="meta-head">Status Tracker</th>
+                <th colSpan="4" className="meta-head" style={{ whiteSpace: 'nowrap' }}>Connection Mapping</th>
+                <th colSpan="2" className="sho-head" style={{ whiteSpace: 'nowrap' }}>SHO Department (Split)</th>
+                <th colSpan="2" className="tb-head" style={{ whiteSpace: 'nowrap' }}>Transit Buffer (Split)</th>
+                <th colSpan="3" className="ch-head" style={{ whiteSpace: 'nowrap' }}>Channel Section (Combined Rollup)</th>
+                <th className="meta-head" style={{ whiteSpace: 'nowrap' }}>Status Tracker</th>
               </tr>
               <tr className="sub-header">
-                <th>Channel Ref</th>
-                <th>MO</th>
-                <th>Ring Family</th>
-                <th>Ring Type</th>
-                <th>Qty</th>
-                <th>In Date</th>
-                <th>Qty</th>
-                <th>Out Date</th>
-                <th>Qty</th>
-                <th>In Date</th>
-                <th>Out Date</th>
-                <th>Tracking Status</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Channel Ref</th>
+                <th style={{ whiteSpace: 'nowrap' }}>MO</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Ring Family</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Ring Type</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Qty</th>
+                <th style={{ whiteSpace: 'nowrap' }}>In Date</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Qty</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Out Date</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Qty</th>
+                <th style={{ whiteSpace: 'nowrap' }}>In Date</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Out Date</th>
+                <th style={{ whiteSpace: 'nowrap' }}>Tracking Status</th>
               </tr>
             </thead>
             <tbody>
@@ -219,14 +219,14 @@ const TBE = () => {
                   <tr key={uniqueKey} className="data-row">
                     {/* Channel Column */}
                     {channelSpan > 0 && (
-                      <td rowSpan={channelSpan} className="merged-mo-cell fw-bold">
+                      <td rowSpan={channelSpan} className="merged-mo-cell fw-bold" style={{ whiteSpace: 'nowrap' }}>
                         {row.channel_ref || '-'}
                       </td>
                     )}
                     
                     {/* MO Column */}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{fontSize: '0.9em'}}>
+                      <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{ fontSize: '0.9em', whiteSpace: 'nowrap' }}>
                         {row.mo_ref || '-'}
                       </td>
                     )}
@@ -238,37 +238,38 @@ const TBE = () => {
                         className="fw-bold text-primary clickable-family-cell"
                         title="Click to view full variant routing entries"
                         onClick={() => setSelectedFamily({ ch: row.channel_ref, fam: row.product_variant })}
+                        style={{ whiteSpace: 'nowrap', cursor: 'pointer' }}
                       >
                         {row.product_variant}
                       </td>
                     )}
                     
                     {/* Ring Type Column */}
-                    <td className="fw-bold">{row.ring_type}</td>
+                    <td className="fw-bold" style={{ whiteSpace: 'nowrap' }}>{row.ring_type}</td>
                     
                     {/* SHO Split */}
-                    <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
-                    <td>{row.sho_in || '-'}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>{row.sho_in || '-'}</td>
                     
                     {/* TB Split */}
-                    <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
-                    <td>{row.tb_out || '-'}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
+                    <td style={{ whiteSpace: 'nowrap' }}>{row.tb_out || '-'}</td>
                     
                     {/* Channel Section */}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell fw-bold text-success">
+                      <td rowSpan={familySpan} className="merged-channel-cell fw-bold text-success" style={{ whiteSpace: 'nowrap' }}>
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
                       </td>
                     )}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_in || '-'}</td>
+                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ whiteSpace: 'nowrap' }}>{row.ch_in || '-'}</td>
                     )}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell">{row.ch_out || '-'}</td>
+                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ whiteSpace: 'nowrap' }}>{row.ch_out || '-'}</td>
                     )}
                     
                     {/* Status Tracker */}
-                    <td>
+                    <td style={{ whiteSpace: 'nowrap' }}>
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
                         {row.status || 'In Process'}
                       </span>
@@ -278,7 +279,7 @@ const TBE = () => {
               })}
               {sortedSummary.length === 0 && (
                 <tr>
-                  <td colSpan="12" className="empty-state">
+                  <td colSpan="12" className="empty-state" style={{ whiteSpace: 'nowrap', textAlign: 'center' }}>
                     No records found matching the current search criteria or date range.
                   </td>
                 </tr>
@@ -290,8 +291,8 @@ const TBE = () => {
 
       {/* Redesigned Stacked Layout Detail Breakdown Modal */}
       {selectedFamily && (
-        <div className="modal-overlay" onClick={() => setSelectedFamily(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={() => setSelectedFamily(null)} style={{ zIndex: 1000 }}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxHeight: '85vh', display: 'flex', flexDirection: 'column' }}>
             <div className="modal-header">
               <div>
                 <h3>Variant Specific Location Breakdown</h3>
@@ -299,7 +300,7 @@ const TBE = () => {
               </div>
               <button className="close-modal-btn" onClick={() => setSelectedFamily(null)}>&times;</button>
             </div>
-            <div className="modal-body">
+            <div className="modal-body" style={{ overflowY: 'auto', flex: 1 }}>
               {detailLoading ? (
                 <div className="detail-loading-box">
                   <div className="spinner"></div>
@@ -308,33 +309,33 @@ const TBE = () => {
               ) : detailData.length === 0 ? (
                 <div className="empty-state">No independent deployment logs located for this variant structure within chosen dates.</div>
               ) : (
-                <div className="modal-table-wrapper">
-                  <table className="detail-variant-table">
+                <div className="modal-table-wrapper" style={{ overflowX: 'auto', width: '100%', WebkitOverflowScrolling: 'touch' }}>
+                  <table className="detail-variant-table" style={{ width: '100%', minWidth: 'max-content', borderCollapse: 'collapse' }}>
                     <thead>
                       <tr>
-                        <th style={{textAlign: 'left'}}>MO / Channel Reference</th>
-                        <th style={{textAlign: 'left'}}>Department / Specific Location</th>
-                        <th style={{textAlign: 'left'}}>Product / Part Sub Variant</th>
-                        <th>In Date</th>
-                        <th>Out Date</th>
-                        <th>Qty</th>
-                        <th>Execution Status</th>
+                        <th style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>MO / Channel Reference</th>
+                        <th style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>Department / Specific Location</th>
+                        <th style={{ textAlign: 'left', whiteSpace: 'nowrap' }}>Product / Part Sub Variant</th>
+                        <th style={{ whiteSpace: 'nowrap' }}>In Date</th>
+                        <th style={{ whiteSpace: 'nowrap' }}>Out Date</th>
+                        <th style={{ whiteSpace: 'nowrap' }}>Qty</th>
+                        <th style={{ whiteSpace: 'nowrap' }}>Execution Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {detailData.map((vRow, vIdx) => (
                         <tr key={vIdx} className="modal-data-row">
-                          <td className="text-start text-muted" style={{fontSize: '0.95em'}}>{vRow.mo_ref}</td>
-                          <td className="text-start">
+                          <td className="text-start text-muted" style={{ fontSize: '0.95em', whiteSpace: 'nowrap' }}>{vRow.mo_ref}</td>
+                          <td className="text-start" style={{ whiteSpace: 'nowrap' }}>
                             <span className={`dept-tag ${vRow.department.toLowerCase().replace(/\s+/g, '-')}`}>
                               {vRow.department}
                             </span>
                           </td>
-                          <td className="text-start fw-bold" style={{color: '#0f172a'}}>{vRow.variant}</td>
-                          <td>{vRow.in_date}</td>
-                          <td>{vRow.out_date}</td>
-                          <td className="fw-bold">{Number(vRow.qty).toLocaleString()}</td>
-                          <td>
+                          <td className="text-start fw-bold" style={{ color: '#0f172a', whiteSpace: 'nowrap' }}>{vRow.variant}</td>
+                          <td style={{ whiteSpace: 'nowrap' }}>{vRow.in_date}</td>
+                          <td style={{ whiteSpace: 'nowrap' }}>{vRow.out_date}</td>
+                          <td className="fw-bold" style={{ whiteSpace: 'nowrap' }}>{Number(vRow.qty).toLocaleString()}</td>
+                          <td style={{ whiteSpace: 'nowrap' }}>
                             <span className="execution-status-dot">{vRow.status}</span>
                           </td>
                         </tr>

@@ -82,7 +82,7 @@ const Traceability = () => {
   };
 
   return (
-    <div className="traceability-container">
+    <div className="traceability-container" style={{ fontFamily: 'Segoe UI, Roboto, sans-serif' }}>
       <div className="header-section">
         <div>
           <h1>MO Traceability Tracking</h1>
@@ -115,77 +115,79 @@ const Traceability = () => {
 
       {/* MAIN DASHBOARD */}
       {!loading && !isInitializing && (
-        /* Added vertical scroll height restriction here */
-        <div className="table-wrapper" style={{ maxHeight: '650px', overflowY: 'auto', position: 'relative' }}>
-          <table className="trace-table">
-            <thead style={{ position: 'sticky', top: 0, zIndex: 2 }}>
-              {/* Fixed colSpan Math: 4 + 2 + 2 + 2 + 1 = 11 */}
-              <tr className="super-header">
-                <th colSpan="4" className="meta-head">Order Details</th>
-                <th colSpan="2" className="sho-head">SHO Target</th>
-                <th colSpan="2" className="tb-head">Transit Buffer</th>
-                <th colSpan="2" className="ch-head">Channel Section</th>
-                <th className="meta-head">Overall Status</th>
+        /* Constrained vertical framework with rich card borders & drop shadows */
+        <div className="table-wrapper" style={{ maxHeight: '680px', overflowY: 'auto', border: '1px solid #cbd5e1', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', position: 'relative' }}>
+          <table className="trace-table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
+            <thead>
+              {/* Row 1 Sticky Headers with high-contrast distinct section colors */}
+              <tr className="super-header" style={{ height: '42px' }}>
+                <th colSpan="4" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#334155', color: '#ffffff', border: '1px solid #475569', fontWeight: '600', padding: '10px' }}>Order Details</th>
+                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0284c7', color: '#ffffff', border: '1px solid #0369a1', fontWeight: '600', padding: '10px' }}>SHO Target</th>
+                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#ea580c', color: '#ffffff', border: '1px solid #c2410c', fontWeight: '600', padding: '10px' }}>Transit Buffer</th>
+                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#16a34a', color: '#ffffff', border: '1px solid #15803d', fontWeight: '600', padding: '10px' }}>Channel Section</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 10, background: '#475569', color: '#ffffff', border: '1px solid #576880', fontWeight: '600', padding: '10px' }}>Overall Status</th>
               </tr>
-              {/* Exactly 11 headers underneath */}
-              <tr className="sub-header">
-                <th>MO Number</th>
-                <th>Family / Base Product</th>
-                <th>Component</th>
-                <th>Target Qty</th>
-                <th>SHO Qty</th>
-                <th>Date</th>
-                <th>TB Qty</th>
-                <th>Date</th>
-                <th>Chan Qty</th>
-                <th>Date</th>
-                <th>Status</th>
+              {/* Row 2 Sticky Headers with matching soft section background tones */}
+              <tr className="sub-header" style={{ height: '38px' }}>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>MO Number</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Family / Base Product</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Component</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Target Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>SHO Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>Date</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>TB Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Date</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Chan Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Date</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Status</th>
               </tr>
             </thead>
             <tbody>
               {filteredSummary.map((row, idx) => {
                 const moSpan = getRowSpan(filteredSummary, idx, 'mo');
+                const rowBg = idx % 2 === 0 ? '#ffffff' : '#fdfdfd';
+
                 return (
-                  <tr key={idx} className="data-row">
+                  <tr key={idx} className="data-row" style={{ backgroundColor: rowBg, transition: 'background 0.2s' }}>
                     {/* Interactive Clickable MO Cell */}
                     {moSpan > 0 && (
                       <td 
                         rowSpan={moSpan} 
                         className="merged-mo-cell fw-bold text-primary clickable-family-cell"
                         title="Click to view full variant breakdown"
-                        style={{ cursor: 'pointer', color: '#0284c7' }}
+                        style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0f9ff', color: '#0284c7', cursor: 'pointer', verticalAlign: 'middle', textDecoration: 'underline' }}
                         onClick={() => handleViewDetail(row.mo)}
                       >
                         {row.mo}
                       </td>
                     )}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-mo-cell fw-bold">
+                      <td rowSpan={moSpan} className="merged-mo-cell fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f1f5f9', color: '#334155', verticalAlign: 'middle' }}>
                         {row.base_product}
                       </td>
                     )}
                     
-                    {/* IM/OM Split Rows (These loop independently of moSpan) */}
-                    <td style={{ fontWeight: 600, color: row.component === 'IM' ? '#0369a1' : '#b45309' }}>
+                    {/* IM/OM Split Rows */}
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', fontWeight: 600, color: row.component === 'IM' ? '#0369a1' : '#b45309' }}>
                       {row.component}
                     </td>
-                    <td className="qty-cell">{row.qty_req > 0 ? Number(row.qty_req).toLocaleString() : '-'}</td>
-                    <td>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
-                    <td>{row.sho_date || '-'}</td>
-                    <td>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
-                    <td>{row.tb_date || '-'}</td>
+                    <td className="qty-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#1e293b' }}>{row.qty_req > 0 ? Number(row.qty_req).toLocaleString() : '-'}</td>
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '-'}</td>
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_date || '-'}</td>
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_date || '-'}</td>
                     
                     {/* Re-Merged Channel Output */}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-channel-cell fw-bold text-success">
+                      <td rowSpan={moSpan} className="merged-channel-cell fw-bold text-success" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#16a34a', verticalAlign: 'middle' }}>
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}
                       </td>
                     )}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-channel-cell">{row.ch_date || '-'}</td>
+                      <td rowSpan={moSpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_date || '-'}</td>
                     )}
                     {moSpan > 0 && (
-                      <td rowSpan={moSpan} className="merged-channel-cell">
+                      <td rowSpan={moSpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', verticalAlign: 'middle' }}>
                         <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : ''}`}>
                           {row.status || 'In Process'}
                         </span>
@@ -196,7 +198,7 @@ const Traceability = () => {
               })}
               {filteredSummary.length === 0 && (
                 <tr>
-                  <td colSpan="11" className="empty-state">
+                  <td colSpan="11" className="empty-state" style={{ padding: '30px', color: '#64748b', fontStyle: 'italic' }}>
                     No records found matching the current search criteria.
                   </td>
                 </tr>
@@ -226,33 +228,33 @@ const Traceability = () => {
               ) : selectedMoFlow.flow_data.length === 0 ? (
                 <div className="empty-state">No independent deployment logs located for this MO structure.</div>
               ) : (
-                <div className="modal-table-wrapper" style={{ maxHeight: '400px', overflowY: 'auto' }}>
-                  <table className="detail-variant-table">
-                    <thead style={{ position: 'sticky', top: 0, backgroundColor: '#fff', zIndex: 1 }}>
-                      <tr>
-                        <th style={{textAlign: 'left'}}>MO / Channel Reference</th>
-                        <th style={{textAlign: 'left'}}>Department / Specific Location</th>
-                        <th style={{textAlign: 'left'}}>Product / Part Sub Variant</th>
-                        <th>In Date</th>
-                        <th>Out Date</th>
-                        <th>Qty</th>
-                        <th>Execution Status</th>
+                <div className="modal-table-wrapper" style={{ maxHeight: '420px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
+                  <table className="detail-variant-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ background: '#334155', color: '#ffffff', height: '40px' }}>
+                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>MO / Channel Reference</th>
+                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Department / Specific Location</th>
+                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Product / Part Sub Variant</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>In Date</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Out Date</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Qty</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Execution Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {selectedMoFlow.flow_data.map((vRow, vIdx) => (
-                        <tr key={vIdx} className="modal-data-row">
-                          <td className="text-start text-muted" style={{fontSize: '0.95em'}}>{vRow.mo_ref || selectedMoFlow.mo}</td>
-                          <td className="text-start">
+                        <tr key={vIdx} className="modal-data-row" style={{ background: vIdx % 2 === 0 ? '#ffffff' : '#f8fafc' }}>
+                          <td className="text-start text-muted" style={{ fontSize: '0.95em', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.mo_ref || selectedMoFlow.mo}</td>
+                          <td className="text-start" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0' }}>
                             <span className={`dept-tag ${vRow.department ? vRow.department.toLowerCase().replace(/\s+/g, '-') : ''}`}>
                               {vRow.department || '-'}
                             </span>
                           </td>
-                          <td className="text-start fw-bold" style={{color: '#0f172a'}}>{vRow.variant || '-'}</td>
-                          <td>{vRow.in_date || '-'}</td>
-                          <td>{vRow.out_date || '-'}</td>
-                          <td className="fw-bold">{vRow.qty ? Number(vRow.qty).toLocaleString() : '0'}</td>
-                          <td>
+                          <td className="text-start fw-bold" style={{ color: '#0f172a', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.variant || '-'}</td>
+                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.in_date || '-'}</td>
+                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.out_date || '-'}</td>
+                          <td className="fw-bold" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.qty ? Number(vRow.qty).toLocaleString() : '0'}</td>
+                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>
                             <span className="execution-status-dot">{vRow.status || '-'}</span>
                           </td>
                         </tr>

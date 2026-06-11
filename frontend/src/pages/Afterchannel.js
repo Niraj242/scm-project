@@ -7,18 +7,22 @@ const Afterchannel = () => {
   const [activeTab, setActiveTab] = useState('accurate');
   const [entryMode, setEntryMode] = useState('IN'); 
   const [moCache, setMoCache] = useState({});
-  const [ledgers, setLedgers] = useState({ accurate: [], cps: [], rework: [], dismantling: [] });
+  const [ledgers, setLedgers] = useState({ accurate: [], cps: [], rework: [], dismantling: [], autopackaging: [], fps: [] });
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedMoDetail, setSelectedMoDetail] = useState(null);
 
   const [moNumber, setMoNumber] = useState('');
   const [availableVariants, setAvailableVariants] = useState([]);
+  const [availableMos, setAvailableMos] = useState([]); // Used for Reverse Lookup
   const [selectedVariant, setSelectedVariant] = useState('');
   const [actualProductionQty, setActualProductionQty] = useState(0);
   
-  // PATCH: Added State to hold the record currently being edited
   const [editingRecord, setEditingRecord] = useState(null);
-  const [ledgerSearchQuery, setLedgerSearchQuery] = useState(''); // NEW
+  const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
+
+  // Form states specifically for Rework/Dismantling
+  const [bearingFamily, setBearingFamily] = useState(''); 
+  const [bearingScrapQty, setBearingScrapQty] = useState('');
 
   useEffect(() => {
     fetchMasterData();
@@ -30,8 +34,8 @@ const Afterchannel = () => {
       const res = await fetch(`${API}/api/mo-lookup`);
       const data = await res.json();
       if (data.status === 'success') {
-        console.log("MASTER DATA LOADED:", data.data); // Open your F12 console to see the exact keys
         setMoCache(data.data || {});
+        setAvailableMos(Object.keys(data.data || {}));
       }
     } catch (err) {
       console.error("Master Reference Load Failure:", err);
@@ -42,13 +46,14 @@ const Afterchannel = () => {
     try {
       const res = await fetch(`${API}/api/afterchannel/summary_ledgers`);
       const json = await res.json();
-      console.log("LEDGERS LOADED:", json); // Open your F12 console to check the saved data
       if (json.status === 'success' || json.data) {
         setLedgers({
-          accurate: json.data?.accurate || json.data?.Accurate || [],
-          cps: json.data?.cps || json.data?.CPS || [],
-          rework: json.data?.rework || json.data?.Rework || [],
-          dismantling: json.data?.dismantling || json.data?.Dismantling || json.data?.vibration || []
+          accurate: json.data?.accurate || [],
+          cps: json.data?.cps || [],
+          rework: json.data?.rework || [],
+          dismantling: json.data?.dismantling || json.data?.vibration || [],
+          autopackaging: json.data?.autopackaging || [],
+          fps: json.data?.fps || []
         });
       }
     } catch (err) {
@@ -56,8 +61,6 @@ const Afterchannel = () => {
     }
   };
 
-  // --- BLIND-PROOF DATA EXTRACTORS ---
-  // Scans every key in the object. If the key contains "prod", "qty", "target", it grabs the number.
   const getQtyFromRow = (row) => {
     for (const key in row) {
       const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
@@ -66,10 +69,9 @@ const Afterchannel = () => {
         if (!isNaN(val) && val > 0) return val;
       }
     }
-    return 0; // Fallback if absolutely nothing is found
+    return 0;
   };
 
-  // Scans every key for "type", "variant", "model", "bearing"
   const getTypeFromRow = (row) => {
     for (const key in row) {
       const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
@@ -83,16 +85,14 @@ const Afterchannel = () => {
   const calculateProduction = (rawRows, variantToMatch) => {
     if (!rawRows || !Array.isArray(rawRows)) return 0;
     const cleanMatch = String(variantToMatch || '').trim().toUpperCase();
-    
     return rawRows.reduce((sum, r) => {
       const rowType = getTypeFromRow(r).toUpperCase();
-      if (rowType === cleanMatch) {
-        return sum + getQtyFromRow(r);
-      }
+      if (rowType === cleanMatch) return sum + getQtyFromRow(r);
       return sum;
     }, 0);
   };
 
+  // Normal lookup: Typing MO populates Variants
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
@@ -112,15 +112,25 @@ const Afterchannel = () => {
       setAvailableVariants([]);
       setSelectedVariant('');
       setActualProductionQty(0);
+      setAvailableMos(Object.keys(moCache)); // Reset reverse lookup
     }
   };
 
+  // Reverse lookup: Typing Variant populates specific MOs
   const handleVariantChange = (e) => {
-    const variantName = e.target.value;
+    const variantName = e.target.value.toUpperCase();
     setSelectedVariant(variantName);
-    const key = moNumber.trim().toUpperCase();
-    if (moCache[key]) {
-      setActualProductionQty(calculateProduction(moCache[key], variantName));
+    
+    if (moNumber) {
+      if (moCache[moNumber.toUpperCase()]) {
+        setActualProductionQty(calculateProduction(moCache[moNumber.toUpperCase()], variantName));
+      }
+    } else if (variantName) {
+      // Find all MOs that contain this variant
+      const matchingMos = Object.keys(moCache).filter(mo => {
+        return moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === variantName);
+      });
+      setAvailableMos(matchingMos.length > 0 ? matchingMos : Object.keys(moCache));
     }
   };
 
@@ -128,29 +138,23 @@ const Afterchannel = () => {
     e.preventDefault();
     const fd = new FormData(e.target);
     
-    // Send both camelCase and snake_case to guarantee the backend accepts it
     const payload = {
-      id: editingRecord ? editingRecord.id : undefined, // PATCH: Inject ID if editing
+      id: editingRecord ? editingRecord.id : undefined,
       mo: moNumber.toUpperCase(),
       bearing_type: selectedVariant.toUpperCase(),
       type: selectedVariant.toUpperCase()
     };
 
-    const numFields = ['qtyIn', 'qtySent', 'qty_in', 'qty_sent', 'ballScrap', 'cageSealScrap', 'ball_scrap', 'cage_seal_scrap'];
+    const numFields = ['qtyIn', 'qtySent', 'qty_in', 'qty_sent', 'ballScrap', 'rollerScrap', 'cageScrap', 'sealScrap', 'shieldScrap', 'irScrap', 'orScrap'];
 
     for (let [key, value] of fd.entries()) {
       const finalValue = numFields.includes(key) ? (Number(value) || 0) : (value || null);
       payload[key] = finalValue;
-      
-      // Auto-generate snake_case (e.g., qtyIn -> qty_in) just in case
       const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-      if (snakeKey !== key) {
-        payload[snakeKey] = finalValue;
-      }
+      if (snakeKey !== key) payload[snakeKey] = finalValue;
     }
 
     try {
-      // PATCH: Send correct endpoint dynamically
       const targetEndpoint = endpoint === 'dismantling' ? 'vibration' : endpoint;
       const response = await fetch(`${API}/api/afterchannel/${targetEndpoint}`, {
         method: 'POST',
@@ -162,17 +166,18 @@ const Afterchannel = () => {
       
       alert(editingRecord ? "Entry Updated Successfully!" : "Operational Record Logged Successfully!");
       e.target.reset();
-      setEditingRecord(null); // PATCH: clear edit state
-      await fetchLedgers(); // Refresh tables immediately
+      setEditingRecord(null);
+      setBearingScrapQty(''); // Clear Scrap State
+      await fetchLedgers();
     } catch (err) {
       alert("Submission Error: " + err.message);
     }
   };
 
-  // PATCH: Added Handlers for Editing and Deleting Rows
   const handleEdit = (record) => {
     setMoNumber(record.mo || '');
     setSelectedVariant(record.type || record.bearing_type || '');
+    setBearingFamily(record.bearing_family || '');
     setEntryMode((record.qty_sent || record.qtySent) ? 'OUT' : 'IN');
     setEditingRecord(record);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -192,12 +197,10 @@ const Afterchannel = () => {
     }
   };
 
-  // Ultra-forgiving match logic for the tables
   const isScrapStation = (val) => String(val || '').trim().toLowerCase().includes('scrap');
   const matchVariant = (l, v) => {
     const lType = String(l.bearing_type || l.type || l.bearingType || l.variant || '').replace(/\s+/g, '').toUpperCase();
     const vType = String(v).replace(/\s+/g, '').toUpperCase();
-    // If the backend failed to save the type, show the row anyway so it's not totally hidden
     return lType === vType || lType === ''; 
   };
 
@@ -211,46 +214,38 @@ const Afterchannel = () => {
       const accLedger = ledgers.accurate.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
       const accIn = accLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
       const accOut = accLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
-      const accScrap = accLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
 
       const cpsLedger = ledgers.cps.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
       const cpsIn = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
       const cpsOut = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
-      const cpsScrap = cpsLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
 
       const rwLedger = ledgers.rework.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
       const rwIn = rwLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
       const rwOut = rwLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
-      const rwScrap = rwLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
 
       const disLedger = ledgers.dismantling.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
       const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
-      const disScrap = disLedger.reduce((sum, l) => isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
-      const disInternalScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap || l.ballScrap) || 0) + (Number(l.cage_seal_scrap || l.cageSealScrap) || 0), 0);
-
-      const scrapSum = accScrap + cpsScrap + rwScrap + disScrap + disInternalScrap;
+      
+      // Sum all scrap components
+      const disInternalScrap = disLedger.reduce((sum, l) => sum + 
+        (Number(l.ball_scrap) || 0) + (Number(l.roller_scrap) || 0) + 
+        (Number(l.cage_scrap) || 0) + (Number(l.seal_scrap) || 0) + 
+        (Number(l.shield_scrap) || 0) + (Number(l.ir_scrap) || 0) + (Number(l.or_scrap) || 0), 0);
 
       return {
-        variant: v, prodQty,
-        accIn, accOut,
-        cpsIn, cpsOut,
-        rwIn, rwOut,
-        disIn, scrapSum
+        variant: v, prodQty, accIn, accOut, cpsIn, cpsOut, rwIn, rwOut, disIn, scrapSum: disInternalScrap
       };
     });
 
     setSelectedMoDetail({ mo, breakdown });
   };
 
-  // --- DYNAMIC DEPARTMENT LEDGER ENTRY TABLE ---
   const renderDepartmentLedger = (deptKey, deptName) => {
     const deptData = ledgers[deptKey] || [];
-    
-    // Filter records safely based on search query, not moNumber/selectedVariant
     const records = deptData.filter(l => {
       const search = ledgerSearchQuery.toUpperCase();
       const moMatch = (l.mo || '').toUpperCase().includes(search);
-      const typeMatch = (l.bearing_type || l.type || l.bearingType || l.variant || l.item_type || '').toUpperCase().includes(search);
+      const typeMatch = (l.bearing_type || l.type || l.item_type || '').toUpperCase().includes(search);
       return moMatch || typeMatch;
     });
 
@@ -282,7 +277,6 @@ const Afterchannel = () => {
                 <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date OUT</th>
                 <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Next Station</th>
                 <th style={{padding: '12px 15px', color: '#b45309', background: '#fffbeb', borderRight: '1px solid #e2e8f0'}}>Qty OUT</th>
-                {/* PATCH: Added Actions column */}
                 <th style={{padding: '12px 15px', color: '#475569'}}>Actions</th>
               </tr>
             </thead>
@@ -292,7 +286,7 @@ const Afterchannel = () => {
                 return (
                   <tr key={i} style={{borderBottom: '1px solid #e2e8f0', background: i % 2 === 0 ? '#fff' : '#f8fafc', transition: 'background 0.2s'}} onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'} onMouseLeave={(e) => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#f8fafc'}>
                     <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.mo || '-'}</td>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.bearing_type || r.type || r.bearingType || r.variant || r.item_type || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.bearing_type || r.type || r.item_type || '-'}</td>
                     <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.in_date || r.inDate || '-'}</td>
                     <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.material_in_from || r.materialInFrom || '-'}</td>
                     <td style={{padding: '12px 15px', borderRight: '2px solid #cbd5e1', fontWeight: 'bold', color: '#1d4ed8', background: '#eff6ff'}}>{r.qty_in || r.qtyIn || '-'}</td>
@@ -302,10 +296,9 @@ const Afterchannel = () => {
                       {isScrap && <span style={{marginLeft: '5px', fontSize: '0.8em'}}>⚠️</span>}
                     </td>
                     <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold', color: '#b45309', background: '#fffbeb'}}>{r.qty_sent || r.qtySent || '-'}</td>
-                    {/* PATCH: Added Edit/Delete Buttons */}
                     <td style={{padding: '12px 15px'}}>
-                      <button type="button" onClick={() => handleEdit(r)} style={{marginRight: '8px', cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Edit Record">✏️</button>
-                      <button type="button" onClick={() => handleDelete(r.id, deptKey)} style={{cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Delete Record">🗑️</button>
+                      <button type="button" onClick={() => handleEdit(r)} style={{marginRight: '8px', cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Edit">✏️</button>
+                      <button type="button" onClick={() => handleDelete(r.id, deptKey)} style={{cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Delete">🗑️</button>
                     </td>
                   </tr>
                 );
@@ -326,19 +319,23 @@ const Afterchannel = () => {
       
       <datalist id="depts-list">
         <option value="Channel" /><option value="Accurate" /><option value="CPS" />
-        <option value="Rework" /><option value="Dismantling" /><option value="Packaging" />
+        <option value="Rework" /><option value="Dismantling" /><option value="Autopackaging" />
         <option value="FPS" /><option value="Scrap" />
       </datalist>
 
       <datalist id="channels-list">
         {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
       </datalist>
+      
+      <datalist id="mo-list">
+        {availableMos.map(mo => <option key={mo} value={mo} />)}
+      </datalist>
 
       <div className="ac-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #cbd5e1', paddingBottom: '10px'}}>
         <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing</h1>
-        <div className="tab-buttons" style={{display: 'flex', gap: '10px'}}>
-          {['accurate', 'cps', 'rework', 'vibration'].map(tab => (
-            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery('');}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
+        <div className="tab-buttons" style={{display: 'flex', gap: '10px', flexWrap: 'wrap'}}>
+          {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily('');}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
               {tab.toUpperCase()}
             </button>
           ))}
@@ -351,21 +348,17 @@ const Afterchannel = () => {
       {activeTab !== 'summary' && (
         <div style={{marginBottom: '20px', background: '#f8fafc', padding: '15px', borderRadius: '8px', border: '1px solid #e2e8f0'}}>
           <div style={{display: 'flex', gap: '20px'}}>
-            <div style={{flex: 1}}>
-              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>MO Number</label>
-              <input type="text" value={moNumber} onChange={(e) => setMoNumber(e.target.value)} onBlur={handleMoBlur} style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
-            </div>
+            
             <div style={{flex: 1}}>
               <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Variant</label>
-              {availableVariants.length > 0 ? (
-                <select value={selectedVariant} onChange={handleVariantChange} style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required>
-                  <option value="">-- Select Variant --</option>
-                  {availableVariants.map(v => <option key={v.type} value={v.type}>{v.type}</option>)}
-                </select>
-              ) : (
-                <input type="text" value={selectedVariant} onChange={(e) => setSelectedVariant(e.target.value)} placeholder="Manual Entry" style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
-              )}
+              <input type="text" value={selectedVariant} onChange={handleVariantChange} placeholder="Type Variant First to Filter MO..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
             </div>
+
+            <div style={{flex: 1}}>
+              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>MO Number</label>
+              <input list="mo-list" value={moNumber} onChange={(e) => setMoNumber(e.target.value)} onBlur={handleMoBlur} placeholder="Select or Type MO..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+            </div>
+
             <div style={{flex: 1}}>
               <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Target Production Qty</label>
               <input type="text" value={actualProductionQty > 0 ? actualProductionQty.toLocaleString() : '0'} readOnly style={{width: '100%', padding: '8px', background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: '4px', fontWeight: 'bold', color: '#16a34a'}} />
@@ -379,9 +372,8 @@ const Afterchannel = () => {
             <button type="button" onClick={() => setEntryMode('OUT')} style={{padding: '8px 20px', background: entryMode === 'OUT' ? '#ea580c' : '#fff', color: entryMode === 'OUT' ? '#fff' : '#ea580c', border: '2px solid #ea580c', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer'}}>
               📤 LOG OUT (Dispatch)
             </button>
-            {/* PATCH: Cancel Edit Button */}
             {editingRecord && (
-              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
+              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); setBearingFamily(''); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
                 Cancel Edit
               </button>
             )}
@@ -394,10 +386,10 @@ const Afterchannel = () => {
         {/* ================= ACCURATE TAB ================= */}
         {activeTab === 'accurate' && (
           <div>
-            {/* PATCH: Key forces the form to re-render and grab the editingRecord defaultValues */}
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'accurate')}>
               {entryMode === 'IN' ? (
-                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Accurate - Receiving Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold'}}>Accurate - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
@@ -407,7 +399,8 @@ const Afterchannel = () => {
                   </div>
                 </fieldset>
               ) : (
-                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>Accurate - Dispatch Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Accurate - Dispatch Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
@@ -427,7 +420,8 @@ const Afterchannel = () => {
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'cps')}>
               {entryMode === 'IN' ? (
-                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>CPS Assembly - Receiving Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold'}}>CPS Assembly - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Item</label><select name="itemType" defaultValue={editingRecord?.item_type || ''} style={{width:'100%', padding:'6px'}}><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
@@ -439,7 +433,8 @@ const Afterchannel = () => {
                   </div>
                 </fieldset>
               ) : (
-                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>CPS Assembly - Dispatch Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>CPS Assembly - Dispatch Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
@@ -459,8 +454,10 @@ const Afterchannel = () => {
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'rework')}>
               {entryMode === 'IN' ? (
-                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Rework Station - Receiving Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold'}}>Rework Station - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Bearing Family</label><select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}}><option></option><option value="DGBB">DGBB</option><option value="TRB">TRB</option></select></div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -471,7 +468,8 @@ const Afterchannel = () => {
                   </div>
                 </fieldset>
               ) : (
-                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>Rework Station - Dispatch Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Rework Station - Dispatch Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
@@ -488,13 +486,15 @@ const Afterchannel = () => {
           </div>
         )}
 
-        {/* ================= VIBRATION / DISMANTLING TAB ================= */}
-        {activeTab === 'vibration' && (
+        {/* ================= DISMANTLING TAB ================= */}
+        {activeTab === 'dismantling' && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'dismantling')}>
               {entryMode === 'IN' ? (
-                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Vibration Dismantling - Receiving Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold'}}>Dismantling - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Bearing Family</label><select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}} required><option></option><option value="DGBB">DGBB</option><option value="TRB">TRB</option></select></div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -503,17 +503,40 @@ const Afterchannel = () => {
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Activity</label><select name="activity" defaultValue={editingRecord?.activity || ''} style={{width:'100%', padding:'6px'}}><option></option><option>Ball Remove</option><option>Rivet Press</option></select></div>
-                    <div><label>Ring Type</label><select name="ringType" defaultValue={editingRecord?.ring_type || ''} style={{width:'100%', padding:'6px'}}><option></option><option>IR</option><option>OR</option></select></div>
                   </div>
                 </fieldset>
               ) : (
-                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>Vibration Dismantling - Output Log {editingRecord && <span style={{color:'red'}}>(EDITING)</span>}</legend>
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}>
+                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Dismantling - Dispatch & Scrap Log</legend>
+                  
+                  <div style={{background: '#fee2e2', padding: '15px', borderRadius: '6px', border: '1px solid #ef4444', marginBottom: '20px'}}>
+                    <h4 style={{margin: '0 0 10px 0', color: '#b91c1c'}}>Auto-Scrap Calculator</h4>
+                    <div style={{display: 'flex', gap: '15px', alignItems: 'flex-end'}}>
+                      <div style={{flex: 1}}><label>Bearing Scrap Qty (Total)</label><input type="number" value={bearingScrapQty} onChange={(e) => setBearingScrapQty(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="e.g. 100" /></div>
+                      <div style={{flex: 1, color: '#7f1d1d', fontSize: '0.9em', paddingBottom: '5px'}}>
+                        <em>Select Family (DGBB/TRB) above to auto-fill balls vs rollers.</em>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginBottom: '20px', paddingBottom: '15px', borderBottom: '1px dashed #cbd5e1'}}>
+                    <div><label>IR Scrap</label><input type="number" name="irScrap" value={bearingScrapQty || editingRecord?.ir_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>OR Scrap</label><input type="number" name="orScrap" value={bearingScrapQty || editingRecord?.or_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Cage Scrap</label><input type="number" name="cageScrap" value={bearingScrapQty || editingRecord?.cage_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Seal Scrap</label><input type="number" name="sealScrap" defaultValue={editingRecord?.seal_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Shield Scrap</label><input type="number" name="shieldScrap" defaultValue={editingRecord?.shield_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    
+                    {bearingFamily === 'DGBB' ? (
+                      <div><label>Ball Scrap (Qty x 8)</label><input type="number" name="ballScrap" value={(bearingScrapQty ? bearingScrapQty * 8 : editingRecord?.ball_scrap) || ''} onChange={()=>{}} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                    ) : bearingFamily === 'TRB' ? (
+                      <div><label>Roller Scrap (Qty x 8)</label><input type="number" name="rollerScrap" value={(bearingScrapQty ? bearingScrapQty * 8 : editingRecord?.roller_scrap) || ''} onChange={()=>{}} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                    ) : null}
+                  </div>
+
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    <div><label>Ball Scrap</label><input type="number" name="ballScrap" defaultValue={editingRecord?.ball_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Cage/Seal Scrap</label><input type="number" name="cageSealScrap" defaultValue={editingRecord?.cage_seal_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Shift</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Operator</label><input type="text" name="operator" defaultValue={editingRecord?.operator || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Remark</label><input type="text" name="remark" defaultValue={editingRecord?.remark || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -522,7 +545,65 @@ const Afterchannel = () => {
               )}
               <button type="submit" style={{marginTop:'15px', padding:'10px 25px', background: entryMode==='IN'?'#2563eb':'#ea580c', color:'#fff', border:'none', borderRadius:'4px', fontWeight:'bold', cursor:'pointer'}}>{editingRecord ? 'Update Entry' : 'Save Entry'}</button>
             </form>
-            {renderDepartmentLedger('dismantling', 'Vibration/Dismantling')}
+            {renderDepartmentLedger('dismantling', 'Dismantling Processing')}
+          </div>
+        )}
+
+        {/* ================= AUTOPACKAGING TAB ================= */}
+        {activeTab === 'autopackaging' && (
+          <div>
+            <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'autopackaging')}>
+              {entryMode === 'IN' ? (
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Autopackaging - Receiving Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                  </div>
+                </fieldset>
+              ) : (
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>Autopackaging - Dispatch Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                  </div>
+                </fieldset>
+              )}
+              <button type="submit" style={{marginTop:'15px', padding:'10px 25px', background: entryMode==='IN'?'#2563eb':'#ea580c', color:'#fff', border:'none', borderRadius:'4px', fontWeight:'bold', cursor:'pointer'}}>{editingRecord ? 'Update Entry' : 'Save Entry'}</button>
+            </form>
+            {renderDepartmentLedger('autopackaging', 'Autopackaging Station')}
+          </div>
+        )}
+
+        {/* ================= FPS TAB ================= */}
+        {activeTab === 'fps' && (
+          <div>
+            <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'fps')}>
+              {entryMode === 'IN' ? (
+                <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>FPS - Receiving Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                  </div>
+                </fieldset>
+              ) : (
+                <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold', color: '#ea580c'}}>FPS - Final Dispatch Log</legend>
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Customer Order</label><input type="text" name="customerOrder" defaultValue={editingRecord?.customer_order || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                  </div>
+                </fieldset>
+              )}
+              <button type="submit" style={{marginTop:'15px', padding:'10px 25px', background: entryMode==='IN'?'#2563eb':'#ea580c', color:'#fff', border:'none', borderRadius:'4px', fontWeight:'bold', cursor:'pointer'}}>{editingRecord ? 'Update Entry' : 'Save Entry'}</button>
+            </form>
+            {renderDepartmentLedger('fps', 'FPS Storage')}
           </div>
         )}
 

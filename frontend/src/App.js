@@ -16,6 +16,7 @@ import SupplierChatbot from "./pages/SupplierChatbot";
 // Import Traceability Project Related
 import Traceability from "./pages/Traceability";
 import TBE from "./pages/TBE"; 
+import Scrap from "./pages/Scrap"; 
 import Afterchannel from "./pages/Afterchannel"; 
 
 
@@ -44,6 +45,7 @@ function App() {
         {/* TRACEABILITY & TBE ROUTES */}
         <Route path="/traceability" element={<ProtectedRoute><Traceability /></ProtectedRoute>} />
         <Route path="/tbe" element={<ProtectedRoute><TBE /></ProtectedRoute>} /> 
+        <Route path="/scrap" element={<ProtectedRoute><Scrap /></ProtectedRoute>} /> 
         <Route path="/afterchannel" element={<ProtectedRoute><Afterchannel /></ProtectedRoute>} /> 
           
 

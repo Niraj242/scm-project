@@ -10,6 +10,7 @@ import io
 import threading
 import time
 import re
+from datetime import datetime, timedelta
 
 router = APIRouter()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -182,10 +183,11 @@ def process_mo_sheets(sheets_dict, temp_cache):
         mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
         type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
         qty_col = find_column(df, ["production", "productionqty", "qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "total", "reqqty", "required"])
+        date_col = find_column(df, ["date"]) # NEW: Grabbing the date for the +/- 2 days logic
         
         if not mo_col or not type_col: continue
 
-        target_cols = [c for c in [mo_col, type_col, qty_col] if c]
+        target_cols = [c for c in [mo_col, type_col, qty_col, date_col] if c]
         df_records = df[target_cols].to_dict('records')
 
         for row in df_records:
@@ -203,6 +205,19 @@ def process_mo_sheets(sheets_dict, temp_cache):
             except (ValueError, TypeError):
                 qty_val = 0
 
+            # Safe date string parsing
+            date_str = ""
+            if date_col:
+                raw_date = row.get(date_col)
+                if pd.notna(raw_date):
+                    try:
+                        if isinstance(raw_date, datetime):
+                            date_str = raw_date.strftime("%Y-%m-%d")
+                        else:
+                            date_str = str(pd.to_datetime(raw_date).date())
+                    except:
+                        date_str = str(raw_date)[:10]
+
             if mo_val not in temp_cache:
                 temp_cache[mo_val] = []
             
@@ -210,11 +225,14 @@ def process_mo_sheets(sheets_dict, temp_cache):
             for item in temp_cache[mo_val]:
                 if item['type'] == type_val:
                     item['qty'] += qty_val
+                    # Keep the earliest date if multiple exist
+                    if date_str and (not item.get('date') or date_str < item['date']):
+                        item['date'] = date_str
                     variant_exists = True
                     break
             
             if not variant_exists:
-                temp_cache[mo_val].append({"type": type_val, "qty": qty_val})
+                temp_cache[mo_val].append({"type": type_val, "qty": qty_val, "date": date_str})
 
 def process_master_data():
     global MASTER_DATA_CACHE, IS_UPDATING, INITIALIZED

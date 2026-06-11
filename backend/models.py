@@ -3,352 +3,392 @@ from datetime import datetime
 from database import Base
 
 class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    email = Column(String, unique=True, index=True, nullable=False)
-    password_hash = Column(String, nullable=False)
-    role = Column(String, nullable=False)
-    # Ensure this is defined as Integer
-    is_active = Column(Integer, default=1) 
-    created_at = Column(DateTime, default=datetime.utcnow)
-
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    role = Column(String, nullable=False)
+    # Ensure this is defined as Integer
+    is_active = Column(Integer, default=1) 
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Order(Base):
-    __tablename__ = "orders"
-    id = Column(Integer, primary_key=True, index=True)
-    order_number = Column(String, unique=True, nullable=False)
-    customer_name = Column(String, nullable=False)
-    product_name = Column(String, nullable=False)
-    quantity = Column(Integer, nullable=False)
-    order_date = Column(Date, nullable=False)
-    expected_delivery_date = Column(Date, nullable=True)
-    status = Column(String, default="Pending")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    __tablename__ = "orders"
+    id = Column(Integer, primary_key=True, index=True)
+    order_number = Column(String, unique=True, nullable=False)
+    customer_name = Column(String, nullable=False)
+    product_name = Column(String, nullable=False)
+    quantity = Column(Integer, nullable=False)
+    order_date = Column(Date, nullable=False)
+    expected_delivery_date = Column(Date, nullable=True)
+    status = Column(String, default="Pending")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Inventory(Base):
-    __tablename__ = "inventory"
-    id = Column(Integer, primary_key=True, index=True)
-    item_code = Column(String, unique=True, nullable=False)
-    item_name = Column(String, nullable=False)
-    category = Column(String, nullable=True)
-    quantity_available = Column(Integer, default=0)
-    reorder_level = Column(Integer, default=0)
-    warehouse_location = Column(String, nullable=True)
-    last_updated = Column(DateTime, default=datetime.utcnow)
+    __tablename__ = "inventory"
+    id = Column(Integer, primary_key=True, index=True)
+    item_code = Column(String, unique=True, nullable=False)
+    item_name = Column(String, nullable=False)
+    category = Column(String, nullable=True)
+    quantity_available = Column(Integer, default=0)
+    reorder_level = Column(Integer, default=0)
+    warehouse_location = Column(String, nullable=True)
+    last_updated = Column(DateTime, default=datetime.utcnow)
 
 class ProductionPlan(Base):
-    __tablename__ = "production_plan"
-    id = Column(Integer, primary_key=True, index=True)
-    product_name = Column(String, nullable=False)
-    planned_quantity = Column(Integer, nullable=False)
-    start_date = Column(Date, nullable=False)
-    end_date = Column(Date, nullable=False)
-    status = Column(String, default="Planned")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    __tablename__ = "production_plan"
+    id = Column(Integer, primary_key=True, index=True)
+    product_name = Column(String, nullable=False)
+    planned_quantity = Column(Integer, nullable=False)
+    start_date = Column(Date, nullable=False)
+    end_date = Column(Date, nullable=False)
+    status = Column(String, default="Planned")
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 class Procurement(Base):
-    __tablename__ = "procurement"
-    id = Column(Integer, primary_key=True, index=True)
-    item_name = Column(String, nullable=False)
-    required_quantity = Column(Integer, nullable=False)
-    vendor_id = Column(Integer, ForeignKey("vendors.id"))
-    order_date = Column(Date, nullable=False)
-    expected_arrival = Column(Date, nullable=True)
-    status = Column(String, default="Pending")
+    __tablename__ = "procurement"
+    id = Column(Integer, primary_key=True, index=True)
+    item_name = Column(String, nullable=False)
+    required_quantity = Column(Integer, nullable=False)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"))
+    order_date = Column(Date, nullable=False)
+    expected_arrival = Column(Date, nullable=True)
+    status = Column(String, default="Pending")
 
 class Vendor(Base):
-    __tablename__ = "vendors"
-    id = Column(Integer, primary_key=True, index=True)
-    vendor_name = Column(String, nullable=False)
-    contact_person = Column(String, nullable=True)
-    email = Column(String, nullable=True)
-    phone = Column(String, nullable=True)
-    rating = Column(Float, default=0.0)
-    active_status = Column(Integer, default=1)
+    __tablename__ = "vendors"
+    id = Column(Integer, primary_key=True, index=True)
+    vendor_name = Column(String, nullable=False)
+    contact_person = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    rating = Column(Float, default=0.0)
+    active_status = Column(Integer, default=1)
 
 class FinanceTransaction(Base):
-    __tablename__ = "finance_transactions"
-    id = Column(Integer, primary_key=True, index=True)
-    reference_type = Column(String)
-    reference_id = Column(Integer)
-    amount = Column(Float, nullable=False)
-    transaction_type = Column(String)
-    payment_status = Column(String, default="Pending")
-    transaction_date = Column(DateTime, default=datetime.utcnow)
+    __tablename__ = "finance_transactions"
+    id = Column(Integer, primary_key=True, index=True)
+    reference_type = Column(String)
+    reference_id = Column(Integer)
+    amount = Column(Float, nullable=False)
+    transaction_type = Column(String)
+    payment_status = Column(String, default="Pending")
+    transaction_date = Column(DateTime, default=datetime.utcnow)
 
 class Logistics(Base):
-    __tablename__ = "logistics"
-    id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"))
-    transport_mode = Column(String, nullable=True)
-    route_details = Column(String, nullable=True)
-    dispatch_date = Column(Date, nullable=True)
-    delivery_date = Column(Date, nullable=True)
-    status = Column(String, default="Pending")
+    __tablename__ = "logistics"
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"))
+    transport_mode = Column(String, nullable=True)
+    route_details = Column(String, nullable=True)
+    dispatch_date = Column(Date, nullable=True)
+    delivery_date = Column(Date, nullable=True)
+    status = Column(String, default="Pending")
 
 class ChatbotLog(Base):
-    __tablename__ = "chatbot_logs"
-    id = Column(Integer, primary_key=True, index=True)
-    user_query = Column(String, nullable=False)
-    bot_response = Column(String, nullable=False)
-    timestamp = Column(DateTime, default=datetime.utcnow)
+    __tablename__ = "chatbot_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    user_query = Column(String, nullable=False)
+    bot_response = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
 
 # =======================================================
-#                TRACEABILITY MODULE MODELS
+#                TRACEABILITY MODULE MODELS
 # =======================================================
 
 class JobWorkReport(Base):
-    __tablename__ = 'jobwork_report'
-    id = Column(Integer, primary_key=True, index=True)
-    sr_no = Column(Integer)
-    company_code = Column(String)
-    system_manual_challan = Column(String)
-    challan_type = Column(String)
-    month = Column(String)
-    year = Column(Integer)
-    gstin_jw = Column(String)
-    job_worker = Column(String)
-    jw_challan_no = Column(String, unique=True)
-    jw_challan_date = Column(Date)
-    mo_number = Column(String, index=True)
-    product_code = Column(String)
-    hsn_code = Column(String)
-    uqc = Column(String)
-    qty_sent = Column(Float)
-    unit_rate = Column(Float)
-    taxable_value = Column(Float)
-    gst_rate = Column(Float)
-    gst = Column(Float)
-    last_challan_date = Column(Date, nullable=True)
-    qty_approved = Column(Float)
-    qty_returned = Column(Float)
-    returned_weight = Column(Float)
-    difference_balance_qty = Column(Float)
-    mat_recd_within_days = Column(Integer, nullable=True)
-    current_status = Column(String)
-    user_name = Column(String)
-    normalized_mo = Column(String, index=True) 
+    __tablename__ = 'jobwork_report'
+    id = Column(Integer, primary_key=True, index=True)
+    sr_no = Column(Integer)
+    company_code = Column(String)
+    system_manual_challan = Column(String)
+    challan_type = Column(String)
+    month = Column(String)
+    year = Column(Integer)
+    gstin_jw = Column(String)
+    job_worker = Column(String)
+    jw_challan_no = Column(String, unique=True)
+    jw_challan_date = Column(Date)
+    mo_number = Column(String, index=True)
+    product_code = Column(String)
+    hsn_code = Column(String)
+    uqc = Column(String)
+    qty_sent = Column(Float)
+    unit_rate = Column(Float)
+    taxable_value = Column(Float)
+    gst_rate = Column(Float)
+    gst = Column(Float)
+    last_challan_date = Column(Date, nullable=True)
+    qty_approved = Column(Float)
+    qty_returned = Column(Float)
+    returned_weight = Column(Float)
+    difference_balance_qty = Column(Float)
+    mat_recd_within_days = Column(Integer, nullable=True)
+    current_status = Column(String)
+    user_name = Column(String)
+    normalized_mo = Column(String, index=True) 
 
 class TRBMaster(Base):
-    __tablename__ = 'trb_master'
-    id = Column(Integer, primary_key=True, index=True)
-    sheet_name = Column(String)
-    mo_type = Column(String)
-    pc_qty = Column(String)
-    tag_type = Column(String)
-    packaging_details = Column(String)
-    date = Column(Date, index=True)
-    shift = Column(Integer)
-    production = Column(Float)
-    cumulative_production = Column(Float)
-    remark = Column(String)
-    end_buffer = Column(Float)
-    towards_packaging = Column(Float)
-    next_station = Column(String)
-    qty1 = Column(Float)
-    qty2 = Column(Float)
-    qty3 = Column(Float)
-    normalized_mo = Column(String, index=True)
+    __tablename__ = 'trb_master'
+    id = Column(Integer, primary_key=True, index=True)
+    sheet_name = Column(String)
+    mo_type = Column(String)
+    pc_qty = Column(String)
+    tag_type = Column(String)
+    packaging_details = Column(String)
+    date = Column(Date, index=True)
+    shift = Column(Integer)
+    production = Column(Float)
+    cumulative_production = Column(Float)
+    remark = Column(String)
+    end_buffer = Column(Float)
+    towards_packaging = Column(Float)
+    next_station = Column(String)
+    qty1 = Column(Float)
+    qty2 = Column(Float)
+    qty3 = Column(Float)
+    normalized_mo = Column(String, index=True)
 
 class DGBBMaster(Base):
-    __tablename__ = 'dgbb_master'
-    id = Column(Integer, primary_key=True, index=True)
-    sheet_name = Column(String)
-    mo_type = Column(String)
-    pc_qty = Column(String)
-    tag_type = Column(String)
-    packaging_details = Column(String)
-    date = Column(Date, index=True)
-    shift = Column(Integer)
-    production = Column(Float)
-    cumulative_production = Column(Float)
-    remark = Column(String)
-    end_buffer = Column(Float)
-    towards_packaging = Column(Float)
-    next_station = Column(String)
-    qty1 = Column(Float)
-    qty2 = Column(Float)
-    qty3 = Column(Float)
-    normalized_mo = Column(String, index=True)
+    __tablename__ = 'dgbb_master'
+    id = Column(Integer, primary_key=True, index=True)
+    sheet_name = Column(String)
+    mo_type = Column(String)
+    pc_qty = Column(String)
+    tag_type = Column(String)
+    packaging_details = Column(String)
+    date = Column(Date, index=True)
+    shift = Column(Integer)
+    production = Column(Float)
+    cumulative_production = Column(Float)
+    remark = Column(String)
+    end_buffer = Column(Float)
+    towards_packaging = Column(Float)
+    next_station = Column(String)
+    qty1 = Column(Float)
+    qty2 = Column(Float)
+    qty3 = Column(Float)
+    normalized_mo = Column(String, index=True)
 
 class RingWeightTransitBuffer(Base):
-    __tablename__ = 'ringweight_transit_buffer'
-    
-    id = Column(Integer, primary_key=True, index=True)
-    channel_no = Column(String, index=True, nullable=False)  # Maps to 'ch# / channel'
-    variant_name = Column(String, nullable=False)           # Stores the true bearing model/type
-    component_type = Column(String, nullable=False)         # "IM" or "OM" (derived from the variant)
-    no_of_rings = Column(Float, default=0.0)                # Quantity in transit
-    date = Column(Date, index=True, nullable=True)
-    
-    # The Bridge: This is populated by matching channel_no to TBEMaster/TRBMaster/DGBBMaster
-    normalized_mo = Column(String, index=True, nullable=True)
+    __tablename__ = 'ringweight_transit_buffer'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    channel_no = Column(String, index=True, nullable=False)  # Maps to 'ch# / channel'
+    variant_name = Column(String, nullable=False)            # Stores the true bearing model/type
+    component_type = Column(String, nullable=False)          # "IM" or "OM" (derived from the variant)
+    no_of_rings = Column(Float, default=0.0)                 # Quantity in transit
+    date = Column(Date, index=True, nullable=True)
+    
+    # The Bridge: This is populated by matching channel_no to TBEMaster/TRBMaster/DGBBMaster
+    normalized_mo = Column(String, index=True, nullable=True)
 
 class IndustrialWeightConfirmation(Base):
-    __tablename__ = 'industrial_weight_confirmation'
-    
-    id = Column(Integer, primary_key=True, index=True)
-    
-    # Core Identifiers
-    date = Column(Date, index=True, nullable=True)
-    shift = Column(String, nullable=True)
-    channel_no = Column(String, index=True, nullable=False)   # Mapped from 'Ch# No'
-    component_type = Column(String, index=True, nullable=False) # Mapped from 'TYPE' (e.g., 'IM6306')
-    
-    # Weight Metrics (All Floats based on sample decimal precision)
-    gross_weight = Column(Float, default=0.0)                 # 'Gr Wt'
-    empty_box_weight = Column(Float, default=0.0)             # 'Empty Box Wt'
-    pallet_weight = Column(Float, default=0.0)                # 'Pallat Wt'
-    net_weight = Column(Float, default=0.0)                   # 'Net Wt'
-    ring_weight = Column(Float, default=0.0)                  # 'Ring Wt'
-    
-    # Quantities & Analysis
-    no_of_rings = Column(Float, default=0.0)                  # 'No Of Rings' (Using Float for 1742.34)
-    remarks = Column(String, nullable=True)                   # 'REMARKS'
-    std_box_qty = Column(Float, default=0.0)                  # 'STD BOX QTY'
-    std_vs_weight_diff_qty = Column(Float, default=0.0)       # 'Std Vs Weigt Diff Qty'
-    
-    # Bridge / Tracking Column (Optional, based on your Traceability pattern)
-    normalized_mo = Column(String, index=True, nullable=True)
+    __tablename__ = 'industrial_weight_confirmation'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    
+    # Core Identifiers
+    date = Column(Date, index=True, nullable=True)
+    shift = Column(String, nullable=True)
+    channel_no = Column(String, index=True, nullable=False)   # Mapped from 'Ch# No'
+    component_type = Column(String, index=True, nullable=False) # Mapped from 'TYPE' (e.g., 'IM6306')
+    
+    # Weight Metrics (All Floats based on sample decimal precision)
+    gross_weight = Column(Float, default=0.0)                 # 'Gr Wt'
+    empty_box_weight = Column(Float, default=0.0)             # 'Empty Box Wt'
+    pallet_weight = Column(Float, default=0.0)                # 'Pallat Wt'
+    net_weight = Column(Float, default=0.0)                   # 'Net Wt'
+    ring_weight = Column(Float, default=0.0)                  # 'Ring Wt'
+    
+    # Quantities & Analysis
+    no_of_rings = Column(Float, default=0.0)                  # 'No Of Rings' (Using Float for 1742.34)
+    remarks = Column(String, nullable=True)                   # 'REMARKS'
+    std_box_qty = Column(Float, default=0.0)                  # 'STD BOX QTY'
+    std_vs_weight_diff_qty = Column(Float, default=0.0)       # 'Std Vs Weigt Diff Qty'
+    
+    # Bridge / Tracking Column (Optional, based on your Traceability pattern)
+    normalized_mo = Column(String, index=True, nullable=True)
 
 
 class TraceabilityMaster(Base):
-    __tablename__ = 'traceability_master'
-    id = Column(Integer, primary_key=True, index=True)
-    source_channel = Column(String)
-    mo_type = Column(String)
-    pc_qty = Column(String)
-    tag_type = Column(String)
-    packaging_details = Column(String)
-    date = Column(Date)
-    shift = Column(Integer)
-    production = Column(Float)
-    cumulative_production = Column(Float)
-    remark = Column(String)
-    end_buffer = Column(Float)
-    towards_packaging = Column(Float)
-    next_station = Column(String)
-    qty1 = Column(Float)
-    qty2 = Column(Float)
-    qty3 = Column(Float)
-    normalized_mo = Column(String, index=True)
+    __tablename__ = 'traceability_master'
+    id = Column(Integer, primary_key=True, index=True)
+    source_channel = Column(String)
+    mo_type = Column(String)
+    pc_qty = Column(String)
+    tag_type = Column(String)
+    packaging_details = Column(String)
+    date = Column(Date)
+    shift = Column(Integer)
+    production = Column(Float)
+    cumulative_production = Column(Float)
+    remark = Column(String)
+    end_buffer = Column(Float)
+    towards_packaging = Column(Float)
+    next_station = Column(String)
+    qty1 = Column(Float)
+    qty2 = Column(Float)
+    qty3 = Column(Float)
+    normalized_mo = Column(String, index=True)
 
 class TraceabilityLog(Base):
-    __tablename__ = 'traceability_log'
-    id = Column(Integer, primary_key=True, index=True)
-    normalized_mo = Column(String, index=True)
-    sync_date = Column(DateTime, default=datetime.utcnow)
-    reconciliation_details = Column(String) 
-    status = Column(String) 
+    __tablename__ = 'traceability_log'
+    id = Column(Integer, primary_key=True, index=True)
+    normalized_mo = Column(String, index=True)
+    sync_date = Column(DateTime, default=datetime.utcnow)
+    reconciliation_details = Column(String) 
+    status = Column(String) 
 
 # =======================================================
-#                   TBE MODULE MODELS
+#                  TBE MODULE MODELS
 # =======================================================
 
 class TBEMaster(Base):
-    __tablename__ = 'tbe_master'
-    id = Column(Integer, primary_key=True, index=True)
-    source_channel = Column(String)
-    mo_type = Column(String)
-    pc_qty = Column(String)
-    tag_type = Column(String)
-    packaging_details = Column(String)
-    date = Column(Date)
-    shift = Column(Integer)
-    production = Column(Float)
-    cumulative_production = Column(Float)
-    remark = Column(String)
-    end_buffer = Column(Float)
-    towards_packaging = Column(Float)
-    next_station = Column(String)
-    qty1 = Column(Float)
-    qty2 = Column(Float)
-    qty3 = Column(Float)
-    normalized_mo = Column(String, index=True)
+    __tablename__ = 'tbe_master'
+    id = Column(Integer, primary_key=True, index=True)
+    source_channel = Column(String)
+    mo_type = Column(String)
+    pc_qty = Column(String)
+    tag_type = Column(String)
+    packaging_details = Column(String)
+    date = Column(Date)
+    shift = Column(Integer)
+    production = Column(Float)
+    cumulative_production = Column(Float)
+    remark = Column(String)
+    end_buffer = Column(Float)
+    towards_packaging = Column(Float)
+    next_station = Column(String)
+    qty1 = Column(Float)
+    qty2 = Column(Float)
+    qty3 = Column(Float)
+    normalized_mo = Column(String, index=True)
 
 class TBELog(Base):
-    __tablename__ = 'tbe_log'
-    id = Column(Integer, primary_key=True, index=True)
-    normalized_mo = Column(String, index=True)
-    sync_date = Column(DateTime, default=datetime.utcnow)
-    reconciliation_details = Column(String) 
-    status = Column(String)
+    __tablename__ = 'tbe_log'
+    id = Column(Integer, primary_key=True, index=True)
+    normalized_mo = Column(String, index=True)
+    sync_date = Column(DateTime, default=datetime.utcnow)
+    reconciliation_details = Column(String) 
+    status = Column(String)
 
 
 # =======================================================
-#                AFTERCHANNEL MODULE MODELS
+#                AFTERCHANNEL MODULE MODELS
 # =======================================================
 
 class AccurateLedger(Base):
-    __tablename__ = "accurate_ledger"
-    id = Column(Integer, primary_key=True, index=True)
-    mo = Column(String, index=True)
-    bearing_type = Column(String)
-    in_date = Column(Date)
-    shift_in = Column(String)
-    pc_no = Column(String)
-    material_in_from = Column(String)
-    qty_in = Column(Integer)
-    next_station = Column(String)
-    qty_sent = Column(Integer)
-    out_date = Column(Date)
-    shift_out = Column(String)
+    __tablename__ = "accurate_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    pc_no = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
 
 class CpsLedger(Base):
-    __tablename__ = "cps_ledger"
-    id = Column(Integer, primary_key=True, index=True)
-    mo = Column(String, index=True)
-    bearing_type = Column(String)
-    item_type = Column(String)
-    in_date = Column(Date)
-    shift_in = Column(String)
-    rc_no = Column(String)
-    material_in_from = Column(String)
-    channel = Column(String)
-    qty_in = Column(Integer)
-    next_station = Column(String)
-    qty_sent = Column(Integer)
-    out_date = Column(Date)
-    shift_out = Column(String)
+    __tablename__ = "cps_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    item_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    rc_no = Column(String)
+    material_in_from = Column(String)
+    channel = Column(String)
+    qty_in = Column(Integer)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
 
 class ReworkLedger(Base):
-    __tablename__ = "rework_ledger"
-    id = Column(Integer, primary_key=True, index=True)
-    mo = Column(String, index=True)
-    in_date = Column(Date)
-    shift_in = Column(String)
-    channel = Column(String)
-    bearing_type = Column(String)
-    line_type = Column(String)
-    material_in_from = Column(String)
-    qty_in = Column(Integer)
-    rework_activity = Column(String)
-    next_station = Column(String)
-    qty_sent = Column(Integer)
-    out_date = Column(Date)
-    shift_out = Column(String)
-    operator = Column(String)
-    remark = Column(String)
+    __tablename__ = "rework_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    channel = Column(String)
+    bearing_type = Column(String)
+    line_type = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    rework_activity = Column(String)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+    operator = Column(String)
+    remark = Column(String)
+    
+    # SAFELY APPENDED: Will not break existing queries
+    bearing_family = Column(String, nullable=True)
 
 class VibrationDismantlingLedger(Base):
-    __tablename__ = "vibration_dismantling_ledger"
-    id = Column(Integer, primary_key=True, index=True)
-    mo = Column(String, index=True)
-    in_date = Column(Date)
-    shift_in = Column(String)
-    channel = Column(String)
-    bearing_type = Column(String)
-    line_type = Column(String)
-    reason = Column(String)
-    material_in_from = Column(String)
-    qty_in = Column(Integer)
-    activity = Column(String)
-    ball_scrap = Column(Integer)
-    cage_seal_scrap = Column(Integer)
-    ring_type = Column(String)
-    next_station = Column(String)
-    qty_sent = Column(Integer)
-    out_date = Column(Date)
-    shift_out = Column(String)
-    operator = Column(String)
-    remark = Column(String)
+    __tablename__ = "vibration_dismantling_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    channel = Column(String)
+    bearing_type = Column(String)
+    line_type = Column(String)
+    reason = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    activity = Column(String)
+    ball_scrap = Column(Integer)
+    cage_seal_scrap = Column(Integer)
+    ring_type = Column(String)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+    operator = Column(String)
+    remark = Column(String)
+    
+    # SAFELY APPENDED: Will not break existing queries
+    bearing_family = Column(String, nullable=True)
+    roller_scrap = Column(Integer, nullable=True)
+    cage_scrap = Column(Integer, nullable=True)
+    seal_scrap = Column(Integer, nullable=True)
+    shield_scrap = Column(Integer, nullable=True)
+    ir_scrap = Column(Integer, nullable=True)
+    or_scrap = Column(Integer, nullable=True)
+
+# NEW TABLES: Will be created automatically if you run Base.metadata.create_all()
+class AutopackagingLedger(Base):
+    __tablename__ = "autopackaging_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+
+class FpsLedger(Base):
+    __tablename__ = "fps_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    customer_order = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)

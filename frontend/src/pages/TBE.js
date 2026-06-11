@@ -1,361 +1,597 @@
-import React, { useState, useEffect, useRef } from 'react';
-import './TBE.css';
+from fastapi import APIRouter, Query
+import pandas as pd
+import requests
+import io
+import threading
+import time
+import re
+import math
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
-const API = 'https://scm-backend-pshv.onrender.com';
+router = APIRouter()
 
-const TBE = () => {
-  const [summaryData, setSummaryData] = useState([]);
-  const [search, setSearch] = useState('');
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [isInitializing, setIsInitializing] = useState(false);
-  const [error, setError] = useState('');
-  
-  // Drilldown Breakout States
-  const [selectedFamily, setSelectedFamily] = useState(null); 
-  const [detailData, setDetailData] = useState([]);
-  const [detailLoading, setDetailLoading] = useState(false);
+MASTER_CACHE = []
+LAST_REFRESH = None
+IS_UPDATING = False
+INITIALIZED = False  
+CACHE_DURATION_MINUTES = 5
 
-  const timerRef = useRef(null);
+GLOBAL_CH_ROWS = []
+GLOBAL_TB_ROWS = []
+GLOBAL_SHO_ROWS = [] # NEW: Holds parsed JobWork_Report entries
 
-  // Re-fetch data whenever date filters change to calculate strict sums server-side
-  useEffect(() => {
-    fetchTBEDashboard();
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [startDate, endDate]);
+# Pre-compiled regex for speed
+NUM_REGEX = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
+PREFIX_REGEX = re.compile(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)')
+FAM_REGEX = re.compile(r'(\d{3,5})')
 
-  useEffect(() => {
-    if (!selectedFamily) {
-      setDetailData([]);
-      return;
-    }
-
-    const fetchVariantDetails = async () => {
-      try {
-        setDetailLoading(true);
-        let url = `${API}/tbe_variant_details?ch=${encodeURIComponent(selectedFamily.ch)}&fam=${encodeURIComponent(selectedFamily.fam)}`;
-        if (startDate) url += `&start_date=${startDate}`;
-        if (endDate) url += `&end_date=${endDate}`;
-
-        const res = await fetch(url);
-        if (!res.ok) throw new Error("Could not retrieve variant sequential logs.");
-        const json = await res.json();
-        setDetailData(json.data || []);
-      } catch (err) {
-        console.error(err.message);
-      } finally {
-        setDetailLoading(false);
-      }
-    };
-
-    fetchVariantDetails();
-  }, [selectedFamily, startDate, endDate]);
-
-  const fetchTBEDashboard = async () => {
-    try {
-      if (!isInitializing) setLoading(true);
-      setError('');
-
-      let url = `${API}/tbe_all_mos`;
-      const queryParams = [];
-      if (startDate) queryParams.push(`start_date=${startDate}`);
-      if (endDate) queryParams.push(`end_date=${endDate}`);
-      if (queryParams.length > 0) url += `?${queryParams.join('&')}`;
-
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`Server returned status code: ${res.status}`);
-      
-      const json = await res.json();
-      
-      if (json.status === 'initializing') {
-        setIsInitializing(true);
-        setSummaryData([]);
-        if (timerRef.current) clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(fetchTBEDashboard, 4000);
-      } else {
-        setIsInitializing(false);
-        setSummaryData(json.data || []);
-      }
-    } catch (err) {
-      setIsInitializing(false);
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const filteredSummary = summaryData.filter(item => {
-    return (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
-      (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase())) ||
-      (item.mo_ref && String(item.mo_ref).toLowerCase().includes(search.toLowerCase()));
-  });
-
-  const sortedSummary = [...filteredSummary].sort((a, b) => {
-    if (a.channel_ref !== b.channel_ref) {
-      return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
-    }
-    if (a.product_variant !== b.product_variant) {
-      return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
-    }
-    return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
-  });
-
-  const getChannelRowSpan = (dataArray, currentIndex) => {
-    const currentRef = dataArray[currentIndex].channel_ref;
-    if (!currentRef) return 1;
-    if (currentIndex > 0 && dataArray[currentIndex - 1].channel_ref === currentRef) return 0; 
-    let span = 1;
-    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef) {
-      span++;
-    }
-    return span;
-  };
-
-  const getFamilyRowSpan = (dataArray, currentIndex) => {
-    const currentRef = dataArray[currentIndex].channel_ref;
-    const currentFam = dataArray[currentIndex].product_variant;
-    if (!currentRef || !currentFam) return 1;
+def repair_sheet_headers(df):
+    if df.empty: return df
+    targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity"}
+    best_row_idx = -1
+    max_score = 0
     
-    if (currentIndex > 0 && 
-        dataArray[currentIndex - 1].channel_ref === currentRef &&
-        dataArray[currentIndex - 1].product_variant === currentFam) {
-      return 0; 
-    }
-    let span = 1;
-    while (currentIndex + span < dataArray.length && 
-           dataArray[currentIndex + span].channel_ref === currentRef &&
-           dataArray[currentIndex + span].product_variant === currentFam) {
-      span++;
-    }
-    return span;
-  };
+    for idx in range(min(20, len(df))):
+        row_vals = [str(val).strip().lower().replace(" ", "").replace("#", "") for val in df.iloc[idx].values]
+        score = sum(1 for t in targets if any(t in v for v in row_vals))
+        if score > max_score:
+            max_score = score
+            best_row_idx = idx
+            
+    if max_score >= 2 and best_row_idx >= 0:
+        new_cols = df.iloc[best_row_idx].tolist()
+        new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(new_cols)]
+        df.columns = new_cols
+        return df.iloc[best_row_idx+1:].reset_index(drop=True)
+    return df
 
-  return (
-    <div className="traceability-container" style={{ fontFamily: 'Segoe UI, Roboto, sans-serif' }}>
-      <div className="header-section">
-        <div>
-          <h1>TBE Tracking Log</h1>
-          <p className="sub-tag">Synchronized Channel & Ring Family Sequencing Matrices</p>
-        </div>
+def find_column(df, patterns):
+    cols = [str(c).strip() for c in df.columns]
+    for p in patterns:
+        norm_p = p.lower().replace(" ", "").replace("_", "").replace("#", "")
+        for c in cols:
+            norm_c = c.lower().replace(" ", "").replace("_", "").replace("#", "")
+            if norm_c == norm_p: return c
+    return None
+
+def normalize_channel(value, force_t_prefix=False):
+    if pd.isna(value): return ""
+    val_str = str(value).strip().upper()
+    
+    is_explicit_t = val_str.startswith("T")
+    val_str = PREFIX_REGEX.sub('', val_str).strip()
+    
+    if val_str.startswith("T"):
+        is_explicit_t = True
+        val_str = val_str[1:]
         
-        <div className="control-actions">
-          <input 
-            type="date" 
-            className="search-box" 
-            title="Start Date"
-            value={startDate} 
-            onChange={(e) => setStartDate(e.target.value)} 
-          />
-          <span style={{margin: '0 5px', color: '#64748b'}}>to</span>
-          <input 
-            type="date" 
-            className="search-box" 
-            title="End Date"
-            value={endDate} 
-            onChange={(e) => setEndDate(e.target.value)} 
-          />
+    val_str = val_str.replace("-", "").replace(" ", "")
+    if val_str.endswith(".0"): val_str = val_str[:-2]
+    
+    cleaned = val_str.lstrip("0")
+    if not cleaned: cleaned = "0"
+    
+    if force_t_prefix or is_explicit_t:
+        return f"T{cleaned}"
+    return cleaned
 
-          <button className="back-btn" style={{margin: '0 10px'}} onClick={fetchTBEDashboard} disabled={loading}>
-            {loading ? 'Refreshing...' : '🔄 Reload'}
-          </button>
-          
-          <input
-            className="search-box"
-            placeholder="Search Channel, MO, or Family..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            disabled={isInitializing}
-          />
-        </div>
-      </div>
+def parse_family_and_type(prod_text):
+    text = str(prod_text).strip().upper()
+    if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN", "ASSEMBLY"
+    
+    r_type = "ASSEMBLY"
+    if any(x in text for x in ["IM", "IR", "INNER"]): r_type = "IM"
+    elif any(x in text for x in ["OM", "OR", "OUTER"]): r_type = "OM"
+    
+    match = FAM_REGEX.search(text)
+    base = match.group(1) if match else text.split()[0].split('-')[0]
+    
+    if "BT" in text.split() or text.startswith("BT") or "-BT" in text or " BT" in text:
+        base = f"BT-{base}"
+    elif "BB" in text.split() or text.startswith("BB") or "-BB" in text or " BB" in text:
+        base = f"BB-{base}"
+        
+    return base, r_type
 
-      {error && <div className="error-box">⚠️ Network Error: {error}</div>}
-      
-      {isInitializing && (
-        <div className="initializing-box">
-          <div className="spinner"></div>
-          <p><strong>Compiling Remote Workbook Matrix Caches...</strong></p>
-        </div>
-      )}
+def clean_nan(value):
+    if pd.isna(value): return 0.0
+    val_str = str(value)
+    match = NUM_REGEX.search(val_str.replace(',', ''))
+    if match: 
+        return float(match.group())
+    return 0.0
 
-      {loading && !isInitializing && <div className="loading-spinner">Querying server memory buffer...</div>}
+def parse_date_safe(value):
+    try:
+        if pd.isna(value) or str(value).strip().lower() in ["nan", "nat", "", "-", "none"]: return None
+        ts = pd.to_datetime(value, dayfirst=True, errors='coerce')
+        if ts is pd.NaT or pd.isna(ts): return None
+        return ts.date()
+    except:
+        return None
 
-      {!loading && !isInitializing && (
-        /* Dynamic container giving constrained height + elegant card framing shadow */
-        <div className="table-wrapper" style={{ maxHeight: '680px', overflowY: 'auto', border: '1px solid #cbd5e1', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', position: 'relative' }}>
-          <table className="trace-table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
-            <thead>
-              {/* Row 1 Sticky Headers with high-contrast distinct section colors */}
-              <tr className="super-header" style={{ height: '42px' }}>
-                <th colSpan="4" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#334155', color: '#ffffff', border: '1px solid #475569', fontWeight: '600', padding: '10px' }}>Connection Mapping</th>
-                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0284c7', color: '#ffffff', border: '1px solid #0369a1', fontWeight: '600', padding: '10px' }}>SHO Department (Split)</th>
-                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#ea580c', color: '#ffffff', border: '1px solid #c2410c', fontWeight: '600', padding: '10px' }}>Transit Buffer (Split)</th>
-                <th colSpan="3" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#16a34a', color: '#ffffff', border: '1px solid #15803d', fontWeight: '600', padding: '10px' }}>Channel Section (Combined Rollup)</th>
-                <th style={{ position: 'sticky', top: 0, zIndex: 10, background: '#475569', color: '#ffffff', border: '1px solid #576880', fontWeight: '600', padding: '10px' }}>Status Tracker</th>
-              </tr>
-              {/* Row 2 Sticky Headers with corresponding matching tint colors */}
-              <tr className="sub-header" style={{ height: '38px' }}>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Channel Ref</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>MO</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Family</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Type</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>Qty</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>In Date</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Qty</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Qty</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>In Date</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Tracking Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sortedSummary.map((row, idx) => {
-                const channelSpan = getChannelRowSpan(sortedSummary, idx);
-                const familySpan = getFamilyRowSpan(sortedSummary, idx);
-                const uniqueKey = `${row.channel_ref || 'b'}-${row.product_variant || 'b'}-${row.ring_type || 'b'}-${idx}`;
+def load_excel_sheets(url):
+    try:
+        resp = requests.get(url, timeout=45)
+        if resp.status_code != 200: return {}
+        content = io.BytesIO(resp.content)
+        try:
+            xls = pd.ExcelFile(content, engine='calamine')
+        except ImportError:
+            xls = pd.ExcelFile(content)
+        time.sleep(0.05) 
+        return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
+    except Exception as e:
+        print(f"⚠️ Error reading workbook stream: {e}")
+        return {}
+
+def process_master_sheets(sheets_dict, is_trb):
+    ch_list = []
+    for sheet_name, df in sheets_dict.items():
+        time.sleep(0.01) 
+        if df.empty: continue
+        
+        clean_name = str(sheet_name).strip().upper()
+        if not re.match(r'^(T|CH)[-\s]*\d+', clean_name):
+            continue
+            
+        ch_col = find_column(df, ["channelno", "channel", "machineno", "line", "ch"])
+        mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
+        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
+        d_col = find_column(df, ["date", "day", "txndate"])
+        prod_col = find_column(df, ["production", "prodqty", "shiftproduction", "qty", "quantity"])
+
+        if not type_col: continue 
+
+        target_cols = [c for c in [ch_col, mo_col, type_col, d_col, prod_col] if c]
+        df_records = df[target_cols].to_dict('records')
+        
+        for row in df_records:
+            c_val = row.get(ch_col) if ch_col else sheet_name
+            ch = normalize_channel(c_val, force_t_prefix=is_trb)
+            if not ch or ch == "0": ch = normalize_channel(sheet_name, force_t_prefix=is_trb)
+            
+            mo_val = str(row.get(mo_col)).strip() if mo_col else ""
+            if mo_val.upper() in ["NAN", "NONE"]: mo_val = ""
+            
+            prod_str = str(row.get(type_col)).strip()
+            if prod_str.upper() in ["", "NAN"]: continue
+            
+            base_family, _ = parse_family_and_type(prod_str)
+            qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
+            dt = parse_date_safe(row.get(d_col))
+
+            ch_list.append({
+                "ch": ch, 
+                "fam": base_family, 
+                "variant": prod_str, 
+                "mo": mo_val, 
+                "qty": qty, 
+                "date": dt
+            })
+    return ch_list
+
+def compile_summary_data(start_date_str=None, end_date_str=None):
+    s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
+    e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
+
+    filtered_ch = GLOBAL_CH_ROWS
+    filtered_tb = GLOBAL_TB_ROWS 
+    filtered_sho = GLOBAL_SHO_ROWS
+
+    if s_dt or e_dt:
+        if s_dt and e_dt:
+            filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
+            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
+        elif s_dt:
+            filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] >= s_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] >= s_dt]
+            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and r["date"] >= s_dt]
+        elif e_dt:
+            filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
+            filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
+            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and r["date"] <= e_dt]
+
+    if filtered_ch:
+        df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
+            ch_qty=('qty', 'sum'),
+            ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
+            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None)),
+            mo_list=('mo', lambda x: ", ".join(sorted(set([str(i) for i in x if pd.notna(i) and str(i).strip()]))))
+        ).reset_index()
+    else:
+        df_ch_grouped = pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
+
+    tb_list_parsed = []
+    if filtered_tb:
+        for r in filtered_tb:
+            tb_list_parsed.append({
+                "ch": r["ch"], "fam": r["fam"], "type": r.get("type", parse_family_and_type(r["variant"])[1]),
+                "qty": r["qty"], "date": r["date"]
+            })
+
+    if tb_list_parsed:
+        df_tb_grouped = pd.DataFrame(tb_list_parsed).groupby(["ch", "fam", "type"]).agg(
+            tb_qty=('qty', 'sum'),
+            tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
+            tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
+        ).reset_index()
+    else:
+        df_tb_grouped = pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
+
+    if df_tb_grouped.empty and df_ch_grouped.empty:
+        return []
+
+    merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
+
+    compiled_summary = []
+    for _, row in merged.iterrows():
+        ch, fam = row["ch"], row["fam"]
+        r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
+        
+        tb_qty = row.get("tb_qty", 0.0)
+        ch_qty = row.get("ch_qty", 0.0)
+        if pd.isna(tb_qty): tb_qty = 0.0
+        if pd.isna(ch_qty): ch_qty = 0.0
+
+        tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
+        ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
+        
+        mo_list = row.get("mo_list", "")
+        if pd.isna(mo_list): mo_list = ""
+        mos = [m.strip() for m in str(mo_list).split(',') if m.strip()]
+
+        final_tb_qty = math.ceil(tb_qty)
+        final_ch_qty = math.ceil(ch_qty)
+
+        # --- DYNAMIC SHO AGGREGATION & 4-DAY CONSTRAINT ALGORITHM ---
+        tb_dates = [r["date"] for r in filtered_tb if r["ch"] == ch and r["fam"] == fam and r.get("type", parse_family_and_type(r["variant"])[1]) == r_type and r["date"]]
+        valid_sho_qty = 0.0
+        sho_dates = []
+
+        for sho in filtered_sho:
+            if sho["fam"] == fam and sho["type"] == r_type:
+                if not mos: continue # Needs MO linkage
                 
-                // Beautiful subtle zebra lines for alternate rows
-                const rowBg = idx % 2 === 0 ? '#ffffff' : '#fdfdfd';
+                mo_match = any((sho["mo"] in m or m in sho["mo"]) for m in mos if m)
+                if not mo_match: continue
+                
+                include = False
+                if not tb_dates:
+                    include = True
+                elif not sho["date"]:
+                    include = True
+                else:
+                    for tbd in tb_dates:
+                        diff = (tbd - sho["date"]).days
+                        # Constraint: SHO should have date of not more than 4 days before Transit Buffer
+                        if -15 <= diff <= 4:  
+                            include = True
+                            break
+                
+                if include:
+                    valid_sho_qty += sho["qty"]
+                    if sho["date"]: sho_dates.append(sho["date"])
 
-                return (
-                  <tr key={uniqueKey} className="data-row" style={{ backgroundColor: rowBg, transition: 'background 0.2s' }}>
-                    {/* Channel Column */}
-                    {channelSpan > 0 && (
-                      <td rowSpan={channelSpan} className="merged-mo-cell fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f1f5f9', color: '#334155', verticalAlign: 'middle' }}>
-                        {row.channel_ref || '-'}
-                      </td>
-                    )}
-                    
-                    {/* MO Column */}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f8fafc', fontSize: '0.9em', verticalAlign: 'middle' }}>
-                        {row.mo_ref || '-'}
-                      </td>
-                    )}
+        final_sho_qty = math.ceil(valid_sho_qty)
+        sho_in = str(min(sho_dates)) if sho_dates else "-"
 
-                    {/* Ring Family Column */}
-                    {familySpan > 0 && (
-                      <td 
-                        rowSpan={familySpan} 
-                        className="fw-bold text-primary clickable-family-cell"
-                        title="Click to view full variant routing entries"
-                        onClick={() => setSelectedFamily({ ch: row.channel_ref, fam: row.product_variant })}
-                        style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0f9ff', color: '#0284c7', cursor: 'pointer', verticalAlign: 'middle', textDecoration: 'underline' }}
-                      >
-                        {row.product_variant}
-                      </td>
-                    )}
-                    
-                    {/* Ring Type Column */}
-                    <td className="fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#1e293b' }}>{row.ring_type}</td>
-                    
-                    {/* SHO Split */}
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}</td>
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_in || '-'}</td>
-                    
-                    {/* TB Split */}
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}</td>
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_out || '-'}</td>
-                    
-                    {/* Channel Section */}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell fw-bold text-success" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#16a34a', verticalAlign: 'middle' }}>
-                        {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
-                      </td>
-                    )}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_in || '-'}</td>
-                    )}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_out || '-'}</td>
-                    )}
-                    
-                    {/* Status Tracker */}
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px' }}>
-                      <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
-                        {row.status || 'In Process'}
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-              {sortedSummary.length === 0 && (
-                <tr>
-                  <td colSpan="12" className="empty-state" style={{ padding: '30px', color: '#64748b', fontStyle: 'italic' }}>
-                    No records found matching the current search criteria or date range.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      )}
+        if final_tb_qty == 0 and final_ch_qty > 0: calc_status = "Channel Only"
+        elif final_tb_qty > 0 and final_ch_qty == 0: calc_status = "Missing Channel Data"
+        elif final_ch_qty >= final_tb_qty and final_tb_qty > 0: calc_status = "Completed"
+        else: calc_status = "In Process"
 
-      {/* Redesigned Stacked Layout Detail Breakdown Modal */}
-      {selectedFamily && (
-        <div className="modal-overlay" onClick={() => setSelectedFamily(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <div>
-                <h3>Variant Specific Location Breakdown</h3>
-                <p className="modal-subheading">Family Scope: <strong>{selectedFamily.fam}</strong></p>
-              </div>
-              <button className="close-modal-btn" onClick={() => setSelectedFamily(null)}>&times;</button>
-            </div>
-            <div className="modal-body">
-              {detailLoading ? (
-                <div className="detail-loading-box">
-                  <div className="spinner"></div>
-                  <p>Querying breakdown registries...</p>
-                </div>
-              ) : detailData.length === 0 ? (
-                <div className="empty-state">No independent deployment logs located for this variant structure within chosen dates.</div>
-              ) : (
-                <div className="modal-table-wrapper" style={{ maxHeight: '420px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
-                  <table className="detail-variant-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
-                    <thead>
-                      <tr style={{ background: '#334155', color: '#ffffff', height: '40px' }}>
-                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>MO / Channel Reference</th>
-                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Department / Specific Location</th>
-                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Product / Part Sub Variant</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>In Date</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Out Date</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Qty</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Execution Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {detailData.map((vRow, vIdx) => (
-                        <tr key={vIdx} className="modal-data-row" style={{ background: vIdx % 2 === 0 ? '#ffffff' : '#f8fafc' }}>
-                          <td className="text-start text-muted" style={{ fontSize: '0.95em', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.mo_ref}</td>
-                          <td className="text-start" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0' }}>
-                            <span className={`dept-tag ${vRow.department.toLowerCase().replace(/\s+/g, '-')}`}>
-                              {vRow.department}
-                            </span>
-                          </td>
-                          <td className="text-start fw-bold" style={{ color: '#0f172a', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.variant}</td>
-                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.in_date}</td>
-                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.out_date}</td>
-                          <td className="fw-bold" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{Number(vRow.qty).toLocaleString()}</td>
-                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>
-                            <span className="execution-status-dot">{vRow.status}</span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-};
+        compiled_summary.append({
+            "channel_ref": ch,
+            "mo_ref": mo_list,
+            "product_variant": fam,
+            "ring_type": r_type,
+            "sho_qty": final_sho_qty, # Sourced from JobWork sheet directly
+            "tb_qty": final_tb_qty, 
+            "sho_in": sho_in,         # Sourced from JobWork sheet date
+            "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
+            "ch_qty": final_ch_qty,
+            "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
+            "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-",
+            "status": calc_status
+        })
 
-export default TBE;
+    compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
+    return compiled_summary
+
+def process_tbe_data():
+    global MASTER_CACHE, LAST_REFRESH, IS_UPDATING, INITIALIZED, GLOBAL_CH_ROWS, GLOBAL_TB_ROWS, GLOBAL_SHO_ROWS
+    if IS_UPDATING: return
+    IS_UPDATING = True
+
+    try:
+        from settings import settings
+        
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_ring = executor.submit(load_excel_sheets, settings.RINGWT_TRANSITBUFFER_URL)
+            future_trb = executor.submit(load_excel_sheets, settings.TRB_MASTER_URL)
+            future_dgbb = executor.submit(load_excel_sheets, settings.DGBB_MASTER_URL)
+            future_jw = executor.submit(load_excel_sheets, settings.JOBWORK_REPORT_URL)
+            
+            ring_wt_sheets = future_ring.result()
+            trb_sheets = future_trb.result()
+            dgbb_sheets = future_dgbb.result()
+            jw_sheets = future_jw.result()
+
+        # 1. Process Channel Master Sheets
+        ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
+
+        # 2. Process Transit Buffer Sheets
+        tb_list = []
+        for sheet_name, df in ring_wt_sheets.items():
+            time.sleep(0.01) 
+            if df.empty: continue
+            
+            c_col = find_column(df, ["ch#no", "ch# no", "channelref", "channel", "machineno"])
+            f_col = find_column(df, ["type", "ringfamily", "family", "variant", "product"])
+            d_col = find_column(df, ["date", "indate", "outdate", "day"])
+            
+            q_col = None
+            for c in df.columns:
+                if str(c).lower().replace(" ", "").replace("#", "") == "noofrings":
+                    q_col = c
+                    break
+            if not q_col: q_col = find_column(df, ["qty", "quantity", "total"])
+            
+            if not f_col: continue 
+
+            target_cols = [c for c in [c_col, f_col, d_col, q_col] if c]
+            df_records = df[target_cols].to_dict('records')
+
+            for row in df_records:
+                c_val = row.get(c_col) if c_col else sheet_name
+                ch = normalize_channel(c_val, force_t_prefix=False) 
+                if not ch or ch == "0": ch = normalize_channel(sheet_name, force_t_prefix=False)
+                
+                prod_text = str(row.get(f_col)).strip()
+                if prod_text.upper() in ["", "NAN"]: continue
+                
+                base_family, r_type = parse_family_and_type(prod_text)
+                qty = clean_nan(row.get(q_col)) if q_col else 0.0
+                dt = parse_date_safe(row.get(d_col))
+
+                tb_list.append({
+                    "ch": ch, "fam": base_family, "variant": prod_text, 
+                    "type": r_type, "qty": qty, "date": dt
+                })
+
+        # 3. Process JobWork Report (SHO Department)
+        sho_list = []
+        for sheet_name, df in jw_sheets.items():
+            time.sleep(0.01)
+            clean_sheet = str(sheet_name).strip().lower()
+            if any(k in clean_sheet for k in ["summary", "pivot", "total", "history", "dash", "master"]): 
+                continue
+            
+            mo_col = find_column(df, ["po/prno.", "poprno", "mono", "mo", "po/prno"])
+            prod_col = find_column(df, ["product", "item", "description"])
+            qty_col = find_column(df, ["qtyapproved", "approvedqty", "shoqty", "qty", "qtyreq"])
+            date_col = find_column(df, ["jwchallandate", "challandate", "date", "jwdate"])
+            
+            if not mo_col: continue
+            
+            target_cols = [c for c in [mo_col, prod_col, qty_col, date_col] if c]
+            for row in df[target_cols].to_dict('records'):
+                raw_mo = str(row.get(mo_col, "")).strip().upper().replace(" ", "")
+                if raw_mo.endswith(".0"): raw_mo = raw_mo[:-2]
+                if not raw_mo or raw_mo in ["NAN", "NONE", "NA"]: continue
+                
+                raw_product = str(row.get(prod_col, ""))
+                if raw_product.upper() in ["NAN", "NONE", "NA", ""]: continue
+                
+                base_fam, comp_type = parse_family_and_type(raw_product)
+                sho_qty = clean_nan(row.get(qty_col))
+                sho_date = parse_date_safe(row.get(date_col))
+                
+                sho_list.append({
+                    "mo": raw_mo, "fam": base_fam, "type": comp_type,
+                    "qty": sho_qty, "date": sho_date, "label": raw_product
+                })
+
+        GLOBAL_CH_ROWS = ch_list
+        GLOBAL_TB_ROWS = tb_list
+        GLOBAL_SHO_ROWS = sho_list
+
+        MASTER_CACHE = compile_summary_data(None, None)
+        LAST_REFRESH = datetime.now()
+
+    except Exception as e:
+        print(f"❌ COMPILATION FAULT: {str(e)}")
+    finally:
+        INITIALIZED = True 
+        IS_UPDATING = False
+
+def background_refresh_loop():
+    while True:
+        try:
+            process_tbe_data()
+        except Exception as e:
+            print(f"Background thread error: {e}")
+        time.sleep(CACHE_DURATION_MINUTES * 60)
+
+threading.Thread(target=background_refresh_loop, daemon=True).start()
+
+@router.get("/tbe_all_mos")
+def get_tbe_dashboard(start_date: str = Query(None), end_date: str = Query(None)):
+    if not INITIALIZED:
+        return {"status": "initializing", "message": "Compiling data matrices...", "data": []}
+    
+    if start_date or end_date:
+        data_slice = compile_summary_data(start_date, end_date)
+    else:
+        data_slice = MASTER_CACHE
+        
+    return {"status": "success", "last_updated": str(LAST_REFRESH), "data": data_slice}
+
+@router.get("/tbe_variant_details")
+def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_date: str = Query(None), end_date: str = Query(None)):
+    s_dt = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date and start_date.strip() not in ["", "null", "None"] else None
+    e_dt = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date and end_date.strip() not in ["", "null", "None"] else None
+
+    ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
+    tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
+    sho_filtered = [r for r in GLOBAL_SHO_ROWS if r["fam"] == fam]
+    
+    if s_dt or e_dt:
+        if s_dt and e_dt:
+            ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
+            sho_filtered = [r for r in sho_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
+        elif s_dt:
+            ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] >= s_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] >= s_dt]
+            sho_filtered = [r for r in sho_filtered if r["date"] and r["date"] >= s_dt]
+        elif e_dt:
+            ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] <= e_dt]
+            tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] <= e_dt]
+            sho_filtered = [r for r in sho_filtered if r["date"] and r["date"] <= e_dt]
+
+    found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_filtered if r.get("mo")])))
+    mo_reference = ", ".join(found_mos) if found_mos else "-"
+    if mo_reference != "-" and ch:
+        mo_group_display = f"{mo_reference} (Ch: {ch})"
+    else:
+        mo_group_display = f"Ch: {ch}" if ch else mo_reference
+
+    sho_map = {}
+    tb_map = {}
+    ch_map = {}
+    mo_summary_map = {} 
+
+    tb_dates = [r["date"] for r in tb_filtered if r["date"]]
+
+    for r in sho_filtered:
+        if not found_mos: continue
+        mo_match = any((r["mo"] in m or m in r["mo"]) for m in found_mos if m)
+        if not mo_match: continue
+        
+        include = False
+        if not tb_dates:
+            include = True
+        elif not r["date"]:
+            include = True
+        else:
+            for tbd in tb_dates:
+                diff = (tbd - r["date"]).days
+                if -15 <= diff <= 4:
+                    include = True
+                    break
+        
+        if include:
+            raw_v = r["label"]
+            norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
+            if not norm_key: continue
+            
+            if norm_key not in sho_map:
+                sho_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
+            sho_map[norm_key]["qty"] += r["qty"]
+            if r["date"]: sho_map[norm_key]["dates"].append(r["date"])
+
+    for r in tb_filtered:
+        raw_v = r["variant"]
+        norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
+        if not norm_key: continue
+        
+        if norm_key not in tb_map:
+            tb_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
+        tb_map[norm_key]["qty"] += r["qty"]
+        if r["date"]: tb_map[norm_key]["dates"].append(r["date"])
+
+    for r in ch_filtered:
+        raw_v = r["variant"]
+        raw_mo = str(r.get("mo", "")).strip()
+        norm_v = str(raw_v).upper().replace("-", "").replace(" ", "")
+        if not norm_v: continue
+        
+        norm_key = (norm_v, raw_mo)
+        if norm_key not in ch_map:
+            ch_map[norm_key] = {"label": raw_v, "exact_mo": raw_mo, "qty": 0.0, "dates": []}
+        ch_map[norm_key]["qty"] += r["qty"]
+        if r["date"]: ch_map[norm_key]["dates"].append(r["date"])
+            
+        if raw_mo not in mo_summary_map:
+            mo_summary_map[raw_mo] = {"qty": 0.0, "dates": []}
+        mo_summary_map[raw_mo]["qty"] += r["qty"]
+        if r["date"]: mo_summary_map[raw_mo]["dates"].append(r["date"])
+
+    sequential_rows = []
+
+    for k, data in sho_map.items():
+        in_d = str(min(data["dates"])) if data["dates"] else "-"
+        sequential_rows.append({
+            "mo_ref": mo_group_display,
+            "department": "SHO Department",
+            "variant": data["label"],
+            "in_date": in_d,
+            "out_date": "-",  
+            "qty": math.ceil(data["qty"]),
+            "status": "Allocated"
+        })
+
+    for k, data in tb_map.items():
+        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        sequential_rows.append({
+            "mo_ref": mo_group_display,
+            "department": "Transit Buffer",
+            "variant": data["label"],
+            "in_date": "-",
+            "out_date": out_d,
+            "qty": math.ceil(data["qty"]),
+            "status": "In Transit"
+        })
+        
+    for exact_mo, data in mo_summary_map.items():
+        in_d = str(min(data["dates"])) if data["dates"] else "-"
+        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        
+        if exact_mo and ch:
+            ch_mo_display = f"{exact_mo} (Ch: {ch})"
+        elif exact_mo:
+            ch_mo_display = exact_mo
+        elif ch:
+            ch_mo_display = f"Ch: {ch}"
+        else:
+            ch_mo_display = "-"
+
+        sequential_rows.append({
+            "mo_ref": ch_mo_display,
+            "department": "Channel (MO Summary)",
+            "variant": "ALL VARIANTS",
+            "in_date": in_d,
+            "out_date": out_d,
+            "qty": math.ceil(data["qty"]),
+            "status": "MO Total"
+        })
+
+    for k, data in ch_map.items():
+        in_d = str(min(data["dates"])) if data["dates"] else "-"
+        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        
+        exact_mo = data["exact_mo"]
+        if exact_mo and ch:
+            ch_mo_display = f"{exact_mo} (Ch: {ch})"
+        elif exact_mo:
+            ch_mo_display = exact_mo
+        elif ch:
+            ch_mo_display = f"Ch: {ch}"
+        else:
+            ch_mo_display = "-"
+
+        sequential_rows.append({
+            "mo_ref": ch_mo_display,
+            "department": "Channel Section",
+            "variant": data["label"],
+            "in_date": in_d,
+            "out_date": out_d,
+            "qty": math.ceil(data["qty"]),
+            "status": "Completed"
+        })
+
+    return {"status": "success", "data": sequential_rows}

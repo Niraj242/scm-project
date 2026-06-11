@@ -245,10 +245,8 @@ const Afterchannel = () => {
 
       const disLedger = ledgers.dismantling.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
       const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
-      // Determine what went out vs what got scrapped
       const disOut = disLedger.reduce((sum, l) => !isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
       
-      // Sum all scrap components
       const irScrap = disLedger.reduce((sum, l) => sum + (Number(l.ir_scrap) || 0), 0);
       const orScrap = disLedger.reduce((sum, l) => sum + (Number(l.or_scrap) || 0), 0);
       const cageScrap = disLedger.reduce((sum, l) => sum + (Number(l.cage_scrap) || 0), 0);
@@ -289,19 +287,31 @@ const Afterchannel = () => {
           <span>{deptName} - Global Entry Log</span>
           <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: '4px', width: '300px', outline: 'none', color: '#000'}} />
         </div>
-        <div style={{overflowX: 'auto'}}>
-          <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
+        
+        {/* THIS IS THE CRITICAL WRAPPER FOR SCROLLING */}
+        <div style={{overflowX: 'auto', width: '100%'}}>
+          {/* MIN-WIDTH AND NOWRAP FIX THE TABLE COLLAPSE */}
+          <table style={{width: '100%', minWidth: 'max-content', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
             <thead>
               <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
-                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>MO</th>
-                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Variant</th>
-                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date IN</th>
-                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Material From</th>
-                <th style={{padding: '12px 15px', color: '#1d4ed8', borderRight: '2px solid #cbd5e1', background: '#eff6ff'}}>Qty IN</th>
-                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date OUT</th>
-                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Next Station</th>
-                <th style={{padding: '12px 15px', color: '#b45309', background: '#fffbeb', borderRight: '1px solid #e2e8f0'}}>Qty OUT</th>
-                <th style={{padding: '12px 15px', color: '#475569'}}>Actions</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>MO</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Variant</th>
+                
+                {deptKey === 'rework' || deptKey === 'dismantling' ? <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Family</th> : null}
+                {deptKey === 'rework' || deptKey === 'dismantling' ? <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Line Seg</th> : null}
+                
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Date IN</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Material From</th>
+                <th style={{padding: '12px 15px', color: '#1d4ed8', borderRight: '2px solid #cbd5e1', background: '#eff6ff', whiteSpace: 'nowrap'}}>Qty IN</th>
+                
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Date OUT</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Next Station</th>
+                <th style={{padding: '12px 15px', color: '#b45309', background: '#fffbeb', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Qty OUT</th>
+                
+                {deptKey === 'dismantling' ? <th style={{padding: '12px 15px', color: '#dc2626', background: '#fef2f2', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Scrap Logs</th> : null}
+                {deptKey === 'rework' || deptKey === 'dismantling' ? <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>Operator</th> : null}
+                
+                <th style={{padding: '12px 15px', color: '#475569', whiteSpace: 'nowrap'}}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -309,18 +319,32 @@ const Afterchannel = () => {
                 const isScrap = isScrapStation(r.next_station || r.nextStation);
                 return (
                   <tr key={i} style={{borderBottom: '1px solid #e2e8f0', background: i % 2 === 0 ? '#fff' : '#f8fafc', transition: 'background 0.2s'}} onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'} onMouseLeave={(e) => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#f8fafc'}>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.mo || '-'}</td>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.bearing_type || r.type || r.item_type || '-'}</td>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.in_date || r.inDate || '-'}</td>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.material_in_from || r.materialInFrom || '-'}</td>
-                    <td style={{padding: '12px 15px', borderRight: '2px solid #cbd5e1', fontWeight: 'bold', color: '#1d4ed8', background: '#eff6ff'}}>{r.qty_in || r.qtyIn || '-'}</td>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.out_date || r.outDate || '-'}</td>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', color: isScrap ? '#dc2626' : '#334155', fontWeight: isScrap ? 'bold' : 'normal'}}>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold', whiteSpace: 'nowrap'}}>{r.mo || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold', whiteSpace: 'nowrap'}}>{r.bearing_type || r.type || r.item_type || '-'}</td>
+                    
+                    {deptKey === 'rework' || deptKey === 'dismantling' ? <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>{r.bearing_family || '-'}</td> : null}
+                    {deptKey === 'rework' || deptKey === 'dismantling' ? <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>{r.line_segment || r.line_type || '-'}</td> : null}
+
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>{r.in_date || r.inDate || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>{r.material_in_from || r.materialInFrom || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '2px solid #cbd5e1', fontWeight: 'bold', color: '#1d4ed8', background: '#eff6ff', whiteSpace: 'nowrap'}}>{r.qty_in || r.qtyIn || '-'}</td>
+                    
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>{r.out_date || r.outDate || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', color: isScrap ? '#dc2626' : '#334155', fontWeight: isScrap ? 'bold' : 'normal', whiteSpace: 'nowrap'}}>
                       {r.next_station || r.nextStation || '-'}
                       {isScrap && <span style={{marginLeft: '5px', fontSize: '0.8em'}}>⚠️</span>}
                     </td>
-                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold', color: '#b45309', background: '#fffbeb'}}>{r.qty_sent || r.qtySent || '-'}</td>
-                    <td style={{padding: '12px 15px'}}>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold', color: '#b45309', background: '#fffbeb', whiteSpace: 'nowrap'}}>{r.qty_sent || r.qtySent || '-'}</td>
+                    
+                    {deptKey === 'dismantling' ? (
+                      <td style={{padding: '12px 15px', fontSize: '0.85em', background: '#fef2f2', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>
+                        IR:{r.ir_scrap||0} | OR:{r.or_scrap||0} | Cg:{r.cage_scrap||0} | Rl:{r.roller_scrap||r.ball_scrap||0}
+                      </td>
+                    ) : null}
+
+                    {deptKey === 'rework' || deptKey === 'dismantling' ? <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', whiteSpace: 'nowrap'}}>{r.operator || '-'}</td> : null}
+
+                    <td style={{padding: '12px 15px', whiteSpace: 'nowrap'}}>
                       <button type="button" onClick={() => handleEdit(r)} style={{marginRight: '8px', cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Edit">✏️</button>
                       <button type="button" onClick={() => handleDelete(r.id, deptKey)} style={{cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Delete">🗑️</button>
                     </td>
@@ -673,56 +697,58 @@ const Afterchannel = () => {
               <button onClick={() => setSelectedMoDetail(null)} style={{fontSize:'2em', cursor:'pointer', border:'none', background:'none', color: '#64748b', lineHeight: '1'}}>&times;</button>
             </div>
             
-            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.85em', border: '1px solid #94a3b8'}}>
-              <thead>
-                <tr style={{background: '#334155', color: '#fff'}}>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>Variant Model</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#166534'}}>Prod Qty</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Acc In</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Acc Out</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS In</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS Out</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>RW In</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>RW Out</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis In</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis Out</th>
-                  <th colSpan="5" style={{border: '1px solid #475569', padding: '8px', background: '#991b1b', textAlign: 'center'}}>Granular Scrap Components (Dismantling)</th>
-                </tr>
-                <tr style={{background: '#7f1d1d', color: '#fff', fontSize: '0.9em'}}>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>IR</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>OR</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>Cage</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>Ball/Roller</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>Seal/Shield</th>
-                </tr>
-              </thead>
-              <tbody>
-                {selectedMoDetail.breakdown.map((row, i) => (
-                  <tr key={i} style={{background: i % 2 === 0 ? '#fff' : '#f1f5f9', borderBottom: '1px solid #cbd5e1', textAlign: 'center'}}>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', fontWeight:'bold', textAlign:'left', color: '#334155'}}>{row.variant}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', background:'#dcfce7', color:'#166534', fontWeight:'bold'}}>{row.prodQty > 0 ? row.prodQty.toLocaleString() : '-'}</td>
-                    
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accIn || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accOut || '-'}</td>
-                    
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsIn || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsOut || '-'}</td>
-                    
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwIn || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwOut || '-'}</td>
-                    
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disIn || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disOut || '-'}</td>
-                    
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.irScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.orScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.cageScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.rollScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.accScrap || '-'}</td>
+            <div style={{overflowX: 'auto', width: '100%'}}>
+              <table style={{width: '100%', minWidth: 'max-content', borderCollapse: 'collapse', fontSize: '0.85em', border: '1px solid #94a3b8'}}>
+                <thead>
+                  <tr style={{background: '#334155', color: '#fff'}}>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', textAlign: 'left', whiteSpace: 'nowrap'}}>Variant Model</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#166534', whiteSpace: 'nowrap'}}>Prod Qty</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af', whiteSpace: 'nowrap'}}>Acc In</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af', whiteSpace: 'nowrap'}}>Acc Out</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f', whiteSpace: 'nowrap'}}>CPS In</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f', whiteSpace: 'nowrap'}}>CPS Out</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309', whiteSpace: 'nowrap'}}>RW In</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309', whiteSpace: 'nowrap'}}>RW Out</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151', whiteSpace: 'nowrap'}}>Dis In</th>
+                    <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151', whiteSpace: 'nowrap'}}>Dis Out</th>
+                    <th colSpan="5" style={{border: '1px solid #475569', padding: '8px', background: '#991b1b', textAlign: 'center'}}>Granular Scrap Components (Dismantling)</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                  <tr style={{background: '#7f1d1d', color: '#fff', fontSize: '0.9em'}}>
+                    <th style={{border: '1px solid #475569', padding: '8px', whiteSpace: 'nowrap'}}>IR</th>
+                    <th style={{border: '1px solid #475569', padding: '8px', whiteSpace: 'nowrap'}}>OR</th>
+                    <th style={{border: '1px solid #475569', padding: '8px', whiteSpace: 'nowrap'}}>Cage</th>
+                    <th style={{border: '1px solid #475569', padding: '8px', whiteSpace: 'nowrap'}}>Ball/Roller</th>
+                    <th style={{border: '1px solid #475569', padding: '8px', whiteSpace: 'nowrap'}}>Seal/Shield</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedMoDetail.breakdown.map((row, i) => (
+                    <tr key={i} style={{background: i % 2 === 0 ? '#fff' : '#f1f5f9', borderBottom: '1px solid #cbd5e1', textAlign: 'center'}}>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', fontWeight:'bold', textAlign:'left', color: '#334155', whiteSpace: 'nowrap'}}>{row.variant}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', background:'#dcfce7', color:'#166534', fontWeight:'bold', whiteSpace: 'nowrap'}}>{row.prodQty > 0 ? row.prodQty.toLocaleString() : '-'}</td>
+                      
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af', whiteSpace: 'nowrap'}}>{row.accIn || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af', whiteSpace: 'nowrap'}}>{row.accOut || '-'}</td>
+                      
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f', whiteSpace: 'nowrap'}}>{row.cpsIn || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f', whiteSpace: 'nowrap'}}>{row.cpsOut || '-'}</td>
+                      
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309', whiteSpace: 'nowrap'}}>{row.rwIn || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309', whiteSpace: 'nowrap'}}>{row.rwOut || '-'}</td>
+                      
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151', whiteSpace: 'nowrap'}}>{row.disIn || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151', whiteSpace: 'nowrap'}}>{row.disOut || '-'}</td>
+                      
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', whiteSpace: 'nowrap'}}>{row.irScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', whiteSpace: 'nowrap'}}>{row.orScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', whiteSpace: 'nowrap'}}>{row.cageScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', whiteSpace: 'nowrap'}}>{row.rollScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', whiteSpace: 'nowrap'}}>{row.accScrap || '-'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}

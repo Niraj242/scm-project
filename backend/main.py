@@ -14,7 +14,7 @@ from schemas import RegisterRequest, LoginRequest
 from order_backend_postgres import router as order_router
 from traceability_backend import router as traceability_router
 from tbe_backend import router as tbe_router  # New TBE Module Import
-from scrap_backend import router as scrap_router
+
 
 
 # ================= APP =================
@@ -98,7 +98,7 @@ def delete_user(user_id: int, db: Session = Depends(get_db)):
 app.include_router(order_router)
 app.include_router(traceability_router)
 app.include_router(tbe_router)  # Registered TBE Module Router
-app.include_router(scrap_router)
+
 
 
 # ================= BASE ROOT CONTROLLER =================

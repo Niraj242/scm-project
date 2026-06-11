@@ -19,7 +19,7 @@ CACHE_DURATION_MINUTES = 5
 
 GLOBAL_CH_ROWS = []
 GLOBAL_TB_ROWS = []
-GLOBAL_SHO_ROWS = [] # NEW: Holds parsed JobWork_Report entries
+GLOBAL_SHO_ROWS = []
 
 # Pre-compiled regex for speed
 NUM_REGEX = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
@@ -80,16 +80,22 @@ def parse_family_and_type(prod_text):
     text = str(prod_text).strip().upper()
     if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN", "ASSEMBLY"
     
+    # Aggressive IM/OM Detection (borrowed from traceability logic)
     r_type = "ASSEMBLY"
-    if any(x in text for x in ["IM", "IR", "INNER"]): r_type = "IM"
-    elif any(x in text for x in ["OM", "OR", "OUTER"]): r_type = "OM"
+    t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
+    words = t_norm.split()
     
+    if any(w in ["IM", "IR", "INNER"] for w in words) or "INNER" in text or "IM" in text or "IR" in text:
+        r_type = "IM"
+    elif any(w in ["OM", "OR", "OUTER"] for w in words) or "OUTER" in text or "OM" in text or "OR" in text:
+        r_type = "OM"
+        
     match = FAM_REGEX.search(text)
     base = match.group(1) if match else text.split()[0].split('-')[0]
     
-    if "BT" in text.split() or text.startswith("BT") or "-BT" in text or " BT" in text:
+    if "BT" in words or text.startswith("BT") or "-BT" in text or " BT" in text:
         base = f"BT-{base}"
-    elif "BB" in text.split() or text.startswith("BB") or "-BB" in text or " BB" in text:
+    elif "BB" in words or text.startswith("BB") or "-BB" in text or " BB" in text:
         base = f"BB-{base}"
         
     return base, r_type
@@ -248,6 +254,11 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
 
         # --- DYNAMIC SHO AGGREGATION & 4-DAY CONSTRAINT ALGORITHM ---
         tb_dates = [r["date"] for r in filtered_tb if r["ch"] == ch and r["fam"] == fam and r.get("type", parse_family_and_type(r["variant"])[1]) == r_type and r["date"]]
+        ch_dates = [r["date"] for r in filtered_ch if r["ch"] == ch and r["fam"] == fam and r["date"]]
+        
+        # Determine strict Anchor Dates (prioritize TB, fallback to CH)
+        anchor_dates = tb_dates if tb_dates else ch_dates
+        
         valid_sho_qty = 0.0
         sho_dates = []
 
@@ -255,18 +266,20 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if sho["fam"] == fam and sho["type"] == r_type:
                 if not mos: continue # Needs MO linkage
                 
+                # Loose matching to ensure no MO data is missed
                 mo_match = any((sho["mo"] in m or m in sho["mo"]) for m in mos if m)
                 if not mo_match: continue
                 
                 include = False
-                if not tb_dates:
+                if not anchor_dates:
                     include = True
                 elif not sho["date"]:
                     include = True
                 else:
-                    for tbd in tb_dates:
-                        diff = (tbd - sho["date"]).days
+                    for ad in anchor_dates:
+                        diff = (ad - sho["date"]).days
                         # Constraint: SHO should have date of not more than 4 days before Transit Buffer
+                        # Diff = TB_Date - SHO_Date. If diff <= 4, it is valid! (We allow up to -15 for loose late data processing)
                         if -15 <= diff <= 4:  
                             include = True
                             break
@@ -288,7 +301,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             "mo_ref": mo_list,
             "product_variant": fam,
             "ring_type": r_type,
-            "sho_qty": final_sho_qty, # Sourced from JobWork sheet directly
+            "sho_qty": final_sho_qty, # Sourced exactly from Qty Sent
             "tb_qty": final_tb_qty, 
             "sho_in": sho_in,         # Sourced from JobWork sheet date
             "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
@@ -362,7 +375,7 @@ def process_tbe_data():
                     "type": r_type, "qty": qty, "date": dt
                 })
 
-        # 3. Process JobWork Report (SHO Department)
+        # 3. Process JobWork Report (SHO Department - Enhanced Qty Sent parsing)
         sho_list = []
         for sheet_name, df in jw_sheets.items():
             time.sleep(0.01)
@@ -372,7 +385,9 @@ def process_tbe_data():
             
             mo_col = find_column(df, ["po/prno.", "poprno", "mono", "mo", "po/prno"])
             prod_col = find_column(df, ["product", "item", "description"])
-            qty_col = find_column(df, ["qtyapproved", "approvedqty", "shoqty", "qty", "qtyreq"])
+            
+            # CRITICAL FIX: Targets "Qty Sent" directly, falls back to approved if missing
+            qty_col = find_column(df, ["qtysent", "qty sent", "sent", "qtyapproved", "approvedqty", "shoqty", "qty"])
             date_col = find_column(df, ["jwchallandate", "challandate", "date", "jwdate"])
             
             if not mo_col: continue
@@ -386,14 +401,17 @@ def process_tbe_data():
                 raw_product = str(row.get(prod_col, ""))
                 if raw_product.upper() in ["NAN", "NONE", "NA", ""]: continue
                 
+                # Utilizes the upgraded IM/OM check for absolute accuracy
                 base_fam, comp_type = parse_family_and_type(raw_product)
+                
                 sho_qty = clean_nan(row.get(qty_col))
                 sho_date = parse_date_safe(row.get(date_col))
                 
-                sho_list.append({
-                    "mo": raw_mo, "fam": base_fam, "type": comp_type,
-                    "qty": sho_qty, "date": sho_date, "label": raw_product
-                })
+                if sho_qty > 0:
+                    sho_list.append({
+                        "mo": raw_mo, "fam": base_fam, "type": comp_type,
+                        "qty": sho_qty, "date": sho_date, "label": raw_product
+                    })
 
         GLOBAL_CH_ROWS = ch_list
         GLOBAL_TB_ROWS = tb_list
@@ -466,6 +484,8 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     mo_summary_map = {} 
 
     tb_dates = [r["date"] for r in tb_filtered if r["date"]]
+    ch_dates = [r["date"] for r in ch_filtered if r["date"]]
+    anchor_dates = tb_dates if tb_dates else ch_dates
 
     for r in sho_filtered:
         if not found_mos: continue
@@ -473,13 +493,13 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         if not mo_match: continue
         
         include = False
-        if not tb_dates:
+        if not anchor_dates:
             include = True
         elif not r["date"]:
             include = True
         else:
-            for tbd in tb_dates:
-                diff = (tbd - r["date"]).days
+            for ad in anchor_dates:
+                diff = (ad - r["date"]).days
                 if -15 <= diff <= 4:
                     include = True
                     break
@@ -595,3 +615,4 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         })
 
     return {"status": "success", "data": sequential_rows}
+    

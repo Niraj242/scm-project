@@ -12,6 +12,7 @@ class User(Base):
     is_active = Column(Integer, default=1) 
     created_at = Column(DateTime, default=datetime.utcnow)
 
+
 class Order(Base):
     __tablename__ = "orders"
     id = Column(Integer, primary_key=True, index=True)
@@ -274,3 +275,127 @@ class TBELog(Base):
     status = Column(String)
 
 
+# =======================================================
+#                 AFTERCHANNEL MODULE MODELS
+# =======================================================
+
+class AccurateLedger(Base):
+    __tablename__ = "accurate_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    pc_no = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+
+class CpsLedger(Base):
+    __tablename__ = "cps_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    item_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    rc_no = Column(String)
+    material_in_from = Column(String)
+    channel = Column(String)
+    qty_in = Column(Integer)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+
+class ReworkLedger(Base):
+    __tablename__ = "rework_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    channel = Column(String)
+    bearing_type = Column(String)
+    line_type = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    rework_activity = Column(String)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+    operator = Column(String)
+    remark = Column(String)
+
+class VibrationDismantlingLedger(Base):
+    __tablename__ = "vibration_dismantling_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    channel = Column(String)
+    bearing_type = Column(String)
+    line_type = Column(String)
+    reason = Column(String)
+    material_in_from = Column(String)
+    qty_in = Column(Integer)
+    activity = Column(String)
+    ball_scrap = Column(Integer)
+    cage_seal_scrap = Column(Integer)
+    ring_type = Column(String)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+    operator = Column(String)
+    remark = Column(String)
+
+class DismantlingOutLedger(Base):
+    __tablename__ = "dismantling_out_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    channel = Column(String)
+    bearing_type = Column(String)
+    qty_in = Column(Integer)
+    reason = Column(String)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+    operator = Column(String)
+    remark = Column(String)
+
+class FpsLedger(Base):
+    __tablename__ = "fps_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    qty_in = Column(Integer)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+    operator = Column(String)
+    remark = Column(String)
+
+class AutoPackagingLedger(Base):
+    __tablename__ = "auto_packaging_ledger"
+    id = Column(Integer, primary_key=True, index=True)
+    mo = Column(String, index=True)
+    bearing_type = Column(String)
+    in_date = Column(Date)
+    shift_in = Column(String)
+    qty_in = Column(Integer)
+    next_station = Column(String)
+    qty_sent = Column(Integer)
+    out_date = Column(Date)
+    shift_out = Column(String)
+    operator = Column(String)
+    remark = Column(String)

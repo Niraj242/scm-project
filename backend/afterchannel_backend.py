@@ -150,13 +150,13 @@ def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, ne
 
 # --- Excel Loading Helpers ---
 def find_column(df, patterns):
-    cols = [str(c).strip() for c in df.columns]
+    # FIXED: Return the exact, original column name from df.columns to avoid KeyError
     for p in patterns:
-        norm_p = re.sub(r'[^a-z0-9]', '', p.lower())
-        for c in cols:
-            norm_c = re.sub(r'[^a-z0-9]', '', c.lower())
+        norm_p = re.sub(r'[^a-z0-9]', '', str(p).lower())
+        for orig_c in df.columns:
+            norm_c = re.sub(r'[^a-z0-9]', '', str(orig_c).lower())
             if norm_c == norm_p: 
-                return c
+                return orig_c
     return None
 
 def load_excel_sheets(url):
@@ -183,11 +183,12 @@ def process_mo_sheets(sheets_dict, temp_cache):
         mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
         type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part", "material"])
         qty_col = find_column(df, ["production", "productionqty", "qty", "quantity", "targetqty", "target", "orderqty", "planqty", "plannedqty", "total", "reqqty", "required"])
-        date_col = find_column(df, ["date"]) # NEW: Grabbing the date for the +/- 2 days logic
+        date_col = find_column(df, ["date"]) 
         
         if not mo_col or not type_col: continue
 
-        target_cols = [c for c in [mo_col, type_col, qty_col, date_col] if c]
+        # FIXED: Enforce that the columns actually exist in the dataframe before filtering
+        target_cols = [c for c in [mo_col, type_col, qty_col, date_col] if c is not None and c in df.columns]
         df_records = df[target_cols].to_dict('records')
 
         for row in df_records:
@@ -205,7 +206,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
             except (ValueError, TypeError):
                 qty_val = 0
 
-            # Safe date string parsing
             date_str = ""
             if date_col:
                 raw_date = row.get(date_col)
@@ -225,7 +225,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
             for item in temp_cache[mo_val]:
                 if item['type'] == type_val:
                     item['qty'] += qty_val
-                    # Keep the earliest date if multiple exist
                     if date_str and (not item.get('date') or date_str < item['date']):
                         item['date'] = date_str
                     variant_exists = True
@@ -245,6 +244,7 @@ def process_master_data():
         process_mo_sheets(dgbb_sheets, temp_cache)
         process_mo_sheets(trb_sheets, temp_cache)
         MASTER_DATA_CACHE = temp_cache
+        print(f"✅ Afterchannel: Successfully mapped {len(MASTER_DATA_CACHE)} unique MOs.")
     except Exception as e:
         print(f"Afterchannel Cache Compilation Fault: {str(e)}")
     finally:
@@ -490,3 +490,4 @@ def delete_ledger_entry(dept: str, record_id: int):
     finally:
         cursor.close()
         conn.close()
+        

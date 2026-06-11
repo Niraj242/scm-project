@@ -3,7 +3,7 @@ from datetime import datetime
 from database import Base
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "users"
     id = Column(Integer, primary_key=True, index=True)
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
@@ -353,5 +353,3 @@ class VibrationDismantlingLedger(Base):
     operator = Column(String)
     remark = Column(String)
 
-look this is the old one 
-so check what can be done to make it work as it is and add additional stuff which we are doing but dont affect the existing (atleast MO and TBE modules please)

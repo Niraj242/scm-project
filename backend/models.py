@@ -8,7 +8,6 @@ class User(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False)
-    # Ensure this is defined as Integer
     is_active = Column(Integer, default=1) 
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -174,42 +173,31 @@ class RingWeightTransitBuffer(Base):
     __tablename__ = 'ringweight_transit_buffer'
     
     id = Column(Integer, primary_key=True, index=True)
-    channel_no = Column(String, index=True, nullable=False)  # Maps to 'ch# / channel'
-    variant_name = Column(String, nullable=False)            # Stores the true bearing model/type
-    component_type = Column(String, nullable=False)          # "IM" or "OM" (derived from the variant)
-    no_of_rings = Column(Float, default=0.0)                 # Quantity in transit
+    channel_no = Column(String, index=True, nullable=False)
+    variant_name = Column(String, nullable=False)
+    component_type = Column(String, nullable=False)
+    no_of_rings = Column(Float, default=0.0)
     date = Column(Date, index=True, nullable=True)
-    
-    # The Bridge: This is populated by matching channel_no to TBEMaster/TRBMaster/DGBBMaster
     normalized_mo = Column(String, index=True, nullable=True)
 
 class IndustrialWeightConfirmation(Base):
     __tablename__ = 'industrial_weight_confirmation'
     
     id = Column(Integer, primary_key=True, index=True)
-    
-    # Core Identifiers
     date = Column(Date, index=True, nullable=True)
     shift = Column(String, nullable=True)
-    channel_no = Column(String, index=True, nullable=False)   # Mapped from 'Ch# No'
-    component_type = Column(String, index=True, nullable=False) # Mapped from 'TYPE' (e.g., 'IM6306')
-    
-    # Weight Metrics (All Floats based on sample decimal precision)
-    gross_weight = Column(Float, default=0.0)                 # 'Gr Wt'
-    empty_box_weight = Column(Float, default=0.0)             # 'Empty Box Wt'
-    pallet_weight = Column(Float, default=0.0)                # 'Pallat Wt'
-    net_weight = Column(Float, default=0.0)                   # 'Net Wt'
-    ring_weight = Column(Float, default=0.0)                  # 'Ring Wt'
-    
-    # Quantities & Analysis
-    no_of_rings = Column(Float, default=0.0)                  # 'No Of Rings' (Using Float for 1742.34)
-    remarks = Column(String, nullable=True)                   # 'REMARKS'
-    std_box_qty = Column(Float, default=0.0)                  # 'STD BOX QTY'
-    std_vs_weight_diff_qty = Column(Float, default=0.0)       # 'Std Vs Weigt Diff Qty'
-    
-    # Bridge / Tracking Column (Optional, based on your Traceability pattern)
+    channel_no = Column(String, index=True, nullable=False)
+    component_type = Column(String, index=True, nullable=False)
+    gross_weight = Column(Float, default=0.0)
+    empty_box_weight = Column(Float, default=0.0)
+    pallet_weight = Column(Float, default=0.0)
+    net_weight = Column(Float, default=0.0)
+    ring_weight = Column(Float, default=0.0)
+    no_of_rings = Column(Float, default=0.0)
+    remarks = Column(String, nullable=True)
+    std_box_qty = Column(Float, default=0.0)
+    std_vs_weight_diff_qty = Column(Float, default=0.0)
     normalized_mo = Column(String, index=True, nullable=True)
-
 
 class TraceabilityMaster(Base):
     __tablename__ = 'traceability_master'
@@ -273,7 +261,6 @@ class TBELog(Base):
     reconciliation_details = Column(String) 
     status = Column(String)
 
-
 # =======================================================
 #                AFTERCHANNEL MODULE MODELS
 # =======================================================
@@ -328,7 +315,7 @@ class ReworkLedger(Base):
     shift_out = Column(String)
     operator = Column(String)
     remark = Column(String)
-    # ADDED SAFELY BELOW:
+    # NEW APPENDED COLUMN
     bearing_family = Column(String, nullable=True)
 
 class VibrationDismantlingLedger(Base):
@@ -344,17 +331,18 @@ class VibrationDismantlingLedger(Base):
     material_in_from = Column(String)
     qty_in = Column(Integer)
     activity = Column(String)
-    # ORIGINAL COLUMNS RESTORED:
-    ball_scrap = Column(Integer)
-    cage_seal_scrap = Column(Integer)
-    ring_type = Column(String)
-    next_station = Column(String)
-    qty_sent = Column(Integer)
-    out_date = Column(Date)
-    shift_out = Column(String)
-    operator = Column(String)
-    remark = Column(String)
-    # NEW GRANULAR COLUMNS ADDED SAFELY BELOW:
+    # YOUR ORIGINAL COLUMNS EXACTLY AS THEY WERE
+    ball_scrap = Column(Integer, nullable=True)
+    cage_seal_scrap = Column(Integer, nullable=True)
+    ring_type = Column(String, nullable=True)
+    next_station = Column(String, nullable=True)
+    qty_sent = Column(Integer, nullable=True)
+    out_date = Column(Date, nullable=True)
+    shift_out = Column(String, nullable=True)
+    operator = Column(String, nullable=True)
+    remark = Column(String, nullable=True)
+    
+    # NEW GRANULAR COLUMNS APPENDED AT THE BOTTOM
     bearing_family = Column(String, nullable=True)
     roller_scrap = Column(Integer, default=0, nullable=True)
     cage_scrap = Column(Integer, default=0, nullable=True)
@@ -363,7 +351,6 @@ class VibrationDismantlingLedger(Base):
     ir_scrap = Column(Integer, default=0, nullable=True)
     or_scrap = Column(Integer, default=0, nullable=True)
 
-# NEW TABLES APPENDED SAFELY:
 class AutopackagingLedger(Base):
     __tablename__ = "autopackaging_ledger"
     id = Column(Integer, primary_key=True, index=True)

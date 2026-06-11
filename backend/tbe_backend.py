@@ -19,6 +19,7 @@ CACHE_DURATION_MINUTES = 5
 
 GLOBAL_CH_ROWS = []
 GLOBAL_TB_ROWS = []
+GLOBAL_SHO_ROWS = [] # NEW: Holds parsed JobWork_Report entries
 
 # Pre-compiled regex for speed
 NUM_REGEX = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
@@ -112,19 +113,14 @@ def parse_date_safe(value):
 
 def load_excel_sheets(url):
     try:
-        # Use fresh request to prevent stale connection hang
         resp = requests.get(url, timeout=45)
         if resp.status_code != 200: return {}
-        
         content = io.BytesIO(resp.content)
-        
-        # Try lightning-fast calamine engine, fallback to default if not installed
         try:
             xls = pd.ExcelFile(content, engine='calamine')
         except ImportError:
             xls = pd.ExcelFile(content)
-            
-        time.sleep(0.05) # Yield GIL
+        time.sleep(0.05) 
         return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
@@ -133,7 +129,7 @@ def load_excel_sheets(url):
 def process_master_sheets(sheets_dict, is_trb):
     ch_list = []
     for sheet_name, df in sheets_dict.items():
-        time.sleep(0.01) # Yield CPU to FastAPI so UI doesn't freeze
+        time.sleep(0.01) 
         if df.empty: continue
         
         clean_name = str(sheet_name).strip().upper()
@@ -182,17 +178,21 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
 
     filtered_ch = GLOBAL_CH_ROWS
     filtered_tb = GLOBAL_TB_ROWS 
+    filtered_sho = GLOBAL_SHO_ROWS
 
     if s_dt or e_dt:
         if s_dt and e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
+            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] >= s_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] >= s_dt]
+            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
+            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and r["date"] <= e_dt]
 
     if filtered_ch:
         df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
@@ -241,9 +241,42 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         
         mo_list = row.get("mo_list", "")
         if pd.isna(mo_list): mo_list = ""
+        mos = [m.strip() for m in str(mo_list).split(',') if m.strip()]
 
         final_tb_qty = math.ceil(tb_qty)
         final_ch_qty = math.ceil(ch_qty)
+
+        # --- DYNAMIC SHO AGGREGATION & 4-DAY CONSTRAINT ALGORITHM ---
+        tb_dates = [r["date"] for r in filtered_tb if r["ch"] == ch and r["fam"] == fam and r.get("type", parse_family_and_type(r["variant"])[1]) == r_type and r["date"]]
+        valid_sho_qty = 0.0
+        sho_dates = []
+
+        for sho in filtered_sho:
+            if sho["fam"] == fam and sho["type"] == r_type:
+                if not mos: continue # Needs MO linkage
+                
+                mo_match = any((sho["mo"] in m or m in sho["mo"]) for m in mos if m)
+                if not mo_match: continue
+                
+                include = False
+                if not tb_dates:
+                    include = True
+                elif not sho["date"]:
+                    include = True
+                else:
+                    for tbd in tb_dates:
+                        diff = (tbd - sho["date"]).days
+                        # Constraint: SHO should have date of not more than 4 days before Transit Buffer
+                        if -15 <= diff <= 4:  
+                            include = True
+                            break
+                
+                if include:
+                    valid_sho_qty += sho["qty"]
+                    if sho["date"]: sho_dates.append(sho["date"])
+
+        final_sho_qty = math.ceil(valid_sho_qty)
+        sho_in = str(min(sho_dates)) if sho_dates else "-"
 
         if final_tb_qty == 0 and final_ch_qty > 0: calc_status = "Channel Only"
         elif final_tb_qty > 0 and final_ch_qty == 0: calc_status = "Missing Channel Data"
@@ -255,9 +288,9 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             "mo_ref": mo_list,
             "product_variant": fam,
             "ring_type": r_type,
-            "sho_qty": final_tb_qty, 
+            "sho_qty": final_sho_qty, # Sourced from JobWork sheet directly
             "tb_qty": final_tb_qty, 
-            "sho_in": str(tb_min) if pd.notna(tb_min) and tb_min else "-",
+            "sho_in": sho_in,         # Sourced from JobWork sheet date
             "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
             "ch_qty": final_ch_qty,
             "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
@@ -269,27 +302,31 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     return compiled_summary
 
 def process_tbe_data():
-    global MASTER_CACHE, LAST_REFRESH, IS_UPDATING, INITIALIZED, GLOBAL_CH_ROWS, GLOBAL_TB_ROWS
+    global MASTER_CACHE, LAST_REFRESH, IS_UPDATING, INITIALIZED, GLOBAL_CH_ROWS, GLOBAL_TB_ROWS, GLOBAL_SHO_ROWS
     if IS_UPDATING: return
     IS_UPDATING = True
 
     try:
         from settings import settings
         
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=4) as executor:
             future_ring = executor.submit(load_excel_sheets, settings.RINGWT_TRANSITBUFFER_URL)
             future_trb = executor.submit(load_excel_sheets, settings.TRB_MASTER_URL)
             future_dgbb = executor.submit(load_excel_sheets, settings.DGBB_MASTER_URL)
+            future_jw = executor.submit(load_excel_sheets, settings.JOBWORK_REPORT_URL)
             
             ring_wt_sheets = future_ring.result()
             trb_sheets = future_trb.result()
             dgbb_sheets = future_dgbb.result()
+            jw_sheets = future_jw.result()
 
+        # 1. Process Channel Master Sheets
         ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
 
+        # 2. Process Transit Buffer Sheets
         tb_list = []
         for sheet_name, df in ring_wt_sheets.items():
-            time.sleep(0.01) # Yield CPU 
+            time.sleep(0.01) 
             if df.empty: continue
             
             c_col = find_column(df, ["ch#no", "ch# no", "channelref", "channel", "machineno"])
@@ -321,16 +358,46 @@ def process_tbe_data():
                 dt = parse_date_safe(row.get(d_col))
 
                 tb_list.append({
-                    "ch": ch, 
-                    "fam": base_family, 
-                    "variant": prod_text, 
-                    "type": r_type, 
-                    "qty": qty, 
-                    "date": dt
+                    "ch": ch, "fam": base_family, "variant": prod_text, 
+                    "type": r_type, "qty": qty, "date": dt
+                })
+
+        # 3. Process JobWork Report (SHO Department)
+        sho_list = []
+        for sheet_name, df in jw_sheets.items():
+            time.sleep(0.01)
+            clean_sheet = str(sheet_name).strip().lower()
+            if any(k in clean_sheet for k in ["summary", "pivot", "total", "history", "dash", "master"]): 
+                continue
+            
+            mo_col = find_column(df, ["po/prno.", "poprno", "mono", "mo", "po/prno"])
+            prod_col = find_column(df, ["product", "item", "description"])
+            qty_col = find_column(df, ["qtyapproved", "approvedqty", "shoqty", "qty", "qtyreq"])
+            date_col = find_column(df, ["jwchallandate", "challandate", "date", "jwdate"])
+            
+            if not mo_col: continue
+            
+            target_cols = [c for c in [mo_col, prod_col, qty_col, date_col] if c]
+            for row in df[target_cols].to_dict('records'):
+                raw_mo = str(row.get(mo_col, "")).strip().upper().replace(" ", "")
+                if raw_mo.endswith(".0"): raw_mo = raw_mo[:-2]
+                if not raw_mo or raw_mo in ["NAN", "NONE", "NA"]: continue
+                
+                raw_product = str(row.get(prod_col, ""))
+                if raw_product.upper() in ["NAN", "NONE", "NA", ""]: continue
+                
+                base_fam, comp_type = parse_family_and_type(raw_product)
+                sho_qty = clean_nan(row.get(qty_col))
+                sho_date = parse_date_safe(row.get(date_col))
+                
+                sho_list.append({
+                    "mo": raw_mo, "fam": base_fam, "type": comp_type,
+                    "qty": sho_qty, "date": sho_date, "label": raw_product
                 })
 
         GLOBAL_CH_ROWS = ch_list
         GLOBAL_TB_ROWS = tb_list
+        GLOBAL_SHO_ROWS = sho_list
 
         MASTER_CACHE = compile_summary_data(None, None)
         LAST_REFRESH = datetime.now()
@@ -365,23 +432,26 @@ def get_tbe_dashboard(start_date: str = Query(None), end_date: str = Query(None)
 
 @router.get("/tbe_variant_details")
 def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_date: str = Query(None), end_date: str = Query(None)):
-    # Safe date parsing to prevent frontend infinite loading
     s_dt = datetime.strptime(start_date, "%Y-%m-%d").date() if start_date and start_date.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date, "%Y-%m-%d").date() if end_date and end_date.strip() not in ["", "null", "None"] else None
 
     ch_filtered = [r for r in GLOBAL_CH_ROWS if r["ch"] == ch and r["fam"] == fam]
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
+    sho_filtered = [r for r in GLOBAL_SHO_ROWS if r["fam"] == fam]
     
     if s_dt or e_dt:
         if s_dt and e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
             tb_filtered = [r for r in tb_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
+            sho_filtered = [r for r in sho_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] >= s_dt]
             tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] >= s_dt]
+            sho_filtered = [r for r in sho_filtered if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] <= e_dt]
             tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] <= e_dt]
+            sho_filtered = [r for r in sho_filtered if r["date"] and r["date"] <= e_dt]
 
     found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_filtered if r.get("mo")])))
     mo_reference = ", ".join(found_mos) if found_mos else "-"
@@ -395,16 +465,40 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     ch_map = {}
     mo_summary_map = {} 
 
+    tb_dates = [r["date"] for r in tb_filtered if r["date"]]
+
+    for r in sho_filtered:
+        if not found_mos: continue
+        mo_match = any((r["mo"] in m or m in r["mo"]) for m in found_mos if m)
+        if not mo_match: continue
+        
+        include = False
+        if not tb_dates:
+            include = True
+        elif not r["date"]:
+            include = True
+        else:
+            for tbd in tb_dates:
+                diff = (tbd - r["date"]).days
+                if -15 <= diff <= 4:
+                    include = True
+                    break
+        
+        if include:
+            raw_v = r["label"]
+            norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
+            if not norm_key: continue
+            
+            if norm_key not in sho_map:
+                sho_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
+            sho_map[norm_key]["qty"] += r["qty"]
+            if r["date"]: sho_map[norm_key]["dates"].append(r["date"])
+
     for r in tb_filtered:
         raw_v = r["variant"]
         norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
         if not norm_key: continue
         
-        if norm_key not in sho_map:
-            sho_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
-        sho_map[norm_key]["qty"] += r["qty"]
-        if r["date"]: sho_map[norm_key]["dates"].append(r["date"])
-
         if norm_key not in tb_map:
             tb_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
         tb_map[norm_key]["qty"] += r["qty"]

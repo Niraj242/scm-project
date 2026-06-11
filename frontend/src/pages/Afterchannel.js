@@ -13,14 +13,17 @@ const Afterchannel = () => {
 
   const [moNumber, setMoNumber] = useState('');
   const [availableVariants, setAvailableVariants] = useState([]);
-  const [availableMos, setAvailableMos] = useState([]); // Used for Reverse Lookup
+  const [availableMos, setAvailableMos] = useState([]);
   const [selectedVariant, setSelectedVariant] = useState('');
   const [actualProductionQty, setActualProductionQty] = useState(0);
   
   const [editingRecord, setEditingRecord] = useState(null);
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
 
-  // Form states specifically for Rework/Dismantling
+  // Date state used specifically to filter reverse MO Lookups
+  const [formDate, setFormDate] = useState('');
+
+  // Scrap logic states
   const [bearingFamily, setBearingFamily] = useState(''); 
   const [bearingScrapQty, setBearingScrapQty] = useState('');
 
@@ -92,7 +95,33 @@ const Afterchannel = () => {
     }, 0);
   };
 
-  // Normal lookup: Typing MO populates Variants
+  // Two-way filter logic for Variant + Date -> MO list
+  useEffect(() => {
+    if (!selectedVariant) {
+      setAvailableMos(Object.keys(moCache));
+      return;
+    }
+    
+    let matchingMos = Object.keys(moCache).filter(mo => {
+      return moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant);
+    });
+
+    if (formDate) {
+      const inputTime = new Date(formDate).getTime();
+      matchingMos = matchingMos.filter(mo => {
+        return moCache[mo].some(r => {
+          if (getTypeFromRow(r).toUpperCase() !== selectedVariant) return false;
+          if (!r.date) return true; // If no date recorded in backend, keep it
+          const moTime = new Date(r.date).getTime();
+          const diffDays = Math.abs((moTime - inputTime) / (1000 * 3600 * 24));
+          return diffDays <= 2;
+        });
+      });
+    }
+
+    setAvailableMos(matchingMos);
+  }, [selectedVariant, formDate, moCache]);
+
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
@@ -112,25 +141,16 @@ const Afterchannel = () => {
       setAvailableVariants([]);
       setSelectedVariant('');
       setActualProductionQty(0);
-      setAvailableMos(Object.keys(moCache)); // Reset reverse lookup
+      setAvailableMos(Object.keys(moCache)); 
     }
   };
 
-  // Reverse lookup: Typing Variant populates specific MOs
   const handleVariantChange = (e) => {
     const variantName = e.target.value.toUpperCase();
     setSelectedVariant(variantName);
     
-    if (moNumber) {
-      if (moCache[moNumber.toUpperCase()]) {
-        setActualProductionQty(calculateProduction(moCache[moNumber.toUpperCase()], variantName));
-      }
-    } else if (variantName) {
-      // Find all MOs that contain this variant
-      const matchingMos = Object.keys(moCache).filter(mo => {
-        return moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === variantName);
-      });
-      setAvailableMos(matchingMos.length > 0 ? matchingMos : Object.keys(moCache));
+    if (moNumber && moCache[moNumber.toUpperCase()]) {
+      setActualProductionQty(calculateProduction(moCache[moNumber.toUpperCase()], variantName));
     }
   };
 
@@ -167,7 +187,7 @@ const Afterchannel = () => {
       alert(editingRecord ? "Entry Updated Successfully!" : "Operational Record Logged Successfully!");
       e.target.reset();
       setEditingRecord(null);
-      setBearingScrapQty(''); // Clear Scrap State
+      setBearingScrapQty(''); 
       await fetchLedgers();
     } catch (err) {
       alert("Submission Error: " + err.message);
@@ -225,15 +245,19 @@ const Afterchannel = () => {
 
       const disLedger = ledgers.dismantling.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
       const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+      // Determine what went out vs what got scrapped
+      const disOut = disLedger.reduce((sum, l) => !isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
       
       // Sum all scrap components
-      const disInternalScrap = disLedger.reduce((sum, l) => sum + 
-        (Number(l.ball_scrap) || 0) + (Number(l.roller_scrap) || 0) + 
-        (Number(l.cage_scrap) || 0) + (Number(l.seal_scrap) || 0) + 
-        (Number(l.shield_scrap) || 0) + (Number(l.ir_scrap) || 0) + (Number(l.or_scrap) || 0), 0);
+      const irScrap = disLedger.reduce((sum, l) => sum + (Number(l.ir_scrap) || 0), 0);
+      const orScrap = disLedger.reduce((sum, l) => sum + (Number(l.or_scrap) || 0), 0);
+      const cageScrap = disLedger.reduce((sum, l) => sum + (Number(l.cage_scrap) || 0), 0);
+      const rollScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap) || 0) + (Number(l.roller_scrap) || 0), 0);
+      const accScrap = disLedger.reduce((sum, l) => sum + (Number(l.seal_scrap) || 0) + (Number(l.shield_scrap) || 0), 0);
 
       return {
-        variant: v, prodQty, accIn, accOut, cpsIn, cpsOut, rwIn, rwOut, disIn, scrapSum: disInternalScrap
+        variant: v, prodQty, accIn, accOut, cpsIn, cpsOut, rwIn, rwOut, disIn, disOut,
+        irScrap, orScrap, cageScrap, rollScrap, accScrap
       };
     });
 
@@ -391,7 +415,7 @@ const Afterchannel = () => {
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Accurate - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>PC No</label><input type="text" name="pcNo" defaultValue={editingRecord?.pc_no || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -404,7 +428,7 @@ const Afterchannel = () => {
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                   </div>
                 </fieldset>
@@ -424,7 +448,7 @@ const Afterchannel = () => {
                   <legend style={{fontWeight: 'bold'}}>CPS Assembly - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Item</label><select name="itemType" defaultValue={editingRecord?.item_type || ''} style={{width:'100%', padding:'6px'}}><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>
-                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>RC No</label><input type="text" name="rcNo" defaultValue={editingRecord?.rc_no || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -438,7 +462,7 @@ const Afterchannel = () => {
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                   </div>
                 </fieldset>
@@ -458,7 +482,7 @@ const Afterchannel = () => {
                   <legend style={{fontWeight: 'bold'}}>Rework Station - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Bearing Family</label><select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}}><option></option><option value="DGBB">DGBB</option><option value="TRB">TRB</option></select></div>
-                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Line Segment</label><input type="text" name="lineType" defaultValue={editingRecord?.line_type || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -473,7 +497,7 @@ const Afterchannel = () => {
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Operator</label><input type="text" name="operator" defaultValue={editingRecord?.operator || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Remark</label><input type="text" name="remark" defaultValue={editingRecord?.remark || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -495,7 +519,7 @@ const Afterchannel = () => {
                   <legend style={{fontWeight: 'bold'}}>Dismantling - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Bearing Family</label><select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}} required><option></option><option value="DGBB">DGBB</option><option value="TRB">TRB</option></select></div>
-                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Line Segment</label><input type="text" name="lineType" defaultValue={editingRecord?.line_type || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -536,7 +560,7 @@ const Afterchannel = () => {
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Shift</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Operator</label><input type="text" name="operator" defaultValue={editingRecord?.operator || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Remark</label><input type="text" name="remark" defaultValue={editingRecord?.remark || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -556,7 +580,7 @@ const Afterchannel = () => {
               {entryMode === 'IN' ? (
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>Autopackaging - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
@@ -567,7 +591,7 @@ const Afterchannel = () => {
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                   </div>
                 </fieldset>
@@ -585,7 +609,7 @@ const Afterchannel = () => {
               {entryMode === 'IN' ? (
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}><legend style={{fontWeight: 'bold'}}>FPS - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
@@ -596,7 +620,7 @@ const Afterchannel = () => {
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Customer Order</label><input type="text" name="customerOrder" defaultValue={editingRecord?.customer_order || ''} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                   </div>
                 </fieldset>
@@ -643,25 +667,33 @@ const Afterchannel = () => {
 
       {selectedMoDetail && (
         <div className="modal-backdrop" style={{position: 'fixed', top:0, left:0, width:'100vw', height:'100vh', background:'rgba(15, 23, 42, 0.75)', display:'flex', justifyContent:'center', alignItems:'center', zIndex: 1000}}>
-          <div className="modal-window" style={{background:'#fff', padding:'30px', borderRadius:'10px', width:'95%', maxWidth:'1300px', maxHeight:'85vh', overflowY:'auto', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'}}>
+          <div className="modal-window" style={{background:'#fff', padding:'30px', borderRadius:'10px', width:'95%', maxWidth:'1500px', maxHeight:'85vh', overflowY:'auto', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'}}>
             <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'3px solid #0f172a', paddingBottom:'15px', marginBottom:'25px'}}>
               <h2 style={{margin: 0, color: '#0f172a'}}>Cross-Department Flow Trace: <span style={{color: '#2563eb'}}>{selectedMoDetail.mo}</span></h2>
               <button onClick={() => setSelectedMoDetail(null)} style={{fontSize:'2em', cursor:'pointer', border:'none', background:'none', color: '#64748b', lineHeight: '1'}}>&times;</button>
             </div>
             
-            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.9em', border: '1px solid #94a3b8'}}>
+            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.85em', border: '1px solid #94a3b8'}}>
               <thead>
                 <tr style={{background: '#334155', color: '#fff'}}>
-                  <th style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>Variant Model</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#166534'}}>Actual Prod Qty</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Accurate In</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Accurate Out</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS In</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS Out</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>Rework In</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>Rework Out</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dismantle In</th>
-                  <th style={{border: '1px solid #475569', padding: '12px', background: '#991b1b'}}>Scrap Sum</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>Variant Model</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#166534'}}>Prod Qty</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Acc In</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Acc Out</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS In</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS Out</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>RW In</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>RW Out</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis In</th>
+                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis Out</th>
+                  <th colSpan="5" style={{border: '1px solid #475569', padding: '8px', background: '#991b1b', textAlign: 'center'}}>Granular Scrap Components (Dismantling)</th>
+                </tr>
+                <tr style={{background: '#7f1d1d', color: '#fff', fontSize: '0.9em'}}>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>IR</th>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>OR</th>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>Cage</th>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>Ball/Roller</th>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>Seal/Shield</th>
                 </tr>
               </thead>
               <tbody>
@@ -680,7 +712,13 @@ const Afterchannel = () => {
                     <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwOut || '-'}</td>
                     
                     <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disIn || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', background: '#fee2e2', color:'#991b1b', fontWeight: 'bold'}}>{row.scrapSum || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disOut || '-'}</td>
+                    
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.irScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.orScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.cageScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.rollScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.accScrap || '-'}</td>
                   </tr>
                 ))}
               </tbody>

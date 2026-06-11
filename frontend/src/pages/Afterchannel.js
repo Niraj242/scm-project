@@ -27,15 +27,6 @@ const Afterchannel = () => {
   const [bearingFamily, setBearingFamily] = useState(''); 
   const [bearingScrapQty, setBearingScrapQty] = useState('');
 
-  // Fully controlled individual scrap fields to avoid input freeze bugs
-  const [irScrap, setIrScrap] = useState('');
-  const [orScrap, setOrScrap] = useState('');
-  const [cageScrap, setCageScrap] = useState('');
-  const [sealScrap, setSealScrap] = useState('');
-  const [shieldScrap, setShieldScrap] = useState('');
-  const [ballScrap, setBallScrap] = useState('');
-  const [rollerScrap, setRollerScrap] = useState('');
-
   useEffect(() => {
     fetchMasterData();
     fetchLedgers();
@@ -120,7 +111,7 @@ const Afterchannel = () => {
       matchingMos = matchingMos.filter(mo => {
         return moCache[mo].some(r => {
           if (getTypeFromRow(r).toUpperCase() !== selectedVariant) return false;
-          if (!r.date) return true; 
+          if (!r.date) return true; // If no date recorded in backend, keep it
           const moTime = new Date(r.date).getTime();
           const diffDays = Math.abs((moTime - inputTime) / (1000 * 3600 * 24));
           return diffDays <= 2;
@@ -163,38 +154,6 @@ const Afterchannel = () => {
     }
   };
 
-  // Automatic calculator triggers when Bearing family or Scrap Qty is updated
-  useEffect(() => {
-    if (activeTab === 'dismantling' && entryMode === 'OUT' && bearingScrapQty !== '') {
-      const qty = Number(bearingScrapQty) || 0;
-      setIrScrap(qty);
-      setOrScrap(qty);
-      setCageScrap(qty);
-      if (bearingFamily === 'DGBB') {
-        setBallScrap(qty * 8);
-        setRollerScrap('');
-      } else if (bearingFamily === 'TRB') {
-        setRollerScrap(qty * 8);
-        setBallScrap('');
-      } else {
-        setBallScrap('');
-        setRollerScrap('');
-      }
-    }
-  }, [bearingScrapQty, bearingFamily, activeTab, entryMode]);
-
-  const handleScrapQtyChange = (e) => {
-    const val = e.target.value;
-    setBearingScrapQty(val);
-    if (val === '') {
-      setIrScrap('');
-      setOrScrap('');
-      setCageScrap('');
-      setBallScrap('');
-      setRollerScrap('');
-    }
-  };
-
   const handleFormSubmit = async (e, endpoint) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -229,13 +188,6 @@ const Afterchannel = () => {
       e.target.reset();
       setEditingRecord(null);
       setBearingScrapQty(''); 
-      setIrScrap('');
-      setOrScrap('');
-      setCageScrap('');
-      setSealScrap('');
-      setShieldScrap('');
-      setBallScrap('');
-      setRollerScrap('');
       await fetchLedgers();
     } catch (err) {
       alert("Submission Error: " + err.message);
@@ -247,19 +199,13 @@ const Afterchannel = () => {
     setSelectedVariant(record.type || record.bearing_type || '');
     setBearingFamily(record.bearing_family || '');
     setEntryMode((record.qty_sent || record.qtySent) ? 'OUT' : 'IN');
-    
-    // Distribute record data back cleanly to states on Edit trigger
-    setIrScrap(record.ir_scrap !== undefined ? record.ir_scrap : '');
-    setOrScrap(record.or_scrap !== undefined ? record.or_scrap : '');
-    setCageScrap(record.cage_scrap !== undefined ? record.cage_scrap : '');
-    setSealScrap(record.seal_scrap !== undefined ? record.seal_scrap : '');
-    setShieldScrap(record.shield_scrap !== undefined ? record.shield_scrap : '');
-    setBallScrap(record.ball_scrap !== undefined ? record.ball_scrap : '');
-    setRollerScrap(record.roller_scrap !== undefined ? record.roller_scrap : '');
-    
-    setBearingScrapQty(''); 
     setEditingRecord(record);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    
+    // Fixed: Prevent hijacking the global scroll and only scroll this specific component view
+    const componentRoot = document.getElementById('afterchannel-scoped-root');
+    if (componentRoot) {
+      componentRoot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   };
 
   const handleDelete = async (id, tab) => {
@@ -306,15 +252,15 @@ const Afterchannel = () => {
       const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
       const disOut = disLedger.reduce((sum, l) => !isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
       
-      const irScrapVal = disLedger.reduce((sum, l) => sum + (Number(l.ir_scrap) || 0), 0);
-      const orScrapVal = disLedger.reduce((sum, l) => sum + (Number(l.or_scrap) || 0), 0);
-      const cageScrapVal = disLedger.reduce((sum, l) => sum + (Number(l.cage_scrap) || 0), 0);
-      const rollScrapVal = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap) || 0) + (Number(l.roller_scrap) || 0), 0);
-      const accScrapVal = disLedger.reduce((sum, l) => sum + (Number(l.seal_scrap) || 0) + (Number(l.shield_scrap) || 0), 0);
+      const irScrap = disLedger.reduce((sum, l) => sum + (Number(l.ir_scrap) || 0), 0);
+      const orScrap = disLedger.reduce((sum, l) => sum + (Number(l.or_scrap) || 0), 0);
+      const cageScrap = disLedger.reduce((sum, l) => sum + (Number(l.cage_scrap) || 0), 0);
+      const rollScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap) || 0) + (Number(l.roller_scrap) || 0), 0);
+      const accScrap = disLedger.reduce((sum, l) => sum + (Number(l.seal_scrap) || 0) + (Number(l.shield_scrap) || 0), 0);
 
       return {
         variant: v, prodQty, accIn, accOut, cpsIn, cpsOut, rwIn, rwOut, disIn, disOut,
-        irScrap: irScrapVal, orScrap: orScrapVal, cageScrap: cageScrapVal, rollScrap: rollScrapVal, accScrap: accScrapVal
+        irScrap, orScrap, cageScrap, rollScrap, accScrap
       };
     });
 
@@ -347,7 +293,7 @@ const Afterchannel = () => {
           <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: '4px', width: '300px', outline: 'none', color: '#000'}} />
         </div>
         
-        <div style={{overflowX: 'auto', width: '100%'}}>
+        <div style={{overflowX: 'auto', width: '100%', WebkitOverflowScrolling: 'touch'}}>
           <table style={{width: '100%', minWidth: 'max-content', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
             <thead>
               <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
@@ -420,7 +366,7 @@ const Afterchannel = () => {
   );
 
   return (
-    <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
+    <div id="afterchannel-scoped-root" className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif', boxSizing: 'border-box', width: '100%', maxWidth: '100%'}}>
       
       <datalist id="depts-list">
         <option value="Channel" /><option value="Accurate" /><option value="CPS" />
@@ -617,32 +563,24 @@ const Afterchannel = () => {
                   <div style={{background: '#fee2e2', padding: '15px', borderRadius: '6px', border: '1px solid #ef4444', marginBottom: '20px'}}>
                     <h4 style={{margin: '0 0 10px 0', color: '#b91c1c'}}>Auto-Scrap Calculator</h4>
                     <div style={{display: 'flex', gap: '15px', alignItems: 'flex-end'}}>
-                      <div style={{flex: 1}}>
-                        <label>Bearing Family</label>
-                        <select name="bearingFamily" value={bearingFamily} onChange={(e) => setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}} required>
-                          <option value=""></option>
-                          <option value="DGBB">DGBB</option>
-                          <option value="TRB">TRB</option>
-                        </select>
-                      </div>
-                      <div style={{flex: 1}}>
-                        <label>Bearing Scrap Qty (Total)</label>
-                        <input type="number" value={bearingScrapQty} onChange={handleScrapQtyChange} style={{width:'100%', padding:'6px'}} placeholder="e.g. 100" />
+                      <div style={{flex: 1}}><label>Bearing Scrap Qty (Total)</label><input type="number" value={bearingScrapQty} onChange={(e) => setBearingScrapQty(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="e.g. 100" /></div>
+                      <div style={{flex: 1, color: '#7f1d1d', fontSize: '0.9em', paddingBottom: '5px'}}>
+                        <em>Select Family (DGBB/TRB) above to auto-fill balls vs rollers.</em>
                       </div>
                     </div>
                   </div>
 
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginBottom: '20px', paddingBottom: '15px', borderBottom: '1px dashed #cbd5e1'}}>
-                    <div><label>IR Scrap</label><input type="number" name="irScrap" value={irScrap} onChange={(e) => setIrScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>OR Scrap</label><input type="number" name="orScrap" value={orScrap} onChange={(e) => setOrScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Cage Scrap</label><input type="number" name="cageScrap" value={cageScrap} onChange={(e) => setCageScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Seal Scrap</label><input type="number" name="sealScrap" value={sealScrap} onChange={(e) => setSealScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Shield Scrap</label><input type="number" name="shieldScrap" value={shieldScrap} onChange={(e) => setShieldScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>IR Scrap</label><input type="number" name="irScrap" value={bearingScrapQty || editingRecord?.ir_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>OR Scrap</label><input type="number" name="orScrap" value={bearingScrapQty || editingRecord?.or_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Cage Scrap</label><input type="number" name="cageScrap" value={bearingScrapQty || editingRecord?.cage_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Seal Scrap</label><input type="number" name="sealScrap" defaultValue={editingRecord?.seal_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Shield Scrap</label><input type="number" name="shieldScrap" defaultValue={editingRecord?.shield_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
                     
                     {bearingFamily === 'DGBB' ? (
-                      <div><label>Ball Scrap (Qty x 8)</label><input type="number" name="ballScrap" value={ballScrap} onChange={(e) => setBallScrap(e.target.value)} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                      <div><label>Ball Scrap (Qty x 8)</label><input type="number" name="ballScrap" value={(bearingScrapQty ? bearingScrapQty * 8 : editingRecord?.ball_scrap) || ''} onChange={()=>{}} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
                     ) : bearingFamily === 'TRB' ? (
-                      <div><label>Roller Scrap (Qty x 8)</label><input type="number" name="rollerScrap" value={rollerScrap} onChange={(e) => setRollerScrap(e.target.value)} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                      <div><label>Roller Scrap (Qty x 8)</label><input type="number" name="rollerScrap" value={(bearingScrapQty ? bearingScrapQty * 8 : editingRecord?.roller_scrap) || ''} onChange={()=>{}} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
                     ) : null}
                   </div>
 

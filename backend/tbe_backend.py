@@ -34,22 +34,39 @@ def safe_ceil(value):
     try: return math.ceil(float(value))
     except: return 0
 
-# --- STRICT DAY-FIRST DATE PARSING ---
+# --- ANTI-FLIP BULLETPROOF DATE PARSER ---
 def strict_dd_mm_yyyy(value):
     if pd.isna(value) or value is None: return None
-    if isinstance(value, (datetime, pd.Timestamp)): return value.date()
     
-    val_str = str(value).strip().lower().split()[0] 
-    if val_str in ["nan", "nat", "", "-", "none"]: return None
+    # Extract just the date segment to prevent timestamp mixing
+    val_str = str(value).strip().split()[0]
+    if val_str.lower() in ["nan", "nat", "", "-", "none"]: return None
     
+    # Standardize all delimiters to dashes
     val_str = val_str.replace("/", "-").replace(".", "-")
+    parts = val_str.split("-")
     
     try:
-        # Force dayfirst to prevent MM-DD American flips
-        parsed = pd.to_datetime(val_str, dayfirst=True, errors='coerce')
-        if pd.notna(parsed): return parsed.date()
+        if len(parts) == 3:
+            if len(parts[0]) == 4: # Standard YYYY-MM-DD
+                y = int(parts[0])
+                m = int(parts[1])
+                d = int(parts[2])
+            elif len(parts[2]) == 4 or len(parts[2]) == 2: # Rigid DD-MM-YYYY forcing
+                d = int(parts[0])
+                m = int(parts[1])
+                y = int(parts[2])
+                if y < 100: y += 2000
+            else:
+                d = int(parts[0])
+                m = int(parts[1])
+                y = int(parts[2])
+            return datetime(y, m, d).date()
     except:
         pass
+        
+    if isinstance(value, (datetime, pd.Timestamp)): 
+        return value.date()
     return None
 
 def parse_family_and_type(prod_text):
@@ -87,36 +104,21 @@ def clean_nan(value):
     if match: return float(match.group())
     return 0.0
 
-def find_column(df, patterns):
-    cols = {re.sub(r'[^a-z0-9]', '', str(c).lower()): c for c in df.columns}
-    for p in patterns:
-        p_clean = re.sub(r'[^a-z0-9]', '', p.lower())
-        if p_clean in cols: return cols[p_clean]
-    for p in patterns:
-        p_clean = re.sub(r'[^a-z0-9]', '', p.lower())
-        for clean_col, orig_col in cols.items():
-            if p_clean in clean_col: return orig_col
-    return None
-
-# --- RESTORED ORIGINAL HEADER FINDER (Fixes Transit Buffer) ---
-def repair_sheet_headers(df):
-    if df.empty: return df
-    targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity", "jwchallandate", "qtysent", "product"}
-    best_row_idx = -1
-    max_score = 0
-    
-    for idx in range(min(20, len(df))):
-        row_vals = [str(val).strip().lower().replace(" ", "").replace("#", "") for val in df.iloc[idx].values]
-        score = sum(1 for t in targets if any(t in v for v in row_vals))
-        if score > max_score:
-            max_score = score
-            best_row_idx = idx
+# --- POSITION-BASED COLUMN SEARCH ENGINE ---
+# Looks at headers AND row cells down to index 20 to find where data lives
+def locate_column_idx(df, keywords):
+    for idx, col in enumerate(df.columns):
+        c_clean = str(col).lower().replace(" ", "").replace("#", "").replace("_", "")
+        for kw in keywords:
+            if kw in c_clean: return idx
             
-    if max_score >= 2 and best_row_idx >= 0:
-        new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(df.iloc[best_row_idx].tolist())]
-        df.columns = new_cols
-        return df.iloc[best_row_idx+1:].reset_index(drop=True)
-    return df
+    for r_idx in range(min(20, len(df))):
+        row_vals = [str(x).lower().replace(" ", "").replace("#", "").replace("_", "") for x in df.iloc[r_idx].values]
+        for c_idx, val in enumerate(row_vals):
+            for kw in keywords:
+                if kw == val or (len(kw) > 2 and kw in val):
+                    return c_idx
+    return None
 
 def load_excel_sheets(url):
     try:
@@ -125,11 +127,7 @@ def load_excel_sheets(url):
         content = io.BytesIO(resp.content)
         try: xls = pd.ExcelFile(content, engine='calamine')
         except: xls = pd.ExcelFile(content, engine='openpyxl')
-        sheets = {}
-        for sheet_name in xls.sheet_names:
-            df = repair_sheet_headers(xls.parse(sheet_name))
-            sheets[sheet_name] = df
-        return sheets
+        return {sheet_name: xls.parse(sheet_name) for sheet_name in xls.sheet_names}
     except Exception as e:
         print(f"Excel load error for {url}: {e}")
         return {}
@@ -141,31 +139,33 @@ def process_master_sheets(sheets_dict, is_trb):
         clean_name = str(sheet_name).strip().upper()
         if not re.match(r'^(T|CH)[-\s]*\d+', clean_name): continue
             
-        ch_col = find_column(df, ["channelno", "channel", "machineno", "line", "ch"])
-        mo_col = find_column(df, ["mo", "mono", "order", "orderno"])
-        type_col = find_column(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
-        d_col = find_column(df, ["date", "day", "txndate"])
-        prod_col = find_column(df, ["production", "prodqty", "shiftproduction", "qty", "quantity"])
+        ch_idx = locate_column_idx(df, ["channelno", "channel", "machineno", "line", "ch"])
+        mo_idx = locate_column_idx(df, ["mo", "mono", "order", "orderno"])
+        type_idx = locate_column_idx(df, ["type", "variant", "bearing", "product", "item", "desc", "family", "part"])
+        d_idx = locate_column_idx(df, ["date", "day", "txndate"])
+        prod_idx = locate_column_idx(df, ["production", "prodqty", "shiftproduction", "qty", "quantity"])
 
-        if not type_col: continue 
+        if type_idx is None or prod_idx is None: continue 
 
-        for _, row in df.iterrows():
-            c_val = row.get(ch_col) if ch_col else sheet_name
+        for i in range(len(df)):
+            row = df.iloc[i]
+            qty = clean_nan(row.iloc[prod_idx])
+            if qty <= 0: continue
+            
+            prod_str = str(row.iloc[type_idx]).strip()
+            if prod_str.upper() in ["", "NAN", "TOTAL", "GRAND TOTAL"]: continue
+            
+            c_val = row.iloc[ch_idx] if ch_idx is not None else sheet_name
             ch = normalize_channel(c_val, force_t_prefix=is_trb)
             if not ch or ch == "0": ch = normalize_channel(sheet_name, force_t_prefix=is_trb)
             
-            mo_val = str(row.get(mo_col, "")).strip()
+            mo_val = str(row.iloc[mo_idx]).strip() if mo_idx is not None else ""
             if mo_val.upper() in ["NAN", "NONE", "TOTAL"]: mo_val = ""
             
-            prod_str = str(row.get(type_col)).strip()
-            if prod_str.upper() in ["", "NAN", "TOTAL", "GRAND TOTAL"]: continue
-            
             base_family, _ = parse_family_and_type(prod_str)
-            qty = clean_nan(row.get(prod_col))
-            dt = strict_dd_mm_yyyy(row.get(d_col))  
+            dt = strict_dd_mm_yyyy(row.iloc[d_idx]) if d_idx is not None else None
             
-            if qty > 0:
-                ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
+            ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
     return ch_list
 
 def process_tbe_data():
@@ -186,61 +186,65 @@ def process_tbe_data():
             trb_sheets = future_trb.result()
             dgbb_sheets = future_dgbb.result()
 
-        ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
+        # 1. CHANNEL DATA
+        GLOBAL_CH_ROWS = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
 
-        # 2. TRANSIT BUFFER EXTRACTION
+        # 2. TRANSIT BUFFER DATA (Failsafe Positional Mapping)
         tb_list = []
         for sheet_name, df in tb_sheets.items():
             if df.empty: continue
             
-            ch_col = find_column(df, ["ch#no", "chno", "channel", "ch"])
-            fam_col = find_column(df, ["type", "variant", "product"])
-            qty_col = find_column(df, ["noofrings", "qty", "quantity"])
-            date_col = find_column(df, ["date", "indate"])
+            ch_idx = locate_column_idx(df, ["chno", "chnum", "channel", "ch"])
+            fam_idx = locate_column_idx(df, ["type", "variant", "product", "item"])
+            qty_idx = locate_column_idx(df, ["noofrings", "qty", "quantity", "rings"])
+            date_idx = locate_column_idx(df, ["date", "indate"])
             
-            if not fam_col: continue
+            if fam_idx is None or qty_idx is None: continue
 
-            for _, row in df.iterrows():
-                ch_val = str(row.get(ch_col, sheet_name)).strip().upper().replace("CHANNEL", "").replace("CH", "").replace("-", "").strip()
-                if ch_val.startswith("T"): ch_val = ch_val[1:]
+            for i in range(len(df)):
+                row = df.iloc[i]
+                qty = clean_nan(row.iloc[qty_idx])
+                if qty <= 0: continue
                 
-                prod_text = str(row.get(fam_col)).strip()
-                if prod_text.upper() in ["", "NAN", "NONE"]: continue
+                prod_text = str(row.iloc[fam_idx]).strip()
+                if prod_text.upper() in ["", "NAN", "NONE", "TOTAL", "GRAND TOTAL"]: continue
+                
+                ch_val = str(row.iloc[ch_idx]) if ch_idx is not None else sheet_name
+                ch_val = ch_val.strip().upper().replace("CHANNEL", "").replace("CH", "").replace("-", "").strip()
+                if ch_val.startswith("T"): ch_val = ch_val[1:]
+                if ch_val.upper() in ["NAN", "NONE", ""]: ch_val = str(sheet_name).strip()
                 
                 base_fam, r_type = parse_family_and_type(prod_text)
-                qty = clean_nan(row.get(qty_col))
-                dt = strict_dd_mm_yyyy(row.get(date_col))
+                dt = strict_dd_mm_yyyy(row.iloc[date_idx]) if date_idx is not None else None
                 
-                if qty > 0:
-                    tb_list.append({"ch": ch_val, "fam": base_fam, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
+                tb_list.append({"ch": ch_val, "fam": base_fam, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
+        GLOBAL_TB_ROWS = tb_list
 
-        # 3. SHO (JOBWORK) EXTRACTION
+        # 3. SHO DATA (Failsafe 3-Column Mapping)
         sho_list = []
         for sheet_name, df in jw_sheets.items():
             if df.empty: continue
             clean_sheet = str(sheet_name).strip().lower()
             if "master" in clean_sheet or "summary" in clean_sheet: continue
             
-            date_col = find_column(df, ["jwchallandate", "date"])
-            prod_col = find_column(df, ["product", "item"])
-            qty_col = find_column(df, ["qtysent", "sentqty"])
+            date_idx = locate_column_idx(df, ["jwchallandate", "challandate", "date"])
+            prod_idx = locate_column_idx(df, ["product", "item", "variant"])
+            qty_idx = locate_column_idx(df, ["qtysent", "sentqty", "qty", "quantity"])
             
-            if not date_col or not prod_col or not qty_col: 
-                continue 
+            if prod_idx is None or qty_idx is None: continue 
                 
-            for _, row in df.iterrows():
-                raw_prod = str(row.get(prod_col, "")).strip()
-                if raw_prod.upper() in ["NAN", "NONE", "", "TOTAL"]: continue
+            for i in range(len(df)):
+                row = df.iloc[i]
+                qty = clean_nan(row.iloc[qty_idx])
+                if qty <= 0: continue
+                
+                raw_prod = str(row.iloc[prod_idx]).strip()
+                if raw_prod.upper() in ["NAN", "NONE", "", "TOTAL", "GRAND TOTAL"]: continue
                 
                 base_fam, comp_type = parse_family_and_type(raw_prod)
-                qty = clean_nan(row.get(qty_col))
-                dt = strict_dd_mm_yyyy(row.get(date_col))
+                dt = strict_dd_mm_yyyy(row.iloc[date_idx]) if date_idx is not None else None
                 
-                if qty > 0:
-                    sho_list.append({"fam": base_fam, "type": comp_type, "qty": qty, "date": dt, "label": raw_prod})
-
-        GLOBAL_CH_ROWS = ch_list
-        GLOBAL_TB_ROWS = tb_list
+                sho_list.append({"fam": base_fam, "type": comp_type, "qty": qty, "date": dt, "label": raw_prod})
         GLOBAL_SHO_ROWS = sho_list
 
         MASTER_CACHE = compile_summary_data(None, None)
@@ -260,7 +264,6 @@ def compile_summary_data(start_date_str, end_date_str):
         if not s_dt and not e_dt: return records
         filtered = []
         start_target = s_dt - timedelta(days=offset_days) if s_dt else None
-        
         for r in records:
             d = r.get("date")
             if not d: continue
@@ -306,11 +309,8 @@ def compile_summary_data(start_date_str, end_date_str):
     for ch, fam in merged_keys:
         ch_data = ch_grouped.get((ch, fam), {"qty": 0, "dates": [], "mos": set()})
         ch_qty = ch_data["qty"]
-        
-        # Raw dates for sorting
         ch_in_raw = min(ch_data["dates"]) if ch_data["dates"] else None
         ch_out_raw = max(ch_data["dates"]) if ch_data["dates"] else None
-        
         mo_ref = ", ".join(sorted(ch_data["mos"])) if ch_data["mos"] else "-"
         
         types_found = [t for (c, f, t) in tb_grouped.keys() if c == ch and f == fam]
@@ -335,11 +335,11 @@ def compile_summary_data(start_date_str, end_date_str):
             elif ch_qty >= tb_qty and tb_qty > 0: calc_status = "Completed"
             else: calc_status = "In Process"
             
-            # The date we use to chronologically sort the final dashboard row
-            sort_date = sho_in_raw or tb_out_raw or ch_in_raw or datetime.max.date()
+            # Use chronological data boundary, fallback to minimum system boundary if unassigned
+            sort_date = sho_in_raw or tb_out_raw or ch_in_raw or datetime.min.date()
 
             rows.append({
-                "_sort_date": sort_date, # Hidden key for sorting
+                "_sort_date": sort_date, 
                 "channel_ref": ch, "mo_ref": mo_ref,
                 "product_variant": fam, "ring_type": r_type,
                 "sho_qty": safe_ceil(sho_qty), "sho_in": format_dt(sho_in_raw),
@@ -351,7 +351,7 @@ def compile_summary_data(start_date_str, end_date_str):
     for (fam, r_type), s_data in sho_grouped.items():
         if (fam, r_type) not in processed_sho_keys:
             sho_in_raw = min(s_data["dates"]) if s_data["dates"] else None
-            sort_date = sho_in_raw or datetime.max.date()
+            sort_date = sho_in_raw or datetime.min.date()
             rows.append({
                 "_sort_date": sort_date,
                 "channel_ref": "-", "mo_ref": "-",
@@ -360,14 +360,11 @@ def compile_summary_data(start_date_str, end_date_str):
                 "tb_qty": 0, "tb_out": "-", "ch_qty": 0, "ch_in": "-", "ch_out": "-", "status": "SHO Logged"
             })
 
-    # --- CHRONOLOGICAL SORTING Phase ---
-    # Sorts first by Date (Oldest to Newest), then by Channel.
-    rows.sort(key=lambda x: (x["_sort_date"], x["channel_ref"]))
+    # --- CHRONOLOGICAL SORTING: NEWEST DATES FIRST ---
+    rows.sort(key=lambda x: x["_sort_date"], reverse=True)
     
-    # Clean up the hidden sort key
     for r in rows:
         del r["_sort_date"]
-        
     return rows
 
 def background_refresh_loop():
@@ -440,7 +437,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     for k, data in sho_map.items():
         min_date_raw = min(data["dates"]) if data["dates"] else None
         sequential_rows.append({
-            "_sort_date": min_date_raw or datetime.max.date(),
+            "_sort_date": min_date_raw or datetime.min.date(),
             "mo_ref": f"Ch: {ch}", "department": "SHO Department", "variant": data["label"],
             "in_date": format_dt(min_date_raw), "out_date": "-",  
             "qty": safe_ceil(data["qty"]), "status": "Allocated"
@@ -449,7 +446,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     for k, data in tb_map.items():
         max_date_raw = max(data["dates"]) if data["dates"] else None
         sequential_rows.append({
-            "_sort_date": max_date_raw or datetime.max.date(),
+            "_sort_date": max_date_raw or datetime.min.date(),
             "mo_ref": f"Ch: {ch}", "department": "Transit Buffer", "variant": data["label"],
             "in_date": "-", "out_date": format_dt(max_date_raw),
             "qty": safe_ceil(data["qty"]), "status": "In Transit"
@@ -461,15 +458,15 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         min_date_raw = min(data["dates"]) if data["dates"] else None
         max_date_raw = max(data["dates"]) if data["dates"] else None
         sequential_rows.append({
-            "_sort_date": min_date_raw or datetime.max.date(),
+            "_sort_date": min_date_raw or datetime.min.date(),
             "mo_ref": ch_mo_display, "department": "Channel Section", "variant": data["label"],
             "in_date": format_dt(min_date_raw),
             "out_date": format_dt(max_date_raw),
             "qty": safe_ceil(data["qty"]), "status": "Completed"
         })
 
-    # --- CHRONOLOGICAL SORTING Phase for Variant Details ---
-    sequential_rows.sort(key=lambda x: (x["_sort_date"], x["department"]))
+    # Sort deep-dive chronological windows newest first
+    sequential_rows.sort(key=lambda x: x["_sort_date"], reverse=True)
     for r in sequential_rows:
         del r["_sort_date"]
 

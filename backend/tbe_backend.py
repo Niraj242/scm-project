@@ -54,7 +54,7 @@ def repair_sheet_headers(df):
         raw_cols = df.iloc[best_row_idx].tolist()
         new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(raw_cols)]
         
-        # 2. THE FIX: Deduplicate columns to prevent Pandas from dropping data!
+        # 2. Deduplicate columns to prevent Pandas from dropping data
         seen = {}
         final_cols = []
         for col in new_cols:
@@ -82,7 +82,6 @@ def repair_sheet_headers(df):
     df.columns = final_cols
     
     return df
-
 
 def find_column(df, patterns):
     cols = [str(c).strip() for c in df.columns]
@@ -138,62 +137,56 @@ def clean_nan(value):
     return 0.0
 
 # -------------------------------------------------------------------------
-# IRONCLAD DATE PARSER
+# IRONCLAD DATE PARSER (POSITIONAL PRIORITY)
 # -------------------------------------------------------------------------
 def parse_date_safe(value, date_format="dd-mm-yyyy"):
     try:
         if pd.isna(value) or value is None: 
             return None
             
-        if isinstance(value, (datetime, pd.Timestamp)): return value.date()
-        if isinstance(value, date): return value
-            
         val_str = str(value).strip().replace("  ", " ")
         if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]:
             return None
 
-        # 1. Capture true Excel serial dates (to stop missing data)
-        if val_str.replace('.', '', 1).isdigit():
-            val_float = float(val_str)
+        # Clean off timestamps to isolate the pure date text
+        date_text = val_str.split(" ")[0].split("T")[0]
+
+        # 1. ABSOLUTE FIRST LINE: Positional String Override
+        for delim in ["-", "/", "."]:
+            if delim in date_text:
+                parts = date_text.split(delim)
+                if len(parts) >= 3:
+                    try:
+                        p1, p2, p3 = int(parts[0]), int(parts[1]), int(parts[2])
+                        if p1 > 1000:  # Format is YYYY-MM-DD
+                            year, month, day = p1, p2, p3
+                        else:          # Format is DD-MM or MM-DD
+                            year = p3 if p3 >= 100 else p3 + 2000
+                            if date_format == "dd-mm-yyyy":
+                                day, month = p1, p2
+                            else:
+                                month, day = p1, p2
+                        return date(year, month, day)
+                    except ValueError:
+                        pass # Ignore and fallback to native if invalid (like month > 12)
+
+        # 2. Excel Serial Numbers
+        if date_text.replace('.', '', 1).isdigit():
+            val_float = float(date_text)
             if 30000 < val_float < 60000:
                 return (datetime(1899, 12, 30) + timedelta(days=val_float)).date()
 
-        # Remove timestamp noise if present
-        if " " in val_str:
-            parts = val_str.split(" ")
-            if ":" in parts[-1] or "00:00" in parts[-1]:
-                val_str = " ".join(parts[:-1])
-        val_str = val_str.strip()
+        # 3. Native Python objects (if engine auto-converted correctly)
+        if isinstance(value, (datetime, pd.Timestamp)): return value.date()
+        if isinstance(value, date): return value
 
-        # 2. Textual month handling (e.g., 07-Feb-2024)
-        if any(m in val_str.lower() for m in ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
-            parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
+        # 4. Textual month handling (e.g., 07-Feb-2024)
+        if any(m in date_text.lower() for m in ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
+            parsed = pd.to_datetime(date_text, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
             if pd.notna(parsed): return parsed.date()
 
-        # 3. STRICT POSITIONAL LOCKING (Stops Pandas random swapping)
-        nums = re.findall(r'\d+', val_str)
-        if len(nums) >= 3:
-            n1, n2, n3 = int(nums[0]), int(nums[1]), int(nums[2])
-            
-            if len(nums[0]) == 4:
-                year, month, day = n1, n2, n3
-            else:
-                year = n3
-                if year < 100: year += 2000
-                
-                if date_format == "dd-mm-yyyy":
-                    day, month = n1, n2
-                else: # mm-dd-yyyy
-                    month, day = n1, n2
-                    
-            try:
-                return date(year, month, day)
-            except ValueError:
-                try: return date(year, day, month)
-                except: pass
-
-        # 4. Final safety net
-        parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
+        # 5. Last Resort Pandas Parser
+        parsed = pd.to_datetime(date_text, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
         if pd.notna(parsed): return parsed.date()
 
     except Exception:
@@ -208,7 +201,6 @@ def load_excel_sheets(url):
         try: xls = pd.ExcelFile(content, engine='calamine')
         except: xls = pd.ExcelFile(content)
         time.sleep(0.05) 
-        # THIS IS THE MOST IMPORTANT FIX: dtype=str FORCES PANDAS TO STOP TAMPERING WITH DATES
         return {sheet: repair_sheet_headers(xls.parse(sheet, dtype=str)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
@@ -273,7 +265,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if e_dt and not s_dt and r["date"] > e_dt: continue
         filtered_tb.append(r)
 
-    # NO OFFSET HERE: JobWork strictly matches your calendar selection
     sho_s_dt = s_dt 
     filtered_sho = []
     for r in GLOBAL_SHO_ROWS:
@@ -512,7 +503,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             tb_f.append(r)
 
     sho_f = []
-    # NO OFFSET HERE: JobWork strictly matches your calendar selection
     sho_s_dt = s_dt
     for r in GLOBAL_SHO_ROWS:
         if r["fam"] == fam:

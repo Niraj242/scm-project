@@ -42,6 +42,7 @@ def repair_sheet_headers(df):
     best_row_idx = -1
     max_score = 0
     
+    # 1. Find the best header row
     for idx in range(min(20, len(df))):
         row_vals = [str(val).strip().lower().replace(" ", "").replace("#", "") for val in df.iloc[idx].values]
         score = sum(1 for t in targets if any(t in v for v in row_vals))
@@ -50,11 +51,38 @@ def repair_sheet_headers(df):
             best_row_idx = idx
             
     if max_score >= 2 and best_row_idx >= 0:
-        new_cols = df.iloc[best_row_idx].tolist()
-        new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(new_cols)]
-        df.columns = new_cols
+        raw_cols = df.iloc[best_row_idx].tolist()
+        new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(raw_cols)]
+        
+        # 2. THE FIX: Deduplicate columns to prevent Pandas from dropping data!
+        seen = {}
+        final_cols = []
+        for col in new_cols:
+            if col in seen:
+                seen[col] += 1
+                final_cols.append(f"{col}_{seen[col]}")
+            else:
+                seen[col] = 0
+                final_cols.append(col)
+                
+        df.columns = final_cols
         return df.iloc[best_row_idx+1:].reset_index(drop=True)
+        
+    # If no header row found, still deduplicate the default pandas columns just in case
+    seen = {}
+    final_cols = []
+    for col in df.columns:
+        col_str = str(col)
+        if col_str in seen:
+            seen[col_str] += 1
+            final_cols.append(f"{col_str}_{seen[col_str]}")
+        else:
+            seen[col_str] = 0
+            final_cols.append(col_str)
+    df.columns = final_cols
+    
     return df
+
 
 def find_column(df, patterns):
     cols = [str(c).strip() for c in df.columns]

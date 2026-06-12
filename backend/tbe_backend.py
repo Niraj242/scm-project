@@ -26,6 +26,15 @@ NUM_REGEX = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
 PREFIX_REGEX = re.compile(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)')
 FAM_REGEX = re.compile(r'(\d{3,5})')
 
+def safe_ceil(value):
+    """Safely rounds up a value to integer, converting NaNs and nulls to 0"""
+    if pd.isna(value) or value is None: 
+        return 0
+    try:
+        return math.ceil(float(value))
+    except (ValueError, TypeError):
+        return 0
+
 def repair_sheet_headers(df):
     if df.empty: return df
     targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity"}
@@ -247,9 +256,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         ch, fam = row["ch"], row["fam"]
         r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
         
-        tb_qty = float(row.get("tb_qty", 0.0) or 0.0)
-        ch_qty = float(row.get("ch_qty", 0.0) or 0.0)
-        
+        # Uses safe extraction (no raw float casting on potentially NaN data)
         tb_max = row.get("tb_max_date")
         ch_min = row.get("ch_min_date")
         ch_max = row.get("ch_max_date")
@@ -262,18 +269,18 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             "mo_ref": mo_list,
             "product_variant": fam,
             "ring_type": r_type,
-            "sho_qty": 0.0,    # Will be assigned intelligently
+            "sho_qty": 0.0,    
             "sho_dates": [],
-            "tb_qty": math.ceil(tb_qty),
+            "tb_qty": safe_ceil(row.get("tb_qty")),
             "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
-            "ch_qty": math.ceil(ch_qty),
+            "ch_qty": safe_ceil(row.get("ch_qty")),
             "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
             "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-"
         })
 
     orphan_sho = {}
 
-    # 7. EXCLUSIVE SHO ALLOCATION ENGINE (Prevents Duplication)
+    # 7. EXCLUSIVE SHO ALLOCATION ENGINE
     for sho in filtered_sho:
         sho_fam = sho["fam"]
         sho_type = sho["type"]
@@ -281,23 +288,18 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         sho_qty = sho["qty"]
         sho_date = sho["date"]
         
-        # Find all channel rows that match this family and IM/OM type
         candidates = [r for r in base_rows if r["product_variant"] == sho_fam and r["ring_type"] == sho_type]
         
         assigned = False
         if candidates:
             mo_candidates = []
             if sho_mo:
-                # If JobWork has an MO, try to match it directly to the channel row handling that MO
                 for c in candidates:
                     if sho_mo in c["mo_ref"]:
                         mo_candidates.append(c)
             
-            # 1. Match Exact MO first to guarantee accuracy
             if mo_candidates:
                 target = mo_candidates[0]
-            # 2. If NO MO matches (or JobWork lacks one), assign to the first available channel for this family
-            #    This completely prevents multiplying the sum across ALL channels!
             else:
                 target = candidates[0]
                 
@@ -305,7 +307,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if sho_date: target["sho_dates"].append(sho_date)
             assigned = True
             
-        # 3. If there are NO channels running this family yet, save it as an Orphan to be rendered independently
         if not assigned:
             k = (sho_fam, sho_type)
             if k not in orphan_sho:
@@ -325,7 +326,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         else: calc_status = "In Process"
         
         r["status"] = calc_status
-        r["sho_qty"] = math.ceil(r["sho_qty"])
+        r["sho_qty"] = safe_ceil(r["sho_qty"])
         r["sho_in"] = str(min(r["sho_dates"])) if r["sho_dates"] else "-"
         del r["sho_dates"] # cleanup temp field
         
@@ -339,7 +340,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             "mo_ref": "-",
             "product_variant": fam,
             "ring_type": r_type,
-            "sho_qty": math.ceil(data["qty"]),
+            "sho_qty": safe_ceil(data["qty"]),
             "tb_qty": 0,
             "sho_in": str(min(data["dates"])) if data["dates"] else "-",
             "tb_out": "-",
@@ -413,7 +414,7 @@ def process_tbe_data():
                     "type": r_type, "qty": qty, "date": dt
                 })
 
-        # 3. Process JobWork Report (SHO Department - Enhanced Qty Sent parsing)
+        # 3. Process JobWork Report
         sho_list = []
         for sheet_name, df in jw_sheets.items():
             time.sleep(0.01)
@@ -423,8 +424,6 @@ def process_tbe_data():
             
             mo_col = find_column(df, ["po/prno.", "poprno", "mono", "mo", "po/prno"])
             prod_col = find_column(df, ["product", "item", "description"])
-            
-            # CRITICAL TARGET: Looks specifically for Qty Sent / Sent Qty
             qty_col = find_column(df, ["qtysent", "sentqty", "qty sent", "sent", "qtyapproved", "approvedqty", "shoqty", "qty"])
             date_col = find_column(df, ["jwchallandate", "challandate", "date", "jwdate"])
             
@@ -579,7 +578,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "variant": data["label"],
             "in_date": in_d,
             "out_date": "-",  
-            "qty": math.ceil(data["qty"]),
+            "qty": safe_ceil(data["qty"]),
             "status": "Allocated"
         })
 
@@ -591,7 +590,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "variant": data["label"],
             "in_date": "-",
             "out_date": out_d,
-            "qty": math.ceil(data["qty"]),
+            "qty": safe_ceil(data["qty"]),
             "status": "In Transit"
         })
         
@@ -614,7 +613,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "variant": "ALL VARIANTS",
             "in_date": in_d,
             "out_date": out_d,
-            "qty": math.ceil(data["qty"]),
+            "qty": safe_ceil(data["qty"]),
             "status": "MO Total"
         })
 
@@ -638,7 +637,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             "variant": data["label"],
             "in_date": in_d,
             "out_date": out_d,
-            "qty": math.ceil(data["qty"]),
+            "qty": safe_ceil(data["qty"]),
             "status": "Completed"
         })
 

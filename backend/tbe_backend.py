@@ -26,9 +26,7 @@ PREFIX_REGEX = re.compile(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)')
 FAM_REGEX = re.compile(r'(\d{3,5})')
 
 def format_dt(dt):
-    """Standardizes all dates sent to the frontend to DD-MM-YYYY"""
-    if dt and not pd.isna(dt):
-        return dt.strftime("%d-%m-%Y")
+    if dt and not pd.isna(dt): return dt.strftime("%d-%m-%Y")
     return "-"
 
 def safe_ceil(value):
@@ -36,67 +34,47 @@ def safe_ceil(value):
     try: return math.ceil(float(value))
     except: return 0
 
-# --- BULLETPROOF DATE ENGINE ---
+# --- STRICT DATE PARSER & NAT ELIMINATOR ---
 def parse_date_robust(value, source_format="dd-mm-yyyy"):
-    if pd.isna(value) or value is None: 
-        return None
+    if pd.isna(value) or value is None: return None
+    if isinstance(value, datetime): return value.date()
+    if isinstance(value, pd.Timestamp): return value.date()
         
-    # 1. If Excel parsed it as a native datetime object, trust it immediately
-    if isinstance(value, (datetime, pd.Timestamp)):
-        return value.date()
-        
-    val_str = str(value).strip()
-    if val_str.lower() in ["nan", "nat", "", "-", "none"]:
-        return None
+    val_str = str(value).strip().lower()
+    if val_str in ["nan", "nat", "", "-", "none"]: return None
 
-    # Normalize separators
-    val_str = val_str.replace("/", "-").replace(".", "-").replace("\\", "-")
+    val_str = val_str.replace("/", "-").replace(".", "-").replace("\\", "-").split(" ")[0]
     
     try:
-        # Extract date part if datetime string (e.g. "2026-03-11 00:00:00")
-        val_str = val_str.split(" ")[0]
-        
         parts = val_str.split("-")
         if len(parts) == 3:
-            # If year is first (YYYY-MM-DD), use standard assignment
             if len(parts[0]) == 4:
                 return datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
-            
-            # Explicitly force the mapping based on the known source format
             if source_format == "dd-mm-yyyy":
                 d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-            elif source_format == "mm-dd-yyyy":
-                m, d, y = int(parts[0]), int(parts[1]), int(parts[2])
             else:
-                return None
-                
-            if y < 100: y += 2000 # Handle two-digit years
+                m, d, y = int(parts[0]), int(parts[1]), int(parts[2])
+            if y < 100: y += 2000
             return datetime(y, m, d).date()
-    except:
-        pass
+    except: pass
         
-    # Final Fallback to pandas with explicit dayfirst flagging
     try:
-        if source_format == "dd-mm-yyyy":
-            return pd.to_datetime(val_str, dayfirst=True, errors='coerce').date()
-        else:
-            return pd.to_datetime(val_str, dayfirst=False, errors='coerce').date()
-    except:
-        return None
+        res = pd.to_datetime(val_str, dayfirst=(source_format == "dd-mm-yyyy"), errors='coerce')
+        if pd.isna(res): return None # EXPLICITLY KILL NAT
+        return res.date()
+    except: return None
 
 def repair_sheet_headers(df):
     if df.empty: return df
     targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity"}
     best_row_idx = -1
     max_score = 0
-    
     for idx in range(min(20, len(df))):
         row_vals = [str(val).strip().lower().replace(" ", "").replace("#", "") for val in df.iloc[idx].values]
         score = sum(1 for t in targets if any(t in v for v in row_vals))
         if score > max_score:
             max_score = score
             best_row_idx = idx
-            
     if max_score >= 2 and best_row_idx >= 0:
         new_cols = df.iloc[best_row_idx].tolist()
         new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(new_cols)]
@@ -134,20 +112,14 @@ def parse_family_and_type(prod_text):
     r_type = "ASSEMBLY"
     t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
     words = t_norm.split()
-    
     if any(w in ["IM", "IR", "INNER"] for w in words) or "INNER" in text or "IM" in text or "IR" in text:
         r_type = "IM"
     elif any(w in ["OM", "OR", "OUTER"] for w in words) or "OUTER" in text or "OM" in text or "OR" in text:
         r_type = "OM"
-        
     match = FAM_REGEX.search(text)
     base = match.group(1) if match else text.split()[0].split('-')[0]
-    
-    if "BT" in words or text.startswith("BT") or "-BT" in text or " BT" in text:
-        base = f"BT-{base}"
-    elif "BB" in words or text.startswith("BB") or "-BB" in text or " BB" in text:
-        base = f"BB-{base}"
-        
+    if "BT" in words or text.startswith("BT") or "-BT" in text or " BT" in text: base = f"BT-{base}"
+    elif "BB" in words or text.startswith("BB") or "-BB" in text or " BB" in text: base = f"BB-{base}"
     return base, r_type
 
 def clean_nan(value):
@@ -166,16 +138,13 @@ def load_excel_sheets(url):
         except: xls = pd.ExcelFile(content)
         time.sleep(0.05) 
         return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
-    except Exception as e:
-        print(f"⚠️ Error reading workbook stream: {e}")
-        return {}
+    except Exception as e: return {}
 
 def process_master_sheets(sheets_dict, is_trb):
     ch_list = []
     for sheet_name, df in sheets_dict.items():
         time.sleep(0.01) 
         if df.empty: continue
-        
         clean_name = str(sheet_name).strip().upper()
         if not re.match(r'^(T|CH)[-\s]*\d+', clean_name): continue
             
@@ -201,10 +170,7 @@ def process_master_sheets(sheets_dict, is_trb):
             
             base_family, _ = parse_family_and_type(prod_str)
             qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
-            
-            # STRICT: Channel explicitly uses MM-DD-YYYY
             dt = parse_date_robust(row.get(d_col), source_format="mm-dd-yyyy") 
-
             ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
     return ch_list
 
@@ -212,41 +178,43 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
-    # Apply strict chronological filters
+    # Apply strict chronological filters with NaT scrub
     filtered_ch = []
     for r in GLOBAL_CH_ROWS:
         if s_dt or e_dt:
-            if not r["date"]: continue
-            if s_dt and e_dt and not (s_dt <= r["date"] <= e_dt): continue
-            if s_dt and not e_dt and r["date"] < s_dt: continue # Look Forward!
-            if e_dt and not s_dt and r["date"] > e_dt: continue
+            d = r.get("date")
+            if pd.isna(d) or d is None: continue
+            if s_dt and e_dt and not (s_dt <= d <= e_dt): continue
+            if s_dt and not e_dt and d < s_dt: continue 
+            if e_dt and not s_dt and d > e_dt: continue
         filtered_ch.append(r)
 
     filtered_tb = []
     for r in GLOBAL_TB_ROWS:
         if s_dt or e_dt:
-            if not r["date"]: continue
-            if s_dt and e_dt and not (s_dt <= r["date"] <= e_dt): continue
-            if s_dt and not e_dt and r["date"] < s_dt: continue # Look Forward!
-            if e_dt and not s_dt and r["date"] > e_dt: continue
+            d = r.get("date")
+            if pd.isna(d) or d is None: continue
+            if s_dt and e_dt and not (s_dt <= d <= e_dt): continue
+            if s_dt and not e_dt and d < s_dt: continue 
+            if e_dt and not s_dt and d > e_dt: continue
         filtered_tb.append(r)
 
-    # SHO Offset Logic: 2 days before the start date filter
     sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
     filtered_sho = []
     for r in GLOBAL_SHO_ROWS:
         if sho_s_dt or e_dt:
-            if not r["date"]: continue
-            if sho_s_dt and e_dt and not (sho_s_dt <= r["date"] <= e_dt): continue
-            if sho_s_dt and not e_dt and r["date"] < sho_s_dt: continue # Look Forward!
-            if e_dt and not sho_s_dt and r["date"] > e_dt: continue
+            d = r.get("date")
+            if pd.isna(d) or d is None: continue
+            if sho_s_dt and e_dt and not (sho_s_dt <= d <= e_dt): continue
+            if sho_s_dt and not e_dt and d < sho_s_dt: continue 
+            if e_dt and not sho_s_dt and d > e_dt: continue
         filtered_sho.append(r)
 
     if filtered_ch:
         df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
-            ch_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-            ch_max_date=('date', lambda x: max([d for d in x if d is not None], default=None)),
+            ch_min_date=('date', lambda x: min([d for d in x if pd.notna(d) and d is not None], default=None)),
+            ch_max_date=('date', lambda x: max([d for d in x if pd.notna(d) and d is not None], default=None)),
             mo_list=('mo', lambda x: ", ".join(sorted(set([str(i) for i in x if pd.notna(i) and str(i).strip()]))))
         ).reset_index()
     else:
@@ -262,8 +230,8 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     if tb_list_parsed:
         df_tb_grouped = pd.DataFrame(tb_list_parsed).groupby(["ch", "fam", "type"]).agg(
             tb_qty=('qty', 'sum'),
-            tb_min_date=('date', lambda x: min([d for d in x if d is not None], default=None)),
-            tb_max_date=('date', lambda x: max([d for d in x if d is not None], default=None))
+            tb_min_date=('date', lambda x: min([d for d in x if pd.notna(d) and d is not None], default=None)),
+            tb_max_date=('date', lambda x: max([d for d in x if pd.notna(d) and d is not None], default=None))
         ).reset_index()
     else:
         df_tb_grouped = pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
@@ -277,7 +245,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         mo_list = row.get("mo_list", "")
         
         base_rows.append({
-            "channel_ref": ch, "mo_ref": mo_list if not pd.isna(mo_list) else "",
+            "channel_ref": ch, "mo_ref": mo_list if pd.notna(mo_list) else "",
             "product_variant": fam, "ring_type": r_type,
             "sho_qty": 0.0, "sho_dates": [],
             "tb_qty": safe_ceil(row.get("tb_qty")), 
@@ -288,25 +256,18 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         })
 
     orphan_sho = {}
-    
-    # EXACT MO MATCHING ENGINE
     for sho in filtered_sho:
         sho_fam, sho_type, sho_mo, sho_qty, sho_date = sho["fam"], sho["type"], sho["mo"], sho["qty"], sho["date"]
-        
         candidates = [r for r in base_rows if r["product_variant"] == sho_fam and r["ring_type"] == sho_type]
-        
         assigned = False
         if candidates:
-            # We ONLY inject if the MO matches a channel exactly. No more loose dumps.
             for c in candidates:
                 if sho_mo and str(sho_mo).strip() != "" and sho_mo in c["mo_ref"]:
                     c["sho_qty"] += sho_qty
                     if sho_date: c["sho_dates"].append(sho_date)
                     assigned = True
                     break 
-            
         if not assigned:
-            # Keep un-matched MOs cleanly separated so they don't bloat unrelated channels
             k = (sho_fam, sho_type, sho_mo)
             if k not in orphan_sho: orphan_sho[k] = {"qty": 0.0, "dates": []}
             orphan_sho[k]["qty"] += sho_qty
@@ -326,7 +287,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         del r["sho_dates"] 
         compiled_summary.append(r)
 
-    # Inject separated entries accurately
     for k, data in orphan_sho.items():
         fam, r_type, mo = k
         compiled_summary.append({
@@ -348,7 +308,6 @@ def process_tbe_data():
 
     try:
         from settings import settings
-        
         with ThreadPoolExecutor(max_workers=4) as executor:
             future_ring = executor.submit(load_excel_sheets, settings.RINGWT_TRANSITBUFFER_URL)
             future_trb = executor.submit(load_excel_sheets, settings.TRB_MASTER_URL)
@@ -384,8 +343,6 @@ def process_tbe_data():
                 
                 base_family, r_type = parse_family_and_type(prod_text)
                 qty = clean_nan(row.get(q_col)) if q_col else 0.0
-                
-                # STRICT: RingWT explicitly uses DD-MM-YYYY
                 dt = parse_date_robust(row.get(d_col), source_format="dd-mm-yyyy")
 
                 tb_list.append({"ch": ch, "fam": base_family, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
@@ -414,8 +371,6 @@ def process_tbe_data():
                 
                 base_fam, comp_type = parse_family_and_type(raw_product)
                 sho_qty = clean_nan(row.get(qty_col))
-                
-                # STRICT: JobWork Report explicitly uses DD-MM-YYYY
                 sho_date = parse_date_robust(row.get(date_col), source_format="dd-mm-yyyy")
                 
                 if sho_qty > 0:
@@ -424,12 +379,9 @@ def process_tbe_data():
         GLOBAL_CH_ROWS = ch_list
         GLOBAL_TB_ROWS = tb_list
         GLOBAL_SHO_ROWS = sho_list
-
         MASTER_CACHE = compile_summary_data(None, None)
         LAST_REFRESH = datetime.now()
-
-    except Exception as e:
-        print(f"❌ COMPILATION FAULT: {str(e)}")
+    except Exception as e: print(f"❌ COMPILATION FAULT: {str(e)}")
     finally:
         INITIALIZED = True 
         IS_UPDATING = False
@@ -444,9 +396,7 @@ threading.Thread(target=background_refresh_loop, daemon=True).start()
 
 @router.get("/tbe_all_mos")
 def get_tbe_dashboard(start_date: str = Query(None), end_date: str = Query(None)):
-    if not INITIALIZED:
-        return {"status": "initializing", "message": "Compiling data matrices...", "data": []}
-    
+    if not INITIALIZED: return {"status": "initializing", "message": "Compiling data matrices...", "data": []}
     if start_date or end_date:
         return {"status": "success", "last_updated": str(LAST_REFRESH), "data": compile_summary_data(start_date, end_date)}
     return {"status": "success", "last_updated": str(LAST_REFRESH), "data": MASTER_CACHE}
@@ -459,32 +409,35 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     ch_f = []
     for r in GLOBAL_CH_ROWS:
         if r["ch"] == ch and r["fam"] == fam:
+            d = r.get("date")
             if s_dt or e_dt:
-                if not r["date"]: continue
-                if s_dt and e_dt and not (s_dt <= r["date"] <= e_dt): continue
-                if s_dt and not e_dt and r["date"] < s_dt: continue
-                if e_dt and not s_dt and r["date"] > e_dt: continue
+                if pd.isna(d) or d is None: continue
+                if s_dt and e_dt and not (s_dt <= d <= e_dt): continue
+                if s_dt and not e_dt and d < s_dt: continue
+                if e_dt and not s_dt and d > e_dt: continue
             ch_f.append(r)
             
     tb_f = []
     for r in GLOBAL_TB_ROWS:
         if r["ch"] == ch and r["fam"] == fam:
+            d = r.get("date")
             if s_dt or e_dt:
-                if not r["date"]: continue
-                if s_dt and e_dt and not (s_dt <= r["date"] <= e_dt): continue
-                if s_dt and not e_dt and r["date"] < s_dt: continue
-                if e_dt and not s_dt and r["date"] > e_dt: continue
+                if pd.isna(d) or d is None: continue
+                if s_dt and e_dt and not (s_dt <= d <= e_dt): continue
+                if s_dt and not e_dt and d < s_dt: continue
+                if e_dt and not s_dt and d > e_dt: continue
             tb_f.append(r)
 
     sho_f = []
     sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
     for r in GLOBAL_SHO_ROWS:
         if r["fam"] == fam:
+            d = r.get("date")
             if sho_s_dt or e_dt:
-                if not r["date"]: continue
-                if sho_s_dt and e_dt and not (sho_s_dt <= r["date"] <= e_dt): continue
-                if sho_s_dt and not e_dt and r["date"] < sho_s_dt: continue
-                if e_dt and not sho_s_dt and r["date"] > e_dt: continue
+                if pd.isna(d) or d is None: continue
+                if sho_s_dt and e_dt and not (sho_s_dt <= d <= e_dt): continue
+                if sho_s_dt and not e_dt and d < sho_s_dt: continue
+                if e_dt and not sho_s_dt and d > e_dt: continue
             sho_f.append(r)
 
     found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_f if r.get("mo")])))
@@ -494,9 +447,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     sho_map, tb_map, ch_map, mo_summary_map = {}, {}, {}, {}
 
     for r in sho_f:
-        # Strict MO boundary in drill-down!
         if r["mo"] not in found_mos and found_mos: continue
-        
         norm_key = str(r["label"]).upper().replace("-", "").replace(" ", "")
         if not norm_key: continue
         if norm_key not in sho_map: sho_map[norm_key] = {"label": r["label"], "qty": 0.0, "dates": []}

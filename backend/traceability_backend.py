@@ -18,21 +18,22 @@ IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 5
 
-# 💡 OPTIONAL: If your sheet has an exact name (e.g., "Sheet1", "JobWork Allotment"), 
-# type it here inside the quotes to ONLY pull from that exact tab. Leave it "" to auto-filter.
 EXACT_JOBWORK_SHEET_NAME = "Worksheet" 
 
 GLOBAL_RAW_RECORDS = {"mo_data": [], "jw_data": [], "ch_data": []}
 
-# --- PRE-COMPILED REGEX FOR SPEED ---
 MO_GROUP_REGEX = re.compile(r'^(\d{4,})')
 FAM_GARBAGE_REGEX = re.compile(r'(?i)(NORMAL|INNER|OUTER|GENERIC PRODUCT)')
 FAM_CORE_REGEX = re.compile(r'(\d{3,}[A-Z0-9\-]*)')
 FAM_SUFFIX_REGEX = re.compile(r'(?i)(IM|OM)$')
 
+def format_dt(dt):
+    """Standardizes all dates sent to the frontend to DD-MM-YYYY"""
+    if dt and not pd.isna(dt):
+        return dt.strftime("%d-%m-%Y")
+    return "-"
 
 def clean_mo(value):
-    """Aggressively checks and cleans MO strings."""
     if pd.isna(value): return None
     val = str(value).strip().upper().replace(" ", "")
     if val.endswith(".0"): 
@@ -51,17 +52,14 @@ def get_mo_group(clean_mo_str):
     return group
 
 def clean_family_name(text):
-    """Strictly isolates the bearing family number and discards garbage text."""
     if pd.isna(text): return "Unknown Bearing"
     t = str(text).upper()
-    
     t = FAM_GARBAGE_REGEX.sub('', t)
     match = FAM_CORE_REGEX.search(t)
     if match:
         core = match.group(1)
         core = FAM_SUFFIX_REGEX.sub('', core)
         return core.strip('- ')
-        
     return "Unknown Bearing"
 
 def clean_nan(value):
@@ -72,10 +70,11 @@ def clean_nan(value):
     except:
         return 0.0
 
-def parse_date_safe(value):
+# Fixed: Added dayfirst explicit control for MM-DD vs DD-MM standardizing
+def parse_date_safe(value, dayfirst=True):
     try:
         if pd.isna(value) or str(value).strip().lower() in ["nan", "nat", "", "-"]: return None
-        parsed = pd.to_datetime(value, errors='coerce', dayfirst=True)
+        parsed = pd.to_datetime(value, errors='coerce', dayfirst=dayfirst)
         return parsed.date() if not pd.isna(parsed) else None
     except:
         return None
@@ -86,7 +85,6 @@ def determine_component(text):
     return "IM" 
 
 def load_excel_sheets(url):
-    """Fetches and parses a single Excel URL into a dictionary of DataFrames."""
     try:
         resp = requests.get(url, timeout=45)
         if resp.status_code != 200: return {}
@@ -97,11 +95,11 @@ def load_excel_sheets(url):
         except ImportError:
             xls = pd.ExcelFile(content)
             
-        time.sleep(0.05)  # Yield GIL
+        time.sleep(0.05) 
         
         sheets = {}
         for sheet in xls.sheet_names:
-            time.sleep(0.01)  # Yield GIL so server remains responsive
+            time.sleep(0.01)
             df = xls.parse(sheet)
             df.columns = [str(c).strip().lower() for c in df.columns]
             sheets[sheet] = df
@@ -111,7 +109,6 @@ def load_excel_sheets(url):
         return {}
 
 def fetch_all_data_concurrently():
-    """Speeds up data loading by downloading all 4 sheets in parallel."""
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
         f_mo = executor.submit(load_excel_sheets, settings.MO_DATA_URL)
         f_jw = executor.submit(load_excel_sheets, settings.JOBWORK_REPORT_URL)
@@ -139,34 +136,29 @@ def ensure_mo_in_summary(summary_map, mo_group, potential_family="Unknown Bearin
     return summary_map[mo_group]
 
 def compile_summary_data(start_date_str=None, end_date_str=None):
-    """Dynamic compiler that supports strict date filtering and accurate date aggregation"""
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
     
     summary_map = {}
     
-    # Add MO Baseline Data (Targets - unaffected by date filters)
     for r in GLOBAL_RAW_RECORDS["mo_data"]:
         data = ensure_mo_in_summary(summary_map, r["mo_group"], r["variant"])
         data["components"][r["comp_type"]]["qty_req"] = r["qty_req"]
         
-    # Add JobWork Data (SHO and TB)
     for r in GLOBAL_RAW_RECORDS["jw_data"]:
-        # Verify SHO Date
         sho_valid = True
         if s_dt or e_dt:
             d = r["sho_date"]
-            if not d: sho_valid = True 
+            if not d: sho_valid = False 
             else:
                 if s_dt and e_dt: sho_valid = (s_dt <= d <= e_dt)
                 elif s_dt: sho_valid = (d >= s_dt)
                 elif e_dt: sho_valid = (d <= e_dt)
         
-        # Verify TB Date
         tb_valid = True
         if s_dt or e_dt:
             d = r["tb_date"]
-            if not d: tb_valid = True
+            if not d: tb_valid = False
             else:
                 if s_dt and e_dt: tb_valid = (s_dt <= d <= e_dt)
                 elif s_dt: tb_valid = (d >= s_dt)
@@ -183,12 +175,11 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             data["components"][comp]["tb"] += r["tb_qty"]
             if r["tb_date"]: data["components"][comp]["tb_dates"].append(r["tb_date"])
             
-    # Add Channel Data
     for r in GLOBAL_RAW_RECORDS["ch_data"]:
         ch_valid = True
         if s_dt or e_dt:
             d = r["ch_date"]
-            if not d: ch_valid = True
+            if not d: ch_valid = False
             else:
                 if s_dt and e_dt: ch_valid = (s_dt <= d <= e_dt)
                 elif s_dt: ch_valid = (d >= s_dt)
@@ -199,7 +190,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             data["ch_qty"] += r["ch_qty"]
             if r["ch_date"]: data["ch_dates"].append(r["ch_date"])
 
-    # Structure into final Output format
     compiled_summary = []
     for mo, data in summary_map.items():
         im = data["components"]["IM"]
@@ -208,11 +198,12 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         
         status = "Completed" if (data["ch_qty"] >= req and req > 0) else ("In Process" if (im["sho"] > 0 or om["sho"] > 0) else "Yet to Start")
         
-        ch_d = str(max(data["ch_dates"])) if data["ch_dates"] else "-"
+        # Format explicitly to DD-MM-YYYY after true minimum calculation
+        ch_d = format_dt(max(data["ch_dates"])) if data["ch_dates"] else "-"
         
         if im["qty_req"] > 0 or im["sho"] > 0 or data["ch_qty"] > 0:
-            sho_d = str(min(im["sho_dates"])) if im["sho_dates"] else "-"
-            tb_d = str(max(im["tb_dates"])) if im["tb_dates"] else "-"
+            sho_d = format_dt(min(im["sho_dates"])) if im["sho_dates"] else "-"
+            tb_d = format_dt(max(im["tb_dates"])) if im["tb_dates"] else "-"
             compiled_summary.append({
                 "mo": mo, "base_product": data["base_product"], "component": "IM",
                 "qty_req": math.ceil(im["qty_req"]), "sho_qty": math.ceil(im["sho"]), "sho_date": sho_d,
@@ -221,8 +212,8 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             })
         
         if om["qty_req"] > 0 or om["sho"] > 0:
-            sho_d = str(min(om["sho_dates"])) if om["sho_dates"] else "-"
-            tb_d = str(max(om["tb_dates"])) if om["tb_dates"] else "-"
+            sho_d = format_dt(min(om["sho_dates"])) if om["sho_dates"] else "-"
+            tb_d = format_dt(max(om["tb_dates"])) if om["tb_dates"] else "-"
             compiled_summary.append({
                 "mo": mo, "base_product": data["base_product"], "component": "OM",
                 "qty_req": math.ceil(om["qty_req"]), "sho_qty": math.ceil(om["sho"]), "sho_date": sho_d,
@@ -246,9 +237,8 @@ def process_traceability_data():
         raw_jw_data = []
         raw_ch_data = []
 
-        # 1. Parsing MO Data
         for _, df in mo_sheets.items():
-            time.sleep(0.01) # Yield GIL
+            time.sleep(0.01) 
             if "mo#" not in df.columns: continue
             
             if "pdiv" in df.columns:
@@ -273,9 +263,8 @@ def process_traceability_data():
                 if qty_req > 0:
                     raw_mo_data.append({"mo_group": mo_group, "variant": final_variant, "comp_type": comp_type, "qty_req": qty_req})
 
-        # 2. Parsing JobWork Data
         for sheet_name, df in jobwork_sheets.items():
-            time.sleep(0.01) # Yield GIL
+            time.sleep(0.01) 
             
             clean_sheet = str(sheet_name).strip().lower()
             if EXACT_JOBWORK_SHEET_NAME != "":
@@ -301,8 +290,9 @@ def process_traceability_data():
                 comp_type = determine_component(raw_product)
                 sho_qty = clean_nan(row.get("qty approved", 0))
                 tb_qty = clean_nan(row.get("qty returned", 0))
-                sho_date = parse_date_safe(row.get("jw challan date"))
-                tb_date = parse_date_safe(row.get("last challan date"))
+                # Jobwork handles DD-MM-YYYY natively
+                sho_date = parse_date_safe(row.get("jw challan date"), dayfirst=True)
+                tb_date = parse_date_safe(row.get("last challan date"), dayfirst=True)
 
                 if sho_qty > 0 or tb_qty > 0:
                     raw_jw_data.append({
@@ -310,10 +300,9 @@ def process_traceability_data():
                         "sho_qty": sho_qty, "tb_qty": tb_qty, "sho_date": sho_date, "tb_date": tb_date
                     })
 
-        # 3. Parsing Channel Data 
         all_channels = {**trb_sheets, **dgbb_sheets}
         for _, df in all_channels.items():
-            time.sleep(0.01) # Yield GIL
+            time.sleep(0.01) 
             if "mo" not in df.columns: continue
             type_col = "type" if "type" in df.columns else ("product" if "product" in df.columns else None)
             
@@ -328,7 +317,8 @@ def process_traceability_data():
                 if mo_group == variant: continue 
 
                 ch_qty = clean_nan(row.get("production", 0))
-                ch_date = parse_date_safe(row.get("date"))
+                # Channel files natively handle MM-DD-YYYY
+                ch_date = parse_date_safe(row.get("date"), dayfirst=False)
 
                 if ch_qty > 0:
                     raw_ch_data.append({"mo_group": mo_group, "variant": variant, "ch_qty": ch_qty, "ch_date": ch_date})
@@ -383,8 +373,9 @@ def get_traceability_flow(mo: str, start_date: str = Query(None), end_date: str 
             if r["sho_qty"] > 0:
                 sho_valid = True
                 d = r["sho_date"]
-                if (s_dt or e_dt) and d:
-                    if s_dt and e_dt: sho_valid = (s_dt <= d <= e_dt)
+                if (s_dt or e_dt):
+                    if not d: sho_valid = False
+                    elif s_dt and e_dt: sho_valid = (s_dt <= d <= e_dt)
                     elif s_dt: sho_valid = (d >= s_dt)
                     elif e_dt: sho_valid = (d <= e_dt)
                     
@@ -396,8 +387,9 @@ def get_traceability_flow(mo: str, start_date: str = Query(None), end_date: str 
             if r["tb_qty"] > 0:
                 tb_valid = True
                 d = r["tb_date"]
-                if (s_dt or e_dt) and d:
-                    if s_dt and e_dt: tb_valid = (s_dt <= d <= e_dt)
+                if (s_dt or e_dt):
+                    if not d: tb_valid = False
+                    elif s_dt and e_dt: tb_valid = (s_dt <= d <= e_dt)
                     elif s_dt: tb_valid = (d >= s_dt)
                     elif e_dt: tb_valid = (d <= e_dt)
                     
@@ -412,8 +404,9 @@ def get_traceability_flow(mo: str, start_date: str = Query(None), end_date: str 
             if r["ch_qty"] > 0:
                 ch_valid = True
                 d = r["ch_date"]
-                if (s_dt or e_dt) and d:
-                    if s_dt and e_dt: ch_valid = (s_dt <= d <= e_dt)
+                if (s_dt or e_dt):
+                    if not d: ch_valid = False
+                    elif s_dt and e_dt: ch_valid = (s_dt <= d <= e_dt)
                     elif s_dt: ch_valid = (d >= s_dt)
                     elif e_dt: ch_valid = (d <= e_dt)
                     
@@ -425,7 +418,7 @@ def get_traceability_flow(mo: str, start_date: str = Query(None), end_date: str 
     rows = []
 
     for v_name, data in jw_sho_agg.items():
-        in_d = str(min(data["dates"])) if data["dates"] else "-"
+        in_d = format_dt(min(data["dates"])) if data["dates"] else "-"
         rows.append({
             "mo_ref": search_group, "department": "SHO Department", 
             "variant": v_name, "in_date": in_d, "out_date": "-", 
@@ -433,7 +426,7 @@ def get_traceability_flow(mo: str, start_date: str = Query(None), end_date: str 
         })
         
     for v_name, data in jw_tb_agg.items():
-        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        out_d = format_dt(max(data["dates"])) if data["dates"] else "-"
         rows.append({
             "mo_ref": search_group, "department": "Transit Buffer", 
             "variant": v_name, "in_date": "-", "out_date": out_d, 
@@ -441,8 +434,8 @@ def get_traceability_flow(mo: str, start_date: str = Query(None), end_date: str 
         })
 
     for v_name, data in ch_agg.items():
-        in_d = str(min(data["dates"])) if data["dates"] else "-"
-        out_d = str(max(data["dates"])) if data["dates"] else "-"
+        in_d = format_dt(min(data["dates"])) if data["dates"] else "-"
+        out_d = format_dt(max(data["dates"])) if data["dates"] else "-"
         rows.append({
             "mo_ref": search_group, "department": "Channel Section", 
             "variant": v_name, "in_date": in_d, "out_date": out_d, 

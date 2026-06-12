@@ -42,7 +42,6 @@ def repair_sheet_headers(df):
     best_row_idx = -1
     max_score = 0
     
-    # 1. Find the best header row
     for idx in range(min(20, len(df))):
         row_vals = [str(val).strip().lower().replace(" ", "").replace("#", "") for val in df.iloc[idx].values]
         score = sum(1 for t in targets if any(t in v for v in row_vals))
@@ -52,9 +51,15 @@ def repair_sheet_headers(df):
             
     if max_score >= 2 and best_row_idx >= 0:
         raw_cols = df.iloc[best_row_idx].tolist()
-        new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(raw_cols)]
         
-        # 2. Deduplicate columns to prevent Pandas from dropping data
+        new_cols = []
+        for i, c in enumerate(raw_cols):
+            c_str = str(c).strip()
+            if pd.isna(c) or c_str.lower() in ["nan", "none", ""]:
+                new_cols.append(f"Unnamed_{i}")
+            else:
+                new_cols.append(c_str)
+        
         seen = {}
         final_cols = []
         for col in new_cols:
@@ -68,7 +73,6 @@ def repair_sheet_headers(df):
         df.columns = final_cols
         return df.iloc[best_row_idx+1:].reset_index(drop=True)
         
-    # If no header row found, still deduplicate the default pandas columns just in case
     seen = {}
     final_cols = []
     for col in df.columns:
@@ -80,8 +84,8 @@ def repair_sheet_headers(df):
             seen[col_str] = 0
             final_cols.append(col_str)
     df.columns = final_cols
-    
     return df
+
 
 def find_column(df, patterns):
     cols = [str(c).strip() for c in df.columns]
@@ -137,61 +141,60 @@ def clean_nan(value):
     return 0.0
 
 # -------------------------------------------------------------------------
-# IRONCLAD DATE PARSER (POSITIONAL PRIORITY)
+# IRONCLAD DATE PARSER - STRICT FIRST-LINE ENFORCEMENT
 # -------------------------------------------------------------------------
 def parse_date_safe(value, date_format="dd-mm-yyyy"):
     try:
         if pd.isna(value) or value is None: 
             return None
             
-        val_str = str(value).strip().replace("  ", " ")
-        if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]:
-            return None
+        val_str = str(value).strip().split(' ')[0].split('T')[0]
+        if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]: return None
 
-        # Clean off timestamps to isolate the pure date text
-        date_text = val_str.split(" ")[0].split("T")[0]
-
-        # 1. ABSOLUTE FIRST LINE: Positional String Override
-        for delim in ["-", "/", "."]:
-            if delim in date_text:
-                parts = date_text.split(delim)
-                if len(parts) >= 3:
-                    try:
-                        p1, p2, p3 = int(parts[0]), int(parts[1]), int(parts[2])
-                        if p1 > 1000:  # Format is YYYY-MM-DD
-                            year, month, day = p1, p2, p3
-                        else:          # Format is DD-MM or MM-DD
-                            year = p3 if p3 >= 100 else p3 + 2000
-                            if date_format == "dd-mm-yyyy":
-                                day, month = p1, p2
-                            else:
-                                month, day = p1, p2
-                        return date(year, month, day)
-                    except ValueError:
-                        pass # Ignore and fallback to native if invalid (like month > 12)
-
-        # 2. Excel Serial Numbers
-        if date_text.replace('.', '', 1).isdigit():
-            val_float = float(date_text)
+        # 1. Excel serial number rescue
+        if val_str.replace('.', '', 1).isdigit():
+            val_float = float(val_str)
             if 30000 < val_float < 60000:
                 return (datetime(1899, 12, 30) + timedelta(days=val_float)).date()
 
-        # 3. Native Python objects (if engine auto-converted correctly)
-        if isinstance(value, (datetime, pd.Timestamp)): return value.date()
-        if isinstance(value, date): return value
+        val_clean = val_str.replace('/', '-').replace('.', '-')
 
-        # 4. Textual month handling (e.g., 07-Feb-2024)
-        if any(m in date_text.lower() for m in ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
-            parsed = pd.to_datetime(date_text, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
-            if pd.notna(parsed): return parsed.date()
+        # FIRST LINE PRIORITY: Absolute strict format enforcement
+        if date_format == "dd-mm-yyyy":
+            # Direct string match (e.g., "07-02-2026")
+            try: return datetime.strptime(val_clean, "%d-%m-%Y").date()
+            except ValueError: pass
+            try: return datetime.strptime(val_clean, "%d-%m-%y").date()
+            except ValueError: pass
+            
+            # REVERSE ISO RESCUE (Fixes the "Feb 7th becoming July 2nd" bug)
+            # If Pandas/Excel swapped it to YYYY-MM-DD, we intercept it and swap it back
+            try: return datetime.strptime(val_clean, "%Y-%d-%m").date()
+            except ValueError: pass
+            
+            # Standard ISO fallback (if it's mathematically impossible to reverse, e.g., 31st)
+            try: return datetime.strptime(val_clean, "%Y-%m-%d").date()
+            except ValueError: pass
 
-        # 5. Last Resort Pandas Parser
-        parsed = pd.to_datetime(date_text, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
+        else: # mm-dd-yyyy
+            try: return datetime.strptime(val_clean, "%m-%d-%Y").date()
+            except ValueError: pass
+            try: return datetime.strptime(val_clean, "%m-%d-%y").date()
+            except ValueError: pass
+            
+            try: return datetime.strptime(val_clean, "%Y-%m-%d").date()
+            except ValueError: pass
+            try: return datetime.strptime(val_clean, "%Y-%d-%m").date()
+            except ValueError: pass
+
+        # Final Pandas fallback for complex text formats like "07-Feb-2026"
+        parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
         if pd.notna(parsed): return parsed.date()
 
     except Exception:
         pass
     return None
+
 
 def load_excel_sheets(url):
     try:
@@ -201,10 +204,12 @@ def load_excel_sheets(url):
         try: xls = pd.ExcelFile(content, engine='calamine')
         except: xls = pd.ExcelFile(content)
         time.sleep(0.05) 
+        # dtype=str FORCES Python to read it as string text instead of auto-converting
         return {sheet: repair_sheet_headers(xls.parse(sheet, dtype=str)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
         return {}
+
 
 def process_master_sheets(sheets_dict, is_trb):
     ch_list = []

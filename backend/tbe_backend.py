@@ -6,7 +6,7 @@ import threading
 import time
 import re
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 router = APIRouter()
@@ -80,7 +80,7 @@ def parse_family_and_type(prod_text):
     text = str(prod_text).strip().upper()
     if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN", "ASSEMBLY"
     
-    # Aggressive IM/OM Detection (borrowed from traceability logic)
+    # Aggressive IM/OM Detection 
     r_type = "ASSEMBLY"
     t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
     words = t_norm.split()
@@ -169,12 +169,8 @@ def process_master_sheets(sheets_dict, is_trb):
             dt = parse_date_safe(row.get(d_col))
 
             ch_list.append({
-                "ch": ch, 
-                "fam": base_family, 
-                "variant": prod_str, 
-                "mo": mo_val, 
-                "qty": qty, 
-                "date": dt
+                "ch": ch, "fam": base_family, "variant": prod_str, 
+                "mo": mo_val, "qty": qty, "date": dt
             })
     return ch_list
 
@@ -184,22 +180,47 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
 
     filtered_ch = GLOBAL_CH_ROWS
     filtered_tb = GLOBAL_TB_ROWS 
-    filtered_sho = GLOBAL_SHO_ROWS
 
+    # 1. Apply STANDARD Date Filters to CH and TB
     if s_dt or e_dt:
         if s_dt and e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
-            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] >= s_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] >= s_dt]
-            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
-            filtered_sho = [r for r in GLOBAL_SHO_ROWS if r["date"] and r["date"] <= e_dt]
 
+    # 2. Apply "2 DAYS BEFORE" Rule strictly to SHO
+    sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
+    
+    filtered_sho = []
+    for r in GLOBAL_SHO_ROWS:
+        if not r["date"]:
+            filtered_sho.append(r)
+        else:
+            if sho_s_dt and e_dt:
+                if sho_s_dt <= r["date"] <= e_dt: filtered_sho.append(r)
+            elif sho_s_dt:
+                if r["date"] >= sho_s_dt: filtered_sho.append(r)
+            elif e_dt:
+                if r["date"] <= e_dt: filtered_sho.append(r)
+            else:
+                filtered_sho.append(r)
+
+    # 3. Aggregate SHO purely by Family and IM/OM Type
+    sho_agg = {}
+    for r in filtered_sho:
+        k = (r["fam"], r["type"])
+        if k not in sho_agg:
+            sho_agg[k] = {"qty": 0.0, "dates": []}
+        sho_agg[k]["qty"] += r["qty"]
+        if r["date"]:
+            sho_agg[k]["dates"].append(r["date"])
+
+    # 4. Group Channel Data
     if filtered_ch:
         df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
@@ -210,13 +231,13 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     else:
         df_ch_grouped = pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
 
+    # 5. Group Transit Buffer Data
     tb_list_parsed = []
-    if filtered_tb:
-        for r in filtered_tb:
-            tb_list_parsed.append({
-                "ch": r["ch"], "fam": r["fam"], "type": r.get("type", parse_family_and_type(r["variant"])[1]),
-                "qty": r["qty"], "date": r["date"]
-            })
+    for r in filtered_tb:
+        tb_list_parsed.append({
+            "ch": r["ch"], "fam": r["fam"], "type": r.get("type", parse_family_and_type(r["variant"])[1]),
+            "qty": r["qty"], "date": r["date"]
+        })
 
     if tb_list_parsed:
         df_tb_grouped = pd.DataFrame(tb_list_parsed).groupby(["ch", "fam", "type"]).agg(
@@ -227,12 +248,12 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     else:
         df_tb_grouped = pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
 
-    if df_tb_grouped.empty and df_ch_grouped.empty:
-        return []
-
+    # 6. Merge TB and CH
     merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
 
     compiled_summary = []
+    matched_sho_keys = set()
+
     for _, row in merged.iterrows():
         ch, fam = row["ch"], row["fam"]
         r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
@@ -247,49 +268,20 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         
         mo_list = row.get("mo_list", "")
         if pd.isna(mo_list): mo_list = ""
-        mos = [m.strip() for m in str(mo_list).split(',') if m.strip()]
 
         final_tb_qty = math.ceil(tb_qty)
         final_ch_qty = math.ceil(ch_qty)
 
-        # --- DYNAMIC SHO AGGREGATION & 4-DAY CONSTRAINT ALGORITHM ---
-        tb_dates = [r["date"] for r in filtered_tb if r["ch"] == ch and r["fam"] == fam and r.get("type", parse_family_and_type(r["variant"])[1]) == r_type and r["date"]]
-        ch_dates = [r["date"] for r in filtered_ch if r["ch"] == ch and r["fam"] == fam and r["date"]]
-        
-        # Determine strict Anchor Dates (prioritize TB, fallback to CH)
-        anchor_dates = tb_dates if tb_dates else ch_dates
-        
-        valid_sho_qty = 0.0
-        sho_dates = []
-
-        for sho in filtered_sho:
-            if sho["fam"] == fam and sho["type"] == r_type:
-                if not mos: continue # Needs MO linkage
-                
-                # Loose matching to ensure no MO data is missed
-                mo_match = any((sho["mo"] in m or m in sho["mo"]) for m in mos if m)
-                if not mo_match: continue
-                
-                include = False
-                if not anchor_dates:
-                    include = True
-                elif not sho["date"]:
-                    include = True
-                else:
-                    for ad in anchor_dates:
-                        diff = (ad - sho["date"]).days
-                        # Constraint: SHO should have date of not more than 4 days before Transit Buffer
-                        # Diff = TB_Date - SHO_Date. If diff <= 4, it is valid! (We allow up to -15 for loose late data processing)
-                        if -15 <= diff <= 4:  
-                            include = True
-                            break
-                
-                if include:
-                    valid_sho_qty += sho["qty"]
-                    if sho["date"]: sho_dates.append(sho["date"])
-
-        final_sho_qty = math.ceil(valid_sho_qty)
-        sho_in = str(min(sho_dates)) if sho_dates else "-"
+        # 7. Map SHO Data Directly onto the Row Based on Family + IM/OM Match
+        sho_key = (fam, r_type)
+        if sho_key in sho_agg:
+            final_sho_qty = math.ceil(sho_agg[sho_key]["qty"])
+            s_dates = sho_agg[sho_key]["dates"]
+            sho_in = str(min(s_dates)) if s_dates else "-"
+            matched_sho_keys.add(sho_key)
+        else:
+            final_sho_qty = 0
+            sho_in = "-"
 
         if final_tb_qty == 0 and final_ch_qty > 0: calc_status = "Channel Only"
         elif final_tb_qty > 0 and final_ch_qty == 0: calc_status = "Missing Channel Data"
@@ -301,15 +293,34 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             "mo_ref": mo_list,
             "product_variant": fam,
             "ring_type": r_type,
-            "sho_qty": final_sho_qty, # Sourced exactly from Qty Sent
+            "sho_qty": final_sho_qty, 
             "tb_qty": final_tb_qty, 
-            "sho_in": sho_in,         # Sourced from JobWork sheet date
+            "sho_in": sho_in,         
             "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
             "ch_qty": final_ch_qty,
             "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
             "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-",
             "status": calc_status
         })
+
+    # 8. Ensure Orphan SHO entries (where SHO exists, but NO TB/Channel data exists) are visible!
+    for k, data in sho_agg.items():
+        if k not in matched_sho_keys:
+            fam, r_type = k
+            compiled_summary.append({
+                "channel_ref": "-", # Show as unallocated / independent
+                "mo_ref": "-",
+                "product_variant": fam,
+                "ring_type": r_type,
+                "sho_qty": math.ceil(data["qty"]),
+                "tb_qty": 0,
+                "sho_in": str(min(data["dates"])) if data["dates"] else "-",
+                "tb_out": "-",
+                "ch_qty": 0,
+                "ch_in": "-",
+                "ch_out": "-",
+                "status": "SHO Logged"
+            })
 
     compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
     return compiled_summary
@@ -386,8 +397,8 @@ def process_tbe_data():
             mo_col = find_column(df, ["po/prno.", "poprno", "mono", "mo", "po/prno"])
             prod_col = find_column(df, ["product", "item", "description"])
             
-            # CRITICAL FIX: Targets "Qty Sent" directly, falls back to approved if missing
-            qty_col = find_column(df, ["qtysent", "qty sent", "sent", "qtyapproved", "approvedqty", "shoqty", "qty"])
+            # CRITICAL TARGET: Looks specifically for Qty Sent / Sent Qty
+            qty_col = find_column(df, ["qtysent", "sentqty", "qty sent", "sent", "qtyapproved", "approvedqty", "shoqty", "qty"])
             date_col = find_column(df, ["jwchallandate", "challandate", "date", "jwdate"])
             
             if not mo_col: continue
@@ -401,7 +412,6 @@ def process_tbe_data():
                 raw_product = str(row.get(prod_col, ""))
                 if raw_product.upper() in ["NAN", "NONE", "NA", ""]: continue
                 
-                # Utilizes the upgraded IM/OM check for absolute accuracy
                 base_fam, comp_type = parse_family_and_type(raw_product)
                 
                 sho_qty = clean_nan(row.get(qty_col))
@@ -457,19 +467,33 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
     sho_filtered = [r for r in GLOBAL_SHO_ROWS if r["fam"] == fam]
     
+    # 1. Apply STANDARD filters to CH and TB
     if s_dt or e_dt:
         if s_dt and e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
             tb_filtered = [r for r in tb_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
-            sho_filtered = [r for r in sho_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
         elif s_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] >= s_dt]
             tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] >= s_dt]
-            sho_filtered = [r for r in sho_filtered if r["date"] and r["date"] >= s_dt]
         elif e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] <= e_dt]
             tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] <= e_dt]
-            sho_filtered = [r for r in sho_filtered if r["date"] and r["date"] <= e_dt]
+
+        # 2. Apply "2 DAYS BEFORE" rule strictly to SHO Details breakdown
+        sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
+        if sho_s_dt or e_dt:
+            temp_sho = []
+            for r in sho_filtered:
+                if not r["date"]:
+                    temp_sho.append(r)
+                else:
+                    if sho_s_dt and e_dt:
+                        if sho_s_dt <= r["date"] <= e_dt: temp_sho.append(r)
+                    elif sho_s_dt:
+                        if r["date"] >= sho_s_dt: temp_sho.append(r)
+                    elif e_dt:
+                        if r["date"] <= e_dt: temp_sho.append(r)
+            sho_filtered = temp_sho
 
     found_mos = sorted(list(set([str(r["mo"]).strip() for r in ch_filtered if r.get("mo")])))
     mo_reference = ", ".join(found_mos) if found_mos else "-"
@@ -483,36 +507,15 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     ch_map = {}
     mo_summary_map = {} 
 
-    tb_dates = [r["date"] for r in tb_filtered if r["date"]]
-    ch_dates = [r["date"] for r in ch_filtered if r["date"]]
-    anchor_dates = tb_dates if tb_dates else ch_dates
-
     for r in sho_filtered:
-        if not found_mos: continue
-        mo_match = any((r["mo"] in m or m in r["mo"]) for m in found_mos if m)
-        if not mo_match: continue
+        raw_v = r["label"]
+        norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
+        if not norm_key: continue
         
-        include = False
-        if not anchor_dates:
-            include = True
-        elif not r["date"]:
-            include = True
-        else:
-            for ad in anchor_dates:
-                diff = (ad - r["date"]).days
-                if -15 <= diff <= 4:
-                    include = True
-                    break
-        
-        if include:
-            raw_v = r["label"]
-            norm_key = str(raw_v).upper().replace("-", "").replace(" ", "")
-            if not norm_key: continue
-            
-            if norm_key not in sho_map:
-                sho_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
-            sho_map[norm_key]["qty"] += r["qty"]
-            if r["date"]: sho_map[norm_key]["dates"].append(r["date"])
+        if norm_key not in sho_map:
+            sho_map[norm_key] = {"label": raw_v, "qty": 0.0, "dates": []}
+        sho_map[norm_key]["qty"] += r["qty"]
+        if r["date"]: sho_map[norm_key]["dates"].append(r["date"])
 
     for r in tb_filtered:
         raw_v = r["variant"]
@@ -615,4 +618,3 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         })
 
     return {"status": "success", "data": sequential_rows}
-    

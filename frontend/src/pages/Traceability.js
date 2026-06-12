@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import './Traceability.css'; 
 
 const API = 'https://scm-backend-pshv.onrender.com';
@@ -6,35 +6,55 @@ const API = 'https://scm-backend-pshv.onrender.com';
 const Traceability = () => {
   const [summaryData, setSummaryData] = useState([]);
   
-  // Drilldown Breakout States (TBE Sequential Log Style)
+  // Drilldown Breakout States
   const [selectedMoFlow, setSelectedMoFlow] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   
   const [search, setSearch] = useState('');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  
   const [loading, setLoading] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState('');
+  
+  const timerRef = useRef(null);
 
+  // Re-fetch data whenever date filters change
   useEffect(() => {
     fetchSummaryDashboard();
-  }, []);
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, [startDate, endDate]);
 
   const fetchSummaryDashboard = async () => {
     try {
-      setLoading(true);
+      if (!isInitializing) setLoading(true);
       setError('');
-      const res = await fetch(`${API}/traceability_all_mos`);
+      
+      // Append date filters to the API call
+      let url = `${API}/traceability_all_mos`;
+      const queryParams = [];
+      if (startDate) queryParams.push(`start_date=${startDate}`);
+      if (endDate) queryParams.push(`end_date=${endDate}`);
+      if (queryParams.length > 0) url += `?${queryParams.join('&')}`;
+
+      const res = await fetch(url);
       if (!res.ok) throw new Error('Network error pulling records.');
       const json = await res.json();
       
       if (json.status === 'initializing') {
         setIsInitializing(true);
-        setTimeout(fetchSummaryDashboard, 4000);
+        setSummaryData([]);
+        if (timerRef.current) clearTimeout(timerRef.current);
+        timerRef.current = setTimeout(fetchSummaryDashboard, 4000);
       } else if (json.status === 'success') {
         setIsInitializing(false);
         setSummaryData(json.data);
       }
     } catch (err) {
+      setIsInitializing(false);
       setError(err.message);
     } finally {
       setLoading(false);
@@ -47,14 +67,21 @@ const Traceability = () => {
       setSelectedMoFlow({ mo: moString, flow_data: [] }); 
       setDetailLoading(true);
       
-      const res = await fetch(`${API}/traceability_report/${moString.trim()}`);
+      // Append date filters to the drill-down report as well
+      let url = `${API}/traceability_report/${moString.trim()}`;
+      const queryParams = [];
+      if (startDate) queryParams.push(`start_date=${startDate}`);
+      if (endDate) queryParams.push(`end_date=${endDate}`);
+      if (queryParams.length > 0) url += `?${queryParams.join('&')}`;
+      
+      const res = await fetch(url);
       if (!res.ok) throw new Error('Could not pull variant flow.');
       const json = await res.json();
       
       if (json.status === 'success') {
         setSelectedMoFlow({
           mo: json.data.mo || moString,
-          flow_data: json.data.rows || [] // Expecting sequential department flow here
+          flow_data: json.data.rows || [] 
         });
       }
     } catch (err) {
@@ -90,6 +117,23 @@ const Traceability = () => {
         </div>
         
         <div className="control-actions">
+          {/* New Date Filters Added Here */}
+          <input 
+            type="date" 
+            className="search-box" 
+            title="Start Date"
+            value={startDate} 
+            onChange={(e) => setStartDate(e.target.value)} 
+          />
+          <span style={{margin: '0 5px', color: '#64748b'}}>to</span>
+          <input 
+            type="date" 
+            className="search-box" 
+            title="End Date"
+            value={endDate} 
+            onChange={(e) => setEndDate(e.target.value)} 
+          />
+
           <button className="back-btn" style={{margin: '0 10px'}} onClick={fetchSummaryDashboard} disabled={loading}>
             {loading ? 'Refreshing...' : '🔄 Reload'}
           </button>
@@ -113,13 +157,13 @@ const Traceability = () => {
         </div>
       )}
 
+      {loading && !isInitializing && <div className="loading-spinner" style={{textAlign:'center', padding:'20px'}}>Querying server memory buffer...</div>}
+
       {/* MAIN DASHBOARD */}
       {!loading && !isInitializing && (
-        /* Constrained vertical framework with rich card borders & drop shadows */
         <div className="table-wrapper" style={{ maxHeight: '680px', overflowY: 'auto', border: '1px solid #cbd5e1', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', position: 'relative' }}>
           <table className="trace-table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
             <thead>
-              {/* Row 1 Sticky Headers with high-contrast distinct section colors */}
               <tr className="super-header" style={{ height: '42px' }}>
                 <th colSpan="4" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#334155', color: '#ffffff', border: '1px solid #475569', fontWeight: '600', padding: '10px' }}>Order Details</th>
                 <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0284c7', color: '#ffffff', border: '1px solid #0369a1', fontWeight: '600', padding: '10px' }}>SHO Target</th>
@@ -127,7 +171,6 @@ const Traceability = () => {
                 <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#16a34a', color: '#ffffff', border: '1px solid #15803d', fontWeight: '600', padding: '10px' }}>Channel Section</th>
                 <th style={{ position: 'sticky', top: 0, zIndex: 10, background: '#475569', color: '#ffffff', border: '1px solid #576880', fontWeight: '600', padding: '10px' }}>Overall Status</th>
               </tr>
-              {/* Row 2 Sticky Headers with matching soft section background tones */}
               <tr className="sub-header" style={{ height: '38px' }}>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>MO Number</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Family / Base Product</th>
@@ -149,7 +192,6 @@ const Traceability = () => {
 
                 return (
                   <tr key={idx} className="data-row" style={{ backgroundColor: rowBg, transition: 'background 0.2s' }}>
-                    {/* Interactive Clickable MO Cell */}
                     {moSpan > 0 && (
                       <td 
                         rowSpan={moSpan} 
@@ -167,7 +209,6 @@ const Traceability = () => {
                       </td>
                     )}
                     
-                    {/* IM/OM Split Rows */}
                     <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', fontWeight: 600, color: row.component === 'IM' ? '#0369a1' : '#b45309' }}>
                       {row.component}
                     </td>
@@ -177,7 +218,6 @@ const Traceability = () => {
                     <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_qty ? Number(row.tb_qty).toLocaleString() : '-'}</td>
                     <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_date || '-'}</td>
                     
-                    {/* Re-Merged Channel Output */}
                     {moSpan > 0 && (
                       <td rowSpan={moSpan} className="merged-channel-cell fw-bold text-success" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#16a34a', verticalAlign: 'middle' }}>
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '-'}
@@ -208,7 +248,7 @@ const Traceability = () => {
         </div>
       )}
 
-      {/* DRILLDOWN MODAL - EXACT TBE SEQUENTIAL FORMAT */}
+      {/* DRILLDOWN MODAL */}
       {selectedMoFlow && (
         <div className="modal-overlay" onClick={() => setSelectedMoFlow(null)}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>

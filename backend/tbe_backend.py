@@ -109,50 +109,66 @@ def clean_nan(value):
     if match: return float(match.group())
     return 0.0
 
-# BULLETPROOF DATE PARSER - UPDATED FOR NATIVE DATE OBJECTS & ISO STRINGS
+# BULLETPROOF DATE PARSER - STRICT ENFORCEMENT FOR MM-DD vs DD-MM
 def parse_date_safe(value, date_format="dd-mm-yyyy"):
     try:
         if pd.isna(value) or value is None: 
             return None
             
-        # 1. Native Date Types
+        # 1. If it's a native Date Type natively imported by pandas
         if isinstance(value, (datetime, pd.Timestamp)):
             return value.date()
         if isinstance(value, date):
             return value
             
-        val_str = str(value).strip()
-        if val_str.lower() in ["nan", "nat", "", "-", "none"]:
+        # Clean up any weird extra spaces
+        val_str = str(value).strip().replace("  ", " ")
+        if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]:
             return None
 
-        # Try standard ISO strings first (in case pandas casted it automatically)
-        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
-            try: return datetime.strptime(val_str, fmt).date()
-            except ValueError: pass
+        # Remove timestamp if appended to a string (e.g., "12/06/2024 00:00:00")
+        if " " in val_str:
+            parts = val_str.split(" ")
+            if ":" in parts[-1] or "00:00" in parts[-1]:
+                val_str = " ".join(parts[:-1])
 
-        # 2. Strict String Parsing
-        if date_format == "dd-mm-yyyy":
-            # Try explicit EU formats first (Day first)
-            for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y", "%d.%m.%Y"):
-                try: return datetime.strptime(val_str, fmt).date()
-                except ValueError: pass
-            # Safe Fallback
-            parsed = pd.to_datetime(val_str, dayfirst=True, errors='coerce')
+        # 2. STRICT REGEX PARSING: Locks day and month to exactly what you define
+        # Matches typical inputs like 12-06-2024, 12/06/24, 12.06.2024
+        match = re.match(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$', val_str)
+        if match:
+            p1, p2, p3 = match.groups()
+            year = int(p3)
+            if year < 100: year += 2000
             
-        elif date_format == "mm-dd-yyyy":
-            # Try explicit US formats first (Month first)
-            for fmt in ("%m-%d-%Y", "%m/%d/%Y", "%m-%d-%y", "%m/%d/%y", "%m.%d.%Y"):
-                try: return datetime.strptime(val_str, fmt).date()
-                except ValueError: pass
-            # Safe Fallback
-            parsed = pd.to_datetime(val_str, dayfirst=False, errors='coerce')
-        
-        else:
-            parsed = pd.to_datetime(val_str, errors='coerce')
-            
-        return parsed.date() if pd.notna(parsed) else None
-    except:
-        return None
+            if date_format == "dd-mm-yyyy":
+                day, month = int(p1), int(p2)
+            else: # mm-dd-yyyy
+                month, day = int(p1), int(p2)
+                
+            try:
+                return date(year, month, day)
+            except ValueError:
+                # If someone accidentally typed it swapped (e.g. Month > 12), rescue it
+                try: return date(year, day, month)
+                except: pass
+
+        # Matches YYYY-MM-DD
+        match_iso = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', val_str)
+        if match_iso:
+            year, p2, p3 = int(match_iso.group(1)), int(match_iso.group(2)), int(match_iso.group(3))
+            try: return date(year, p2, p3)
+            except ValueError:
+                try: return date(year, p3, p2)
+                except: pass
+
+        # 3. Fallback to Pandas for textual formats (like "12-Jun-2024")
+        parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
+        if pd.notna(parsed):
+            return parsed.date()
+
+    except Exception:
+        pass
+    return None
 
 def load_excel_sheets(url):
     try:
@@ -209,7 +225,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
-    # Apply strict logic: exclude missing dates ONLY if filter dates are actively applied
+    # Filter logic implicitly considers any values on or AFTER the start date if end_date is missing
     filtered_ch = []
     for r in GLOBAL_CH_ROWS:
         if s_dt or e_dt:
@@ -228,7 +244,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if e_dt and not s_dt and r["date"] > e_dt: continue
         filtered_tb.append(r)
 
-    # REMOVED SHO OFFSET: Now maps strictly to the selected start date
     sho_s_dt = s_dt 
     filtered_sho = []
     for r in GLOBAL_SHO_ROWS:
@@ -469,7 +484,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             tb_f.append(r)
 
     sho_f = []
-    sho_s_dt = s_dt # REMOVED 2-DAY OFFSET HERE AS WELL
+    sho_s_dt = s_dt 
     for r in GLOBAL_SHO_ROWS:
         if r["fam"] == fam:
             if sho_s_dt or e_dt:

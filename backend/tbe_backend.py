@@ -109,9 +109,9 @@ def clean_nan(value):
     if match: return float(match.group())
     return 0.0
 
-# ---------------------------------------------------------
-# BULLETPROOF DATE PARSER V3: IMMUNE TO EXCEL & PANDAS BUGS
-# ---------------------------------------------------------
+# -------------------------------------------------------------------------
+# IRONCLAD DATE PARSER: STOPS PANDAS "RANDOM" SWAPPING FOREVER
+# -------------------------------------------------------------------------
 def parse_date_safe(value, date_format="dd-mm-yyyy"):
     try:
         if pd.isna(value) or value is None: 
@@ -124,57 +124,52 @@ def parse_date_safe(value, date_format="dd-mm-yyyy"):
         if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]:
             return None
 
-        # 1. Catch Raw Excel Date Numbers (e.g. "45432.0" -> prevents data disappearing)
+        # 1. Capture true Excel serial dates
         if val_str.replace('.', '', 1).isdigit():
             val_float = float(val_str)
-            if 30000 < val_float < 60000: # Standard modern Excel date range
+            if 30000 < val_float < 60000:
                 return (datetime(1899, 12, 30) + timedelta(days=val_float)).date()
 
+        # Remove timestamp noise if present
         if " " in val_str:
             parts = val_str.split(" ")
             if ":" in parts[-1] or "00:00" in parts[-1]:
                 val_str = " ".join(parts[:-1])
+        val_str = val_str.strip()
 
-        # 2. Strict Explicit Parsing based on user instruction
-        if date_format == "dd-mm-yyyy":
-            for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%d-%m-%y", "%d/%m/%y"):
-                try: return datetime.strptime(val_str, fmt).date()
-                except ValueError: pass
-        else: # mm-dd-yyyy
-            for fmt in ("%m-%d-%Y", "%m/%d/%Y", "%m.%d.%Y", "%m-%d-%y", "%m/%d/%y"):
-                try: return datetime.strptime(val_str, fmt).date()
-                except ValueError: pass
+        # 2. Textual month handling (e.g., 07-Feb-2024)
+        if any(m in val_str.lower() for m in ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]):
+            parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
+            if pd.notna(parsed): return parsed.date()
 
-        # 3. Smart Regex Fallback
-        match = re.match(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$', val_str)
-        if match:
-            p1, p2, p3 = match.groups()
-            year = int(p3)
-            if year < 100: year += 2000
+        # 3. STRICT POSITIONAL LOCKING (Stops Pandas random swapping)
+        nums = re.findall(r'\d+', val_str)
+        if len(nums) >= 3:
+            n1, n2, n3 = int(nums[0]), int(nums[1]), int(nums[2])
             
-            if date_format == "dd-mm-yyyy":
-                day, month = int(p1), int(p2)
+            # If the date was forcibly converted to ISO (YYYY-MM-DD) by Excel Engine
+            if len(nums[0]) == 4:
+                year, month, day = n1, n2, n3
             else:
-                month, day = int(p1), int(p2)
+                year = n3
+                if year < 100: year += 2000
                 
-            try: return date(year, month, day)
+                # We dictate exactly what position 1 and position 2 mean based on the sheet rules
+                if date_format == "dd-mm-yyyy":
+                    day, month = n1, n2
+                else: # mm-dd-yyyy
+                    month, day = n1, n2
+                    
+            try:
+                return date(year, month, day)
             except ValueError:
+                # Only if illegal (like month 15) do we try reversing
                 try: return date(year, day, month)
                 except: pass
 
-        # 4. ISO Date matching
-        match_iso = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', val_str)
-        if match_iso:
-            year, p2, p3 = int(match_iso.group(1)), int(match_iso.group(2)), int(match_iso.group(3))
-            try: return date(year, p2, p3)
-            except ValueError:
-                try: return date(year, p3, p2)
-                except: pass
-
-        # 5. Last resort Pandas textual parser
+        # 4. Final safety net
         parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
-        if pd.notna(parsed):
-            return parsed.date()
+        if pd.notna(parsed): return parsed.date()
 
     except Exception:
         pass
@@ -188,7 +183,7 @@ def load_excel_sheets(url):
         try: xls = pd.ExcelFile(content, engine='calamine')
         except: xls = pd.ExcelFile(content)
         time.sleep(0.05) 
-        # dtype=str FORCES Pandas to stop guessing and ruining dates! 
+        # dtype=str forces python to receive RAW TEXT, preventing random Pandas swapping
         return {sheet: repair_sheet_headers(xls.parse(sheet, dtype=str)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")

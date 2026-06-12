@@ -34,32 +34,20 @@ def safe_ceil(value):
     try: return math.ceil(float(value))
     except: return 0
 
-# --- BULLETPROOF DD-MM-YYYY PARSER ---
-# This explicitly forces the first number to be the Day. It cannot flip to MM-DD.
+# --- STRICT DAY-FIRST DATE PARSING ---
 def strict_dd_mm_yyyy(value):
     if pd.isna(value) or value is None: return None
     if isinstance(value, (datetime, pd.Timestamp)): return value.date()
     
-    val_str = str(value).strip().lower().split()[0] # Remove timestamps
+    val_str = str(value).strip().lower().split()[0] 
     if val_str in ["nan", "nat", "", "-", "none"]: return None
     
-    # Replace slashes and dots with dashes
     val_str = val_str.replace("/", "-").replace(".", "-")
     
     try:
-        parts = val_str.split("-")
-        if len(parts) >= 2:
-            # If year is first (YYYY-MM-DD), handle it safely
-            if len(parts[0]) == 4:
-                return datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
-            
-            # FORCE DD-MM-YYYY
-            d = int(parts[0])
-            m = int(parts[1])
-            y = int(parts[2]) if len(parts) >= 3 else datetime.now().year
-            
-            if y < 100: y += 2000
-            return datetime(y, m, d).date()
+        # Force dayfirst to prevent MM-DD American flips
+        parsed = pd.to_datetime(val_str, dayfirst=True, errors='coerce')
+        if pd.notna(parsed): return parsed.date()
     except:
         pass
     return None
@@ -110,6 +98,26 @@ def find_column(df, patterns):
             if p_clean in clean_col: return orig_col
     return None
 
+# --- RESTORED ORIGINAL HEADER FINDER (Fixes Transit Buffer) ---
+def repair_sheet_headers(df):
+    if df.empty: return df
+    targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity", "jwchallandate", "qtysent", "product"}
+    best_row_idx = -1
+    max_score = 0
+    
+    for idx in range(min(20, len(df))):
+        row_vals = [str(val).strip().lower().replace(" ", "").replace("#", "") for val in df.iloc[idx].values]
+        score = sum(1 for t in targets if any(t in v for v in row_vals))
+        if score > max_score:
+            max_score = score
+            best_row_idx = idx
+            
+    if max_score >= 2 and best_row_idx >= 0:
+        new_cols = [str(c).strip() if pd.notna(c) else f"Unnamed_{i}" for i, c in enumerate(df.iloc[best_row_idx].tolist())]
+        df.columns = new_cols
+        return df.iloc[best_row_idx+1:].reset_index(drop=True)
+    return df
+
 def load_excel_sheets(url):
     try:
         resp = requests.get(url, timeout=45)
@@ -119,15 +127,7 @@ def load_excel_sheets(url):
         except: xls = pd.ExcelFile(content, engine='openpyxl')
         sheets = {}
         for sheet_name in xls.sheet_names:
-            df = xls.parse(sheet_name)
-            # Find the true header row
-            if not df.empty:
-                for i in range(min(15, len(df))):
-                    row_vals = [str(x).lower().replace(" ", "") for x in df.iloc[i].values]
-                    if any(key in row_vals for key in ["date", "qty", "product", "channel", "ch", "jwchallandate", "qtysent"]):
-                        df.columns = [str(c).strip() if pd.notna(c) else f"U_{j}" for j, c in enumerate(df.iloc[i].tolist())]
-                        df = df.iloc[i+1:].reset_index(drop=True)
-                        break
+            df = repair_sheet_headers(xls.parse(sheet_name))
             sheets[sheet_name] = df
         return sheets
     except Exception as e:
@@ -162,7 +162,7 @@ def process_master_sheets(sheets_dict, is_trb):
             
             base_family, _ = parse_family_and_type(prod_str)
             qty = clean_nan(row.get(prod_col))
-            dt = strict_dd_mm_yyyy(row.get(d_col))  # Using strict parser for consistency
+            dt = strict_dd_mm_yyyy(row.get(d_col))  
             
             if qty > 0:
                 ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
@@ -186,20 +186,17 @@ def process_tbe_data():
             trb_sheets = future_trb.result()
             dgbb_sheets = future_dgbb.result()
 
-        # 1. CHANNEL EXTRACTION
         ch_list = process_master_sheets(trb_sheets, is_trb=True) + process_master_sheets(dgbb_sheets, is_trb=False)
 
-        # 2. EXACT TRANSIT BUFFER EXTRACTION
+        # 2. TRANSIT BUFFER EXTRACTION
         tb_list = []
         for sheet_name, df in tb_sheets.items():
             if df.empty: continue
             
-            cols = {str(c).lower().replace(" ", "").replace("#", ""): c for c in df.columns}
-            
-            ch_col = cols.get("ch") or cols.get("chno") or cols.get("channel")
-            fam_col = cols.get("type") or cols.get("variant") or cols.get("product")
-            qty_col = cols.get("noofrings") or cols.get("qty")
-            date_col = cols.get("date") or cols.get("indate")
+            ch_col = find_column(df, ["ch#no", "chno", "channel", "ch"])
+            fam_col = find_column(df, ["type", "variant", "product"])
+            qty_col = find_column(df, ["noofrings", "qty", "quantity"])
+            date_col = find_column(df, ["date", "indate"])
             
             if not fam_col: continue
 
@@ -217,19 +214,16 @@ def process_tbe_data():
                 if qty > 0:
                     tb_list.append({"ch": ch_val, "fam": base_fam, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
 
-        # 3. FROM-SCRATCH SHO (JOBWORK) EXTRACTION - 3 COLUMNS ONLY
+        # 3. SHO (JOBWORK) EXTRACTION
         sho_list = []
         for sheet_name, df in jw_sheets.items():
             if df.empty: continue
             clean_sheet = str(sheet_name).strip().lower()
             if "master" in clean_sheet or "summary" in clean_sheet: continue
             
-            # Pure targeted column match
-            cols = {str(c).lower().replace(" ", ""): c for c in df.columns}
-            
-            date_col = cols.get("jwchallandate")
-            prod_col = cols.get("product") or cols.get("item")
-            qty_col = cols.get("qtysent") or cols.get("sentqty")
+            date_col = find_column(df, ["jwchallandate", "date"])
+            prod_col = find_column(df, ["product", "item"])
+            qty_col = find_column(df, ["qtysent", "sentqty"])
             
             if not date_col or not prod_col or not qty_col: 
                 continue 
@@ -262,7 +256,6 @@ def compile_summary_data(start_date_str, end_date_str):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
-    # Forward-Looking Filter Logic
     def filter_records(records, offset_days=0):
         if not s_dt and not e_dt: return records
         filtered = []
@@ -281,9 +274,8 @@ def compile_summary_data(start_date_str, end_date_str):
 
     f_ch = filter_records(GLOBAL_CH_ROWS, 0)
     f_tb = filter_records(GLOBAL_TB_ROWS, 0)
-    f_sho = filter_records(GLOBAL_SHO_ROWS, 2) # SHO looks 2 days earlier
+    f_sho = filter_records(GLOBAL_SHO_ROWS, 2) 
 
-    # Aggregations
     ch_grouped = {}
     for r in f_ch:
         k = (r["ch"], r["fam"])
@@ -306,12 +298,7 @@ def compile_summary_data(start_date_str, end_date_str):
         sho_grouped[k]["qty"] += r["qty"]
         if r["date"]: sho_grouped[k]["dates"].append(r["date"])
 
-    # Build Outer Join (CH + TB)
-    merged_keys = set()
-    for (ch, fam) in ch_grouped.keys():
-        merged_keys.add((ch, fam))
-    for (ch, fam, r_type) in tb_grouped.keys():
-        merged_keys.add((ch, fam))
+    merged_keys = set(ch_grouped.keys()).union({(c, f) for c, f, t in tb_grouped.keys()})
 
     rows = []
     processed_sho_keys = set()
@@ -319,54 +306,68 @@ def compile_summary_data(start_date_str, end_date_str):
     for ch, fam in merged_keys:
         ch_data = ch_grouped.get((ch, fam), {"qty": 0, "dates": [], "mos": set()})
         ch_qty = ch_data["qty"]
-        ch_in = format_dt(min(ch_data["dates"])) if ch_data["dates"] else "-"
-        ch_out = format_dt(max(ch_data["dates"])) if ch_data["dates"] else "-"
+        
+        # Raw dates for sorting
+        ch_in_raw = min(ch_data["dates"]) if ch_data["dates"] else None
+        ch_out_raw = max(ch_data["dates"]) if ch_data["dates"] else None
+        
         mo_ref = ", ".join(sorted(ch_data["mos"])) if ch_data["mos"] else "-"
         
-        # Check TB for this CH + FAM (could have IM and OM)
         types_found = [t for (c, f, t) in tb_grouped.keys() if c == ch and f == fam]
         if not types_found: types_found = ["ASSEMBLY"]
 
         for r_type in types_found:
             tb_data = tb_grouped.get((ch, fam, r_type), {"qty": 0, "dates": []})
             tb_qty = tb_data["qty"]
-            tb_out = format_dt(max(tb_data["dates"])) if tb_data["dates"] else "-"
+            tb_out_raw = max(tb_data["dates"]) if tb_data["dates"] else None
 
             sho_key = (fam, r_type)
             sho_qty = 0
-            sho_in = "-"
+            sho_in_raw = None
             
-            # Match purely by family type
             if sho_key in sho_grouped:
                 sho_qty = sho_grouped[sho_key]["qty"]
-                sho_in = format_dt(min(sho_grouped[sho_key]["dates"])) if sho_grouped[sho_key]["dates"] else "-"
+                sho_in_raw = min(sho_grouped[sho_key]["dates"]) if sho_grouped[sho_key]["dates"] else None
                 processed_sho_keys.add(sho_key)
 
             if tb_qty == 0 and ch_qty > 0: calc_status = "Channel Only"
             elif tb_qty > 0 and ch_qty == 0: calc_status = "Missing Channel Data"
             elif ch_qty >= tb_qty and tb_qty > 0: calc_status = "Completed"
             else: calc_status = "In Process"
+            
+            # The date we use to chronologically sort the final dashboard row
+            sort_date = sho_in_raw or tb_out_raw or ch_in_raw or datetime.max.date()
 
             rows.append({
+                "_sort_date": sort_date, # Hidden key for sorting
                 "channel_ref": ch, "mo_ref": mo_ref,
                 "product_variant": fam, "ring_type": r_type,
-                "sho_qty": safe_ceil(sho_qty), "sho_in": sho_in,
-                "tb_qty": safe_ceil(tb_qty), "tb_out": tb_out,
-                "ch_qty": safe_ceil(ch_qty), "ch_in": ch_in, "ch_out": ch_out,
+                "sho_qty": safe_ceil(sho_qty), "sho_in": format_dt(sho_in_raw),
+                "tb_qty": safe_ceil(tb_qty), "tb_out": format_dt(tb_out_raw),
+                "ch_qty": safe_ceil(ch_qty), "ch_in": format_dt(ch_in_raw), "ch_out": format_dt(ch_out_raw),
                 "status": calc_status
             })
 
-    # Add remaining SHO data that didn't map to any CH or TB
     for (fam, r_type), s_data in sho_grouped.items():
         if (fam, r_type) not in processed_sho_keys:
+            sho_in_raw = min(s_data["dates"]) if s_data["dates"] else None
+            sort_date = sho_in_raw or datetime.max.date()
             rows.append({
+                "_sort_date": sort_date,
                 "channel_ref": "-", "mo_ref": "-",
                 "product_variant": fam, "ring_type": r_type,
-                "sho_qty": safe_ceil(s_data["qty"]), "sho_in": format_dt(min(s_data["dates"])) if s_data["dates"] else "-",
+                "sho_qty": safe_ceil(s_data["qty"]), "sho_in": format_dt(sho_in_raw),
                 "tb_qty": 0, "tb_out": "-", "ch_qty": 0, "ch_in": "-", "ch_out": "-", "status": "SHO Logged"
             })
 
-    rows.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
+    # --- CHRONOLOGICAL SORTING Phase ---
+    # Sorts first by Date (Oldest to Newest), then by Channel.
+    rows.sort(key=lambda x: (x["_sort_date"], x["channel_ref"]))
+    
+    # Clean up the hidden sort key
+    for r in rows:
+        del r["_sort_date"]
+        
     return rows
 
 def background_refresh_loop():
@@ -437,27 +438,39 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     sequential_rows = []
     
     for k, data in sho_map.items():
+        min_date_raw = min(data["dates"]) if data["dates"] else None
         sequential_rows.append({
+            "_sort_date": min_date_raw or datetime.max.date(),
             "mo_ref": f"Ch: {ch}", "department": "SHO Department", "variant": data["label"],
-            "in_date": format_dt(min(data["dates"])) if data["dates"] else "-", "out_date": "-",  
+            "in_date": format_dt(min_date_raw), "out_date": "-",  
             "qty": safe_ceil(data["qty"]), "status": "Allocated"
         })
 
     for k, data in tb_map.items():
+        max_date_raw = max(data["dates"]) if data["dates"] else None
         sequential_rows.append({
+            "_sort_date": max_date_raw or datetime.max.date(),
             "mo_ref": f"Ch: {ch}", "department": "Transit Buffer", "variant": data["label"],
-            "in_date": "-", "out_date": format_dt(max(data["dates"])) if data["dates"] else "-",
+            "in_date": "-", "out_date": format_dt(max_date_raw),
             "qty": safe_ceil(data["qty"]), "status": "In Transit"
         })
 
     for k, data in ch_map.items():
         exact_mo = data["exact_mo"]
         ch_mo_display = f"{exact_mo} (Ch: {ch})" if exact_mo else f"Ch: {ch}"
+        min_date_raw = min(data["dates"]) if data["dates"] else None
+        max_date_raw = max(data["dates"]) if data["dates"] else None
         sequential_rows.append({
+            "_sort_date": min_date_raw or datetime.max.date(),
             "mo_ref": ch_mo_display, "department": "Channel Section", "variant": data["label"],
-            "in_date": format_dt(min(data["dates"])) if data["dates"] else "-",
-            "out_date": format_dt(max(data["dates"])) if data["dates"] else "-",
+            "in_date": format_dt(min_date_raw),
+            "out_date": format_dt(max_date_raw),
             "qty": safe_ceil(data["qty"]), "status": "Completed"
         })
+
+    # --- CHRONOLOGICAL SORTING Phase for Variant Details ---
+    sequential_rows.sort(key=lambda x: (x["_sort_date"], x["department"]))
+    for r in sequential_rows:
+        del r["_sort_date"]
 
     return {"status": "success", "data": sequential_rows}

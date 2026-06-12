@@ -36,6 +36,54 @@ def safe_ceil(value):
     try: return math.ceil(float(value))
     except: return 0
 
+# --- BULLETPROOF DATE ENGINE ---
+def parse_date_robust(value, source_format="dd-mm-yyyy"):
+    if pd.isna(value) or value is None: 
+        return None
+        
+    # 1. If Excel parsed it as a native datetime object, trust it immediately
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return value.date()
+        
+    val_str = str(value).strip()
+    if val_str.lower() in ["nan", "nat", "", "-", "none"]:
+        return None
+
+    # Normalize separators
+    val_str = val_str.replace("/", "-").replace(".", "-").replace("\\", "-")
+    
+    try:
+        # Extract date part if datetime string (e.g. "2026-03-11 00:00:00")
+        val_str = val_str.split(" ")[0]
+        
+        parts = val_str.split("-")
+        if len(parts) == 3:
+            # If year is first (YYYY-MM-DD), use standard assignment
+            if len(parts[0]) == 4:
+                return datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
+            
+            # Explicitly force the mapping based on the known source format
+            if source_format == "dd-mm-yyyy":
+                d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+            elif source_format == "mm-dd-yyyy":
+                m, d, y = int(parts[0]), int(parts[1]), int(parts[2])
+            else:
+                return None
+                
+            if y < 100: y += 2000 # Handle two-digit years
+            return datetime(y, m, d).date()
+    except:
+        pass
+        
+    # Final Fallback to pandas with explicit dayfirst flagging
+    try:
+        if source_format == "dd-mm-yyyy":
+            return pd.to_datetime(val_str, dayfirst=True, errors='coerce').date()
+        else:
+            return pd.to_datetime(val_str, dayfirst=False, errors='coerce').date()
+    except:
+        return None
+
 def repair_sheet_headers(df):
     if df.empty: return df
     targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity"}
@@ -109,44 +157,6 @@ def clean_nan(value):
     if match: return float(match.group())
     return 0.0
 
-# BULLETPROOF DATE PARSER
-def parse_date_safe(value, date_format="dd-mm-yyyy"):
-    try:
-        if pd.isna(value) or value is None: 
-            return None
-            
-        # 1. If Excel parsed it properly as a Python datetime object natively, trust it!
-        if isinstance(value, (datetime, pd.Timestamp)):
-            return value.date()
-            
-        val_str = str(value).strip()
-        if val_str.lower() in ["nan", "nat", "", "-", "none"]:
-            return None
-
-        # 2. Strict String Parsing to avoid Month/Day swaps
-        if date_format == "dd-mm-yyyy":
-            # Try explicit EU formats first (Day first)
-            for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y", "%d.%m.%Y"):
-                try: return datetime.strptime(val_str, fmt).date()
-                except ValueError: pass
-            # Safe Fallback
-            parsed = pd.to_datetime(val_str, dayfirst=True, errors='coerce')
-            
-        elif date_format == "mm-dd-yyyy":
-            # Try explicit US formats first (Month first)
-            for fmt in ("%m-%d-%Y", "%m/%d/%Y", "%m-%d-%y", "%m/%d/%y", "%m.%d.%Y"):
-                try: return datetime.strptime(val_str, fmt).date()
-                except ValueError: pass
-            # Safe Fallback
-            parsed = pd.to_datetime(val_str, dayfirst=False, errors='coerce')
-        
-        else:
-            parsed = pd.to_datetime(val_str, errors='coerce')
-            
-        return parsed.date() if pd.notna(parsed) else None
-    except:
-        return None
-
 def load_excel_sheets(url):
     try:
         resp = requests.get(url, timeout=45)
@@ -192,8 +202,8 @@ def process_master_sheets(sheets_dict, is_trb):
             base_family, _ = parse_family_and_type(prod_str)
             qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
             
-            # STRICT: Channel inherently handles MM-DD-YYYY
-            dt = parse_date_safe(row.get(d_col), date_format="mm-dd-yyyy") 
+            # STRICT: Channel explicitly uses MM-DD-YYYY
+            dt = parse_date_robust(row.get(d_col), source_format="mm-dd-yyyy") 
 
             ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
     return ch_list
@@ -202,13 +212,13 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
-    # Apply strict logic: exclude missing dates ONLY if filter dates are actively applied
+    # Apply strict chronological filters
     filtered_ch = []
     for r in GLOBAL_CH_ROWS:
         if s_dt or e_dt:
             if not r["date"]: continue
             if s_dt and e_dt and not (s_dt <= r["date"] <= e_dt): continue
-            if s_dt and not e_dt and r["date"] < s_dt: continue
+            if s_dt and not e_dt and r["date"] < s_dt: continue # Look Forward!
             if e_dt and not s_dt and r["date"] > e_dt: continue
         filtered_ch.append(r)
 
@@ -217,7 +227,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         if s_dt or e_dt:
             if not r["date"]: continue
             if s_dt and e_dt and not (s_dt <= r["date"] <= e_dt): continue
-            if s_dt and not e_dt and r["date"] < s_dt: continue
+            if s_dt and not e_dt and r["date"] < s_dt: continue # Look Forward!
             if e_dt and not s_dt and r["date"] > e_dt: continue
         filtered_tb.append(r)
 
@@ -228,7 +238,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         if sho_s_dt or e_dt:
             if not r["date"]: continue
             if sho_s_dt and e_dt and not (sho_s_dt <= r["date"] <= e_dt): continue
-            if sho_s_dt and not e_dt and r["date"] < sho_s_dt: continue
+            if sho_s_dt and not e_dt and r["date"] < sho_s_dt: continue # Look Forward!
             if e_dt and not sho_s_dt and r["date"] > e_dt: continue
         filtered_sho.append(r)
 
@@ -278,6 +288,8 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         })
 
     orphan_sho = {}
+    
+    # EXACT MO MATCHING ENGINE
     for sho in filtered_sho:
         sho_fam, sho_type, sho_mo, sho_qty, sho_date = sho["fam"], sho["type"], sho["mo"], sho["qty"], sho["date"]
         
@@ -285,15 +297,17 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         
         assigned = False
         if candidates:
-            mo_candidates = [c for c in candidates if sho_mo and sho_mo in c["mo_ref"]]
-            target = mo_candidates[0] if mo_candidates else candidates[0]
-                
-            target["sho_qty"] += sho_qty
-            if sho_date: target["sho_dates"].append(sho_date)
-            assigned = True
+            # We ONLY inject if the MO matches a channel exactly. No more loose dumps.
+            for c in candidates:
+                if sho_mo and str(sho_mo).strip() != "" and sho_mo in c["mo_ref"]:
+                    c["sho_qty"] += sho_qty
+                    if sho_date: c["sho_dates"].append(sho_date)
+                    assigned = True
+                    break 
             
         if not assigned:
-            k = (sho_fam, sho_type)
+            # Keep un-matched MOs cleanly separated so they don't bloat unrelated channels
+            k = (sho_fam, sho_type, sho_mo)
             if k not in orphan_sho: orphan_sho[k] = {"qty": 0.0, "dates": []}
             orphan_sho[k]["qty"] += sho_qty
             if sho_date: orphan_sho[k]["dates"].append(sho_date)
@@ -312,10 +326,11 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         del r["sho_dates"] 
         compiled_summary.append(r)
 
+    # Inject separated entries accurately
     for k, data in orphan_sho.items():
-        fam, r_type = k
+        fam, r_type, mo = k
         compiled_summary.append({
-            "channel_ref": "-", "mo_ref": "-",
+            "channel_ref": "-", "mo_ref": mo if mo else "-",
             "product_variant": fam, "ring_type": r_type,
             "sho_qty": safe_ceil(data["qty"]), "tb_qty": 0,
             "sho_in": format_dt(min(data["dates"])) if data["dates"] else "-",
@@ -371,7 +386,7 @@ def process_tbe_data():
                 qty = clean_nan(row.get(q_col)) if q_col else 0.0
                 
                 # STRICT: RingWT explicitly uses DD-MM-YYYY
-                dt = parse_date_safe(row.get(d_col), date_format="dd-mm-yyyy")
+                dt = parse_date_robust(row.get(d_col), source_format="dd-mm-yyyy")
 
                 tb_list.append({"ch": ch, "fam": base_family, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
 
@@ -401,7 +416,7 @@ def process_tbe_data():
                 sho_qty = clean_nan(row.get(qty_col))
                 
                 # STRICT: JobWork Report explicitly uses DD-MM-YYYY
-                sho_date = parse_date_safe(row.get(date_col), date_format="dd-mm-yyyy")
+                sho_date = parse_date_robust(row.get(date_col), source_format="dd-mm-yyyy")
                 
                 if sho_qty > 0:
                     sho_list.append({"mo": raw_mo, "fam": base_fam, "type": comp_type, "qty": sho_qty, "date": sho_date, "label": raw_product})
@@ -479,6 +494,9 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     sho_map, tb_map, ch_map, mo_summary_map = {}, {}, {}, {}
 
     for r in sho_f:
+        # Strict MO boundary in drill-down!
+        if r["mo"] not in found_mos and found_mos: continue
+        
         norm_key = str(r["label"]).upper().replace("-", "").replace(" ", "")
         if not norm_key: continue
         if norm_key not in sho_map: sho_map[norm_key] = {"label": r["label"], "qty": 0.0, "dates": []}

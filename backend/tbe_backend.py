@@ -6,7 +6,7 @@ import threading
 import time
 import re
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor
 
 router = APIRouter()
@@ -109,21 +109,28 @@ def clean_nan(value):
     if match: return float(match.group())
     return 0.0
 
-# BULLETPROOF DATE PARSER
+# BULLETPROOF DATE PARSER - UPDATED FOR NATIVE DATE OBJECTS & ISO STRINGS
 def parse_date_safe(value, date_format="dd-mm-yyyy"):
     try:
         if pd.isna(value) or value is None: 
             return None
             
-        # 1. If Excel parsed it properly as a Python datetime object natively, trust it!
+        # 1. Native Date Types
         if isinstance(value, (datetime, pd.Timestamp)):
             return value.date()
+        if isinstance(value, date):
+            return value
             
         val_str = str(value).strip()
         if val_str.lower() in ["nan", "nat", "", "-", "none"]:
             return None
 
-        # 2. Strict String Parsing to avoid Month/Day swaps
+        # Try standard ISO strings first (in case pandas casted it automatically)
+        for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+            try: return datetime.strptime(val_str, fmt).date()
+            except ValueError: pass
+
+        # 2. Strict String Parsing
         if date_format == "dd-mm-yyyy":
             # Try explicit EU formats first (Day first)
             for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d-%m-%y", "%d/%m/%y", "%d.%m.%Y"):
@@ -221,8 +228,8 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if e_dt and not s_dt and r["date"] > e_dt: continue
         filtered_tb.append(r)
 
-    # SHO Offset Logic: 2 days before the start date filter
-    sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
+    # REMOVED SHO OFFSET: Now maps strictly to the selected start date
+    sho_s_dt = s_dt 
     filtered_sho = []
     for r in GLOBAL_SHO_ROWS:
         if sho_s_dt or e_dt:
@@ -462,7 +469,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             tb_f.append(r)
 
     sho_f = []
-    sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
+    sho_s_dt = s_dt # REMOVED 2-DAY OFFSET HERE AS WELL
     for r in GLOBAL_SHO_ROWS:
         if r["fam"] == fam:
             if sho_s_dt or e_dt:

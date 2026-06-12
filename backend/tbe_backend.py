@@ -193,7 +193,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             filtered_ch = [r for r in GLOBAL_CH_ROWS if r["date"] and r["date"] <= e_dt]
             filtered_tb = [r for r in GLOBAL_TB_ROWS if r["date"] and r["date"] <= e_dt]
 
-    # 2. Apply "2 DAYS BEFORE" Rule strictly to SHO
+    # 2. Apply "2 DAYS BEFORE" Rule strictly to SHO quantities
     sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
     
     filtered_sho = []
@@ -210,17 +210,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             else:
                 filtered_sho.append(r)
 
-    # 3. Aggregate SHO purely by Family and IM/OM Type
-    sho_agg = {}
-    for r in filtered_sho:
-        k = (r["fam"], r["type"])
-        if k not in sho_agg:
-            sho_agg[k] = {"qty": 0.0, "dates": []}
-        sho_agg[k]["qty"] += r["qty"]
-        if r["date"]:
-            sho_agg[k]["dates"].append(r["date"])
-
-    # 4. Group Channel Data
+    # 3. Group Channel Data
     if filtered_ch:
         df_ch_grouped = pd.DataFrame(filtered_ch).groupby(["ch", "fam"]).agg(
             ch_qty=('qty', 'sum'),
@@ -231,7 +221,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     else:
         df_ch_grouped = pd.DataFrame(columns=["ch", "fam", "ch_qty", "ch_min_date", "ch_max_date", "mo_list"])
 
-    # 5. Group Transit Buffer Data
+    # 4. Group Transit Buffer Data
     tb_list_parsed = []
     for r in filtered_tb:
         tb_list_parsed.append({
@@ -248,79 +238,116 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     else:
         df_tb_grouped = pd.DataFrame(columns=["ch", "fam", "type", "tb_qty", "tb_min_date", "tb_max_date"])
 
-    # 6. Merge TB and CH
+    # 5. Merge TB and CH
     merged = pd.merge(df_tb_grouped, df_ch_grouped, on=["ch", "fam"], how="outer")
 
-    compiled_summary = []
-    matched_sho_keys = set()
-
+    # 6. Create Base Row Dictionaries for Allocation
+    base_rows = []
     for _, row in merged.iterrows():
         ch, fam = row["ch"], row["fam"]
         r_type = row.get("type") if pd.notna(row.get("type")) else "ASSEMBLY"
         
-        tb_qty = row.get("tb_qty", 0.0)
-        ch_qty = row.get("ch_qty", 0.0)
-        if pd.isna(tb_qty): tb_qty = 0.0
-        if pd.isna(ch_qty): ch_qty = 0.0
-
-        tb_min, tb_max = row.get("tb_min_date"), row.get("tb_max_date")
-        ch_min, ch_max = row.get("ch_min_date"), row.get("ch_max_date")
+        tb_qty = float(row.get("tb_qty", 0.0) or 0.0)
+        ch_qty = float(row.get("ch_qty", 0.0) or 0.0)
+        
+        tb_max = row.get("tb_max_date")
+        ch_min = row.get("ch_min_date")
+        ch_max = row.get("ch_max_date")
         
         mo_list = row.get("mo_list", "")
         if pd.isna(mo_list): mo_list = ""
-
-        final_tb_qty = math.ceil(tb_qty)
-        final_ch_qty = math.ceil(ch_qty)
-
-        # 7. Map SHO Data Directly onto the Row Based on Family + IM/OM Match
-        sho_key = (fam, r_type)
-        if sho_key in sho_agg:
-            final_sho_qty = math.ceil(sho_agg[sho_key]["qty"])
-            s_dates = sho_agg[sho_key]["dates"]
-            sho_in = str(min(s_dates)) if s_dates else "-"
-            matched_sho_keys.add(sho_key)
-        else:
-            final_sho_qty = 0
-            sho_in = "-"
-
-        if final_tb_qty == 0 and final_ch_qty > 0: calc_status = "Channel Only"
-        elif final_tb_qty > 0 and final_ch_qty == 0: calc_status = "Missing Channel Data"
-        elif final_ch_qty >= final_tb_qty and final_tb_qty > 0: calc_status = "Completed"
-        else: calc_status = "In Process"
-
-        compiled_summary.append({
+        
+        base_rows.append({
             "channel_ref": ch,
             "mo_ref": mo_list,
             "product_variant": fam,
             "ring_type": r_type,
-            "sho_qty": final_sho_qty, 
-            "tb_qty": final_tb_qty, 
-            "sho_in": sho_in,         
+            "sho_qty": 0.0,    # Will be assigned intelligently
+            "sho_dates": [],
+            "tb_qty": math.ceil(tb_qty),
             "tb_out": str(tb_max) if pd.notna(tb_max) and tb_max else "-",
-            "ch_qty": final_ch_qty,
+            "ch_qty": math.ceil(ch_qty),
             "ch_in": str(ch_min) if pd.notna(ch_min) and ch_min else "-",
-            "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-",
-            "status": calc_status
+            "ch_out": str(ch_max) if pd.notna(ch_max) and ch_max else "-"
         })
 
-    # 8. Ensure Orphan SHO entries (where SHO exists, but NO TB/Channel data exists) are visible!
-    for k, data in sho_agg.items():
-        if k not in matched_sho_keys:
-            fam, r_type = k
-            compiled_summary.append({
-                "channel_ref": "-", # Show as unallocated / independent
-                "mo_ref": "-",
-                "product_variant": fam,
-                "ring_type": r_type,
-                "sho_qty": math.ceil(data["qty"]),
-                "tb_qty": 0,
-                "sho_in": str(min(data["dates"])) if data["dates"] else "-",
-                "tb_out": "-",
-                "ch_qty": 0,
-                "ch_in": "-",
-                "ch_out": "-",
-                "status": "SHO Logged"
-            })
+    orphan_sho = {}
+
+    # 7. EXCLUSIVE SHO ALLOCATION ENGINE (Prevents Duplication)
+    for sho in filtered_sho:
+        sho_fam = sho["fam"]
+        sho_type = sho["type"]
+        sho_mo = sho["mo"]
+        sho_qty = sho["qty"]
+        sho_date = sho["date"]
+        
+        # Find all channel rows that match this family and IM/OM type
+        candidates = [r for r in base_rows if r["product_variant"] == sho_fam and r["ring_type"] == sho_type]
+        
+        assigned = False
+        if candidates:
+            mo_candidates = []
+            if sho_mo:
+                # If JobWork has an MO, try to match it directly to the channel row handling that MO
+                for c in candidates:
+                    if sho_mo in c["mo_ref"]:
+                        mo_candidates.append(c)
+            
+            # 1. Match Exact MO first to guarantee accuracy
+            if mo_candidates:
+                target = mo_candidates[0]
+            # 2. If NO MO matches (or JobWork lacks one), assign to the first available channel for this family
+            #    This completely prevents multiplying the sum across ALL channels!
+            else:
+                target = candidates[0]
+                
+            target["sho_qty"] += sho_qty
+            if sho_date: target["sho_dates"].append(sho_date)
+            assigned = True
+            
+        # 3. If there are NO channels running this family yet, save it as an Orphan to be rendered independently
+        if not assigned:
+            k = (sho_fam, sho_type)
+            if k not in orphan_sho:
+                orphan_sho[k] = {"qty": 0.0, "dates": []}
+            orphan_sho[k]["qty"] += sho_qty
+            if sho_date: orphan_sho[k]["dates"].append(sho_date)
+
+    # 8. Post-Process the Rows to format logic
+    compiled_summary = []
+    for r in base_rows:
+        tb_q = r["tb_qty"]
+        ch_q = r["ch_qty"]
+        
+        if tb_q == 0 and ch_q > 0: calc_status = "Channel Only"
+        elif tb_q > 0 and ch_q == 0: calc_status = "Missing Channel Data"
+        elif ch_q >= tb_q and tb_q > 0: calc_status = "Completed"
+        else: calc_status = "In Process"
+        
+        r["status"] = calc_status
+        r["sho_qty"] = math.ceil(r["sho_qty"])
+        r["sho_in"] = str(min(r["sho_dates"])) if r["sho_dates"] else "-"
+        del r["sho_dates"] # cleanup temp field
+        
+        compiled_summary.append(r)
+
+    # 9. Inject Orphans so data is never dropped
+    for k, data in orphan_sho.items():
+        fam, r_type = k
+        compiled_summary.append({
+            "channel_ref": "-",
+            "mo_ref": "-",
+            "product_variant": fam,
+            "ring_type": r_type,
+            "sho_qty": math.ceil(data["qty"]),
+            "tb_qty": 0,
+            "sho_in": str(min(data["dates"])) if data["dates"] else "-",
+            "tb_out": "-",
+            "ch_qty": 0,
+            "ch_in": "-",
+            "ch_out": "-",
+            "status": "SHO Logged"
+        })
 
     compiled_summary.sort(key=lambda x: (x["channel_ref"], x["product_variant"], x["ring_type"]))
     return compiled_summary
@@ -467,7 +494,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
     tb_filtered = [r for r in GLOBAL_TB_ROWS if r["ch"] == ch and r["fam"] == fam]
     sho_filtered = [r for r in GLOBAL_SHO_ROWS if r["fam"] == fam]
     
-    # 1. Apply STANDARD filters to CH and TB
     if s_dt or e_dt:
         if s_dt and e_dt:
             ch_filtered = [r for r in ch_filtered if r["date"] and s_dt <= r["date"] <= e_dt]
@@ -479,7 +505,6 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             ch_filtered = [r for r in ch_filtered if r["date"] and r["date"] <= e_dt]
             tb_filtered = [r for r in tb_filtered if r["date"] and r["date"] <= e_dt]
 
-        # 2. Apply "2 DAYS BEFORE" rule strictly to SHO Details breakdown
         sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
         if sho_s_dt or e_dt:
             temp_sho = []

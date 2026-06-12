@@ -34,7 +34,6 @@ def safe_ceil(value):
     try: return math.ceil(float(value))
     except: return 0
 
-# --- STRICT ENFORCED DATE PARSER ---
 def parse_date_robust(value, source_format="dd-mm-yyyy"):
     if pd.isna(value) or value is None: return None
     if isinstance(value, datetime): return value.date()
@@ -43,22 +42,21 @@ def parse_date_robust(value, source_format="dd-mm-yyyy"):
     val_str = str(value).strip().lower()
     if val_str in ["nan", "nat", "", "-", "none"]: return None
 
-    # Strip time if present and normalize splitters
     val_str = val_str.replace("/", "-").replace(".", "-").replace("\\", "-").split(" ")[0]
     
     parts = val_str.split("-")
     try:
         if len(parts) == 3:
-            if len(parts[0]) == 4: # YYYY-MM-DD
+            if len(parts[0]) == 4:
                 return datetime(int(parts[0]), int(parts[1]), int(parts[2])).date()
             if source_format == "dd-mm-yyyy":
                 d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
-            else: # mm-dd-yyyy
+            else:
                 m, d, y = int(parts[0]), int(parts[1]), int(parts[2])
             if y < 100: y += 2000
             return datetime(y, m, d).date()
             
-        elif len(parts) == 2: # DD-MM or MM-DD (Missing Year in Excel)
+        elif len(parts) == 2:
             y = datetime.now().year
             if source_format == "dd-mm-yyyy":
                 d, m = int(parts[0]), int(parts[1])
@@ -91,17 +89,14 @@ def repair_sheet_headers(df):
         return df.iloc[best_row_idx+1:].reset_index(drop=True)
     return df
 
+# Reverted back to the highly forgiving column finder so Transit Buffer doesn't drop
 def find_column(df, patterns):
-    """Strict column finder prioritizing exact matches without spaces"""
-    cols = {str(c).strip().lower(): c for c in df.columns}
+    cols = [str(c).strip() for c in df.columns]
     for p in patterns:
-        p_clean = p.lower().strip()
-        if p_clean in cols: return cols[p_clean]
-        
-    cols_nospace = {k.replace(" ", "").replace("_", "").replace(".", ""): v for k, v in cols.items()}
-    for p in patterns:
-        p_nospace = p.lower().replace(" ", "").replace("_", "").replace(".", "")
-        if p_nospace in cols_nospace: return cols_nospace[p_nospace]
+        norm_p = p.lower().replace(" ", "").replace("_", "").replace("#", "").replace(".", "")
+        for c in cols:
+            norm_c = c.lower().replace(" ", "").replace("_", "").replace("#", "").replace(".", "")
+            if norm_c == norm_p: return c
     return None
 
 def normalize_channel(value, force_t_prefix=False):
@@ -183,8 +178,6 @@ def process_master_sheets(sheets_dict, is_trb):
             
             base_family, _ = parse_family_and_type(prod_str)
             qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
-            
-            # CHANNEL FORCED TO MM-DD-YYYY
             dt = parse_date_robust(row.get(d_col), source_format="mm-dd-yyyy") 
             ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
     return ch_list
@@ -193,7 +186,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
-    # Filter Channel
     filtered_ch = []
     for r in GLOBAL_CH_ROWS:
         if s_dt or e_dt:
@@ -204,7 +196,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if e_dt and not s_dt and d > e_dt: continue
         filtered_ch.append(r)
 
-    # Filter Transit Buffer
     filtered_tb = []
     for r in GLOBAL_TB_ROWS:
         if s_dt or e_dt:
@@ -215,7 +206,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if e_dt and not s_dt and d > e_dt: continue
         filtered_tb.append(r)
 
-    # Filter JobWork (with -2 Days applied ONLY to start_date)
     sho_s_dt = s_dt - timedelta(days=2) if s_dt else None
     filtered_sho = []
     for r in GLOBAL_SHO_ROWS:
@@ -279,7 +269,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         
         assigned = False
         if candidates:
-            # Check for EXACT MO match
             mo_matched = False
             for c in candidates:
                 if sho_mo and str(sho_mo).strip() != "" and sho_mo in c["mo_ref"]:
@@ -289,7 +278,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
                     assigned = True
                     break 
             
-            # If no MO match, dump safely into the FIRST channel running that family to prevent inflation
             if not mo_matched:
                 c = candidates[0]
                 c["sho_qty"] += sho_qty
@@ -297,7 +285,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
                 assigned = True
 
         if not assigned:
-            # Group purely by Family and Type (Prevents splitting rows by dates or different MOs)
             k = (sho_fam, sho_type)
             if k not in orphan_sho: orphan_sho[k] = {"qty": 0.0, "dates": []}
             orphan_sho[k]["qty"] += sho_qty
@@ -317,7 +304,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         del r["sho_dates"] 
         compiled_summary.append(r)
 
-    # Attach any aggregated unassigned quantities as single robust rows
     for k, data in orphan_sho.items():
         fam, r_type = k
         compiled_summary.append({
@@ -374,8 +360,6 @@ def process_tbe_data():
                 
                 base_family, r_type = parse_family_and_type(prod_text)
                 qty = clean_nan(row.get(q_col)) if q_col else 0.0
-                
-                # TRANSIT BUFFER FORCED TO DD-MM-YYYY
                 dt = parse_date_robust(row.get(d_col), source_format="dd-mm-yyyy")
 
                 tb_list.append({"ch": ch, "fam": base_family, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
@@ -388,26 +372,22 @@ def process_tbe_data():
             
             mo_col = find_column(df, ["po/prno.", "poprno", "mono", "mo", "po/prno"])
             prod_col = find_column(df, ["product", "item", "description"])
+            qty_col = find_column(df, ["qtysent", "sentqty", "qty sent", "sent", "qtyapproved", "approvedqty", "shoqty", "qty"])
+            date_col = find_column(df, ["jwchallandate", "challandate", "date", "jwdate"])
             
-            # ABSOLUTE COLUMN TARGETING:
-            qty_col = find_column(df, ["qty sent", "qtysent", "sentqty"])
-            date_col = find_column(df, ["jw challan date", "jwchallandate"])
-            
-            if not mo_col or not qty_col or not date_col: continue
+            if not mo_col: continue
             
             target_cols = [c for c in [mo_col, prod_col, qty_col, date_col] if c]
             for row in df[target_cols].to_dict('records'):
                 raw_mo = str(row.get(mo_col, "")).strip().upper().replace(" ", "")
                 if raw_mo.endswith(".0"): raw_mo = raw_mo[:-2]
-                if not raw_mo or raw_mo in ["NAN", "NONE", "NA", "TOTAL", "GRANDTOTAL"]: continue
+                if not raw_mo or raw_mo in ["NAN", "NONE", "NA", "TOTAL"]: continue
                 
                 raw_product = str(row.get(prod_col, ""))
                 if raw_product.upper() in ["NAN", "NONE", "NA", "", "TOTAL"]: continue
                 
                 base_fam, comp_type = parse_family_and_type(raw_product)
                 sho_qty = clean_nan(row.get(qty_col))
-                
-                # JOBWORK FORCED TO DD-MM-YYYY
                 sho_date = parse_date_robust(row.get(date_col), source_format="dd-mm-yyyy")
                 
                 if sho_qty > 0:

@@ -110,7 +110,7 @@ def clean_nan(value):
     return 0.0
 
 # -------------------------------------------------------------------------
-# IRONCLAD DATE PARSER: STOPS PANDAS "RANDOM" SWAPPING FOREVER
+# IRONCLAD DATE PARSER
 # -------------------------------------------------------------------------
 def parse_date_safe(value, date_format="dd-mm-yyyy"):
     try:
@@ -124,7 +124,7 @@ def parse_date_safe(value, date_format="dd-mm-yyyy"):
         if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]:
             return None
 
-        # 1. Capture true Excel serial dates
+        # 1. Capture true Excel serial dates (to stop missing data)
         if val_str.replace('.', '', 1).isdigit():
             val_float = float(val_str)
             if 30000 < val_float < 60000:
@@ -147,14 +147,12 @@ def parse_date_safe(value, date_format="dd-mm-yyyy"):
         if len(nums) >= 3:
             n1, n2, n3 = int(nums[0]), int(nums[1]), int(nums[2])
             
-            # If the date was forcibly converted to ISO (YYYY-MM-DD) by Excel Engine
             if len(nums[0]) == 4:
                 year, month, day = n1, n2, n3
             else:
                 year = n3
                 if year < 100: year += 2000
                 
-                # We dictate exactly what position 1 and position 2 mean based on the sheet rules
                 if date_format == "dd-mm-yyyy":
                     day, month = n1, n2
                 else: # mm-dd-yyyy
@@ -163,7 +161,6 @@ def parse_date_safe(value, date_format="dd-mm-yyyy"):
             try:
                 return date(year, month, day)
             except ValueError:
-                # Only if illegal (like month 15) do we try reversing
                 try: return date(year, day, month)
                 except: pass
 
@@ -183,7 +180,7 @@ def load_excel_sheets(url):
         try: xls = pd.ExcelFile(content, engine='calamine')
         except: xls = pd.ExcelFile(content)
         time.sleep(0.05) 
-        # dtype=str forces python to receive RAW TEXT, preventing random Pandas swapping
+        # THIS IS THE MOST IMPORTANT FIX: dtype=str FORCES PANDAS TO STOP TAMPERING WITH DATES
         return {sheet: repair_sheet_headers(xls.parse(sheet, dtype=str)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
@@ -248,6 +245,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             if e_dt and not s_dt and r["date"] > e_dt: continue
         filtered_tb.append(r)
 
+    # NO OFFSET HERE: JobWork strictly matches your calendar selection
     sho_s_dt = s_dt 
     filtered_sho = []
     for r in GLOBAL_SHO_ROWS:
@@ -486,7 +484,8 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
             tb_f.append(r)
 
     sho_f = []
-    sho_s_dt = s_dt 
+    # NO OFFSET HERE: JobWork strictly matches your calendar selection
+    sho_s_dt = s_dt
     for r in GLOBAL_SHO_ROWS:
         if r["fam"] == fam:
             if sho_s_dt or e_dt:

@@ -109,31 +109,43 @@ def clean_nan(value):
     if match: return float(match.group())
     return 0.0
 
-# BULLETPROOF DATE PARSER - STRICT ENFORCEMENT FOR MM-DD vs DD-MM
+# ---------------------------------------------------------
+# BULLETPROOF DATE PARSER V3: IMMUNE TO EXCEL & PANDAS BUGS
+# ---------------------------------------------------------
 def parse_date_safe(value, date_format="dd-mm-yyyy"):
     try:
         if pd.isna(value) or value is None: 
             return None
             
-        # 1. If it's a native Date Type natively imported by pandas
-        if isinstance(value, (datetime, pd.Timestamp)):
-            return value.date()
-        if isinstance(value, date):
-            return value
+        if isinstance(value, (datetime, pd.Timestamp)): return value.date()
+        if isinstance(value, date): return value
             
-        # Clean up any weird extra spaces
         val_str = str(value).strip().replace("  ", " ")
         if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]:
             return None
 
-        # Remove timestamp if appended to a string (e.g., "12/06/2024 00:00:00")
+        # 1. Catch Raw Excel Date Numbers (e.g. "45432.0" -> prevents data disappearing)
+        if val_str.replace('.', '', 1).isdigit():
+            val_float = float(val_str)
+            if 30000 < val_float < 60000: # Standard modern Excel date range
+                return (datetime(1899, 12, 30) + timedelta(days=val_float)).date()
+
         if " " in val_str:
             parts = val_str.split(" ")
             if ":" in parts[-1] or "00:00" in parts[-1]:
                 val_str = " ".join(parts[:-1])
 
-        # 2. STRICT REGEX PARSING: Locks day and month to exactly what you define
-        # Matches typical inputs like 12-06-2024, 12/06/24, 12.06.2024
+        # 2. Strict Explicit Parsing based on user instruction
+        if date_format == "dd-mm-yyyy":
+            for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%d.%m.%Y", "%d-%m-%y", "%d/%m/%y"):
+                try: return datetime.strptime(val_str, fmt).date()
+                except ValueError: pass
+        else: # mm-dd-yyyy
+            for fmt in ("%m-%d-%Y", "%m/%d/%Y", "%m.%d.%Y", "%m-%d-%y", "%m/%d/%y"):
+                try: return datetime.strptime(val_str, fmt).date()
+                except ValueError: pass
+
+        # 3. Smart Regex Fallback
         match = re.match(r'^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})$', val_str)
         if match:
             p1, p2, p3 = match.groups()
@@ -142,17 +154,15 @@ def parse_date_safe(value, date_format="dd-mm-yyyy"):
             
             if date_format == "dd-mm-yyyy":
                 day, month = int(p1), int(p2)
-            else: # mm-dd-yyyy
+            else:
                 month, day = int(p1), int(p2)
                 
-            try:
-                return date(year, month, day)
+            try: return date(year, month, day)
             except ValueError:
-                # If someone accidentally typed it swapped (e.g. Month > 12), rescue it
                 try: return date(year, day, month)
                 except: pass
 
-        # Matches YYYY-MM-DD
+        # 4. ISO Date matching
         match_iso = re.match(r'^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$', val_str)
         if match_iso:
             year, p2, p3 = int(match_iso.group(1)), int(match_iso.group(2)), int(match_iso.group(3))
@@ -161,7 +171,7 @@ def parse_date_safe(value, date_format="dd-mm-yyyy"):
                 try: return date(year, p3, p2)
                 except: pass
 
-        # 3. Fallback to Pandas for textual formats (like "12-Jun-2024")
+        # 5. Last resort Pandas textual parser
         parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
         if pd.notna(parsed):
             return parsed.date()
@@ -178,7 +188,8 @@ def load_excel_sheets(url):
         try: xls = pd.ExcelFile(content, engine='calamine')
         except: xls = pd.ExcelFile(content)
         time.sleep(0.05) 
-        return {sheet: repair_sheet_headers(xls.parse(sheet)) for sheet in xls.sheet_names}
+        # dtype=str FORCES Pandas to stop guessing and ruining dates! 
+        return {sheet: repair_sheet_headers(xls.parse(sheet, dtype=str)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
         return {}
@@ -215,7 +226,6 @@ def process_master_sheets(sheets_dict, is_trb):
             base_family, _ = parse_family_and_type(prod_str)
             qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
             
-            # STRICT: Channel inherently handles MM-DD-YYYY
             dt = parse_date_safe(row.get(d_col), date_format="mm-dd-yyyy") 
 
             ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
@@ -225,7 +235,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
     s_dt = datetime.strptime(start_date_str, "%Y-%m-%d").date() if start_date_str and start_date_str.strip() not in ["", "null", "None"] else None
     e_dt = datetime.strptime(end_date_str, "%Y-%m-%d").date() if end_date_str and end_date_str.strip() not in ["", "null", "None"] else None
 
-    # Filter logic implicitly considers any values on or AFTER the start date if end_date is missing
     filtered_ch = []
     for r in GLOBAL_CH_ROWS:
         if s_dt or e_dt:
@@ -392,7 +401,6 @@ def process_tbe_data():
                 base_family, r_type = parse_family_and_type(prod_text)
                 qty = clean_nan(row.get(q_col)) if q_col else 0.0
                 
-                # STRICT: RingWT explicitly uses DD-MM-YYYY
                 dt = parse_date_safe(row.get(d_col), date_format="dd-mm-yyyy")
 
                 tb_list.append({"ch": ch, "fam": base_family, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
@@ -422,7 +430,6 @@ def process_tbe_data():
                 base_fam, comp_type = parse_family_and_type(raw_product)
                 sho_qty = clean_nan(row.get(qty_col))
                 
-                # STRICT: JobWork Report explicitly uses DD-MM-YYYY
                 sho_date = parse_date_safe(row.get(date_col), date_format="dd-mm-yyyy")
                 
                 if sho_qty > 0:

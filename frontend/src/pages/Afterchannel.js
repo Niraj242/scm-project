@@ -12,6 +12,7 @@ const Afterchannel = () => {
   const [selectedMoDetail, setSelectedMoDetail] = useState(null);
 
   const [moNumber, setMoNumber] = useState('');
+  const [availableVariants, setAvailableVariants] = useState([]);
   const [availableMos, setAvailableMos] = useState([]);
   const [selectedVariant, setSelectedVariant] = useState('');
   const [actualProductionQty, setActualProductionQty] = useState(0);
@@ -19,14 +20,12 @@ const Afterchannel = () => {
   const [editingRecord, setEditingRecord] = useState(null);
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
 
+  // Date state used specifically to filter reverse MO Lookups
   const [formDate, setFormDate] = useState('');
 
-  // Component states
-  const [irScrapVal, setIrScrapVal] = useState('');
-  const [orScrapVal, setOrScrapVal] = useState('');
-  const [cageScrapVal, setCageScrapVal] = useState('');
-  const [ballScrapVal, setBallScrapVal] = useState('');
-  const [rollerScrapVal, setRollerScrapVal] = useState('');
+  // Scrap logic states
+  const [bearingFamily, setBearingFamily] = useState(''); 
+  const [bearingScrapQty, setBearingScrapQty] = useState('');
 
   useEffect(() => {
     fetchMasterData();
@@ -39,6 +38,7 @@ const Afterchannel = () => {
       const data = await res.json();
       if (data.status === 'success') {
         setMoCache(data.data || {});
+        setAvailableMos(Object.keys(data.data || {}));
       }
     } catch (err) {
       console.error("Master Reference Load Failure:", err);
@@ -95,29 +95,53 @@ const Afterchannel = () => {
     }, 0);
   };
 
-  // Two-way cross filter engines
-  const allUniqueVariants = [...new Set(Object.values(moCache).flatMap(rows => rows.map(r => getTypeFromRow(r))))].filter(Boolean);
-  const allUniqueMos = Object.keys(moCache);
+  // Two-way filter logic for Variant + Date -> MO list
+  useEffect(() => {
+    if (!selectedVariant) {
+      setAvailableMos(Object.keys(moCache));
+      return;
+    }
+    
+    let matchingMos = Object.keys(moCache).filter(mo => {
+      return moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant);
+    });
 
-  const dynamicVariantsList = moNumber.trim() && moCache[moNumber.trim().toUpperCase()]
-    ? [...new Set(moCache[moNumber.trim().toUpperCase()].map(r => getTypeFromRow(r)))].filter(Boolean)
-    : allUniqueVariants;
+    if (formDate) {
+      const inputTime = new Date(formDate).getTime();
+      matchingMos = matchingMos.filter(mo => {
+        return moCache[mo].some(r => {
+          if (getTypeFromRow(r).toUpperCase() !== selectedVariant) return false;
+          if (!r.date) return true; // If no date recorded in backend, keep it
+          const moTime = new Date(r.date).getTime();
+          const diffDays = Math.abs((moTime - inputTime) / (1000 * 3600 * 24));
+          return diffDays <= 2;
+        });
+      });
+    }
 
-  const dynamicMosList = selectedVariant.trim()
-    ? allUniqueMos.filter(mo => moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant.trim().toUpperCase()))
-    : allUniqueMos;
+    setAvailableMos(matchingMos);
+  }, [selectedVariant, formDate, moCache]);
 
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
       const rawRows = moCache[key];
       const uniqueVariants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
+      setAvailableVariants(uniqueVariants.map(type => ({ type })));
 
       if (uniqueVariants.length === 1) {
         const vType = uniqueVariants[0];
         setSelectedVariant(vType);
         setActualProductionQty(calculateProduction(rawRows, vType));
+      } else {
+        setSelectedVariant('');
+        setActualProductionQty(0);
       }
+    } else {
+      setAvailableVariants([]);
+      setSelectedVariant('');
+      setActualProductionQty(0);
+      setAvailableMos(Object.keys(moCache)); 
     }
   };
 
@@ -134,26 +158,19 @@ const Afterchannel = () => {
     e.preventDefault();
     const fd = new FormData(e.target);
     
+    // Explicitly seed bearingFamily from state to preserve it during LOG OUT toggles
     const payload = {
       id: editingRecord ? editingRecord.id : undefined,
       mo: moNumber.toUpperCase(),
       bearing_type: selectedVariant.toUpperCase(),
-      type: selectedVariant.toUpperCase()
+      type: selectedVariant.toUpperCase(),
+      bearingFamily: bearingFamily || undefined
     };
 
-    const numFields = [
-      'qtyIn', 'qtySent', 'qty_in', 'qty_sent', 
-      'ballScrap', 'rollerScrap', 'cageScrap', 'irScrap', 'orScrap'
-    ];
+    const numFields = ['qtyIn', 'qtySent', 'qty_in', 'qty_sent', 'ballScrap', 'rollerScrap', 'cageScrap', 'sealScrap', 'shieldScrap', 'irScrap', 'orScrap'];
 
     for (let [key, value] of fd.entries()) {
-      let finalValue = value;
-      if (numFields.includes(key)) {
-        finalValue = (value !== '' && !isNaN(Number(value))) ? Number(value) : 0;
-      } else if (!value) {
-        finalValue = null;
-      }
-      
+      const finalValue = numFields.includes(key) ? (Number(value) || 0) : (value || null);
       payload[key] = finalValue;
       const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
       if (snakeKey !== key) payload[snakeKey] = finalValue;
@@ -172,32 +189,18 @@ const Afterchannel = () => {
       alert(editingRecord ? "Entry Updated Successfully!" : "Operational Record Logged Successfully!");
       e.target.reset();
       setEditingRecord(null);
-      resetComponentScrapStates();
+      setBearingScrapQty(''); 
       await fetchLedgers();
     } catch (err) {
       alert("Submission Error: " + err.message);
     }
   };
 
-  const resetComponentScrapStates = () => {
-    setIrScrapVal('');
-    setOrScrapVal('');
-    setCageScrapVal('');
-    setBallScrapVal('');
-    setRollerScrapVal('');
-  };
-
   const handleEdit = (record) => {
     setMoNumber(record.mo || '');
     setSelectedVariant(record.type || record.bearing_type || '');
+    setBearingFamily(record.bearing_family || '');
     setEntryMode((record.qty_sent || record.qtySent) ? 'OUT' : 'IN');
-    
-    setIrScrapVal(record.ir_scrap !== undefined ? record.ir_scrap : '');
-    setOrScrapVal(record.or_scrap !== undefined ? record.or_scrap : '');
-    setCageScrapVal(record.cage_scrap !== undefined ? record.cage_scrap : '');
-    setBallScrapVal(record.ball_scrap !== undefined ? record.ball_scrap : '');
-    setRollerScrapVal('');
-
     setEditingRecord(record);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -221,89 +224,6 @@ const Afterchannel = () => {
     const lType = String(l.bearing_type || l.type || l.bearingType || l.variant || '').replace(/\s+/g, '').toUpperCase();
     const vType = String(v).replace(/\s+/g, '').toUpperCase();
     return lType === vType || lType === ''; 
-  };
-
-  const generateSummaryData = () => {
-    const summaryMap = {};
-    const allLists = [...ledgers.accurate, ...ledgers.cps, ...ledgers.rework, ...ledgers.dismantling, ...ledgers.autopackaging, ...ledgers.fps];
-    
-    allLists.forEach(item => {
-      if (!item.mo) return;
-      if (!summaryMap[item.mo]) {
-        summaryMap[item.mo] = {
-          mo: item.mo, pc: item.pc_no || item.pc || '-',
-          accIn: 0, accOut: 0, cpsIn: 0, cpsOut: 0, rwIn: 0, rwOut: 0,
-          disIn: 0, disOut: 0, apIn: 0, apOut: 0, fpsIn: 0, fpsOut: 0,
-          irScrap: 0, orScrap: 0, cageScrap: 0, ballScrap: 0, totalScrap: 0
-        };
-      }
-    });
-
-    ledgers.accurate.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.accIn += Number(r.qty_in);
-      if (r.qty_sent) node.accOut += Number(r.qty_sent);
-    });
-
-    ledgers.cps.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.cpsIn += Number(r.qty_in);
-      if (r.qty_sent) node.cpsOut += Number(r.qty_sent);
-    });
-
-    ledgers.rework.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.rwIn += Number(r.qty_in);
-      if (r.qty_sent) node.rwOut += Number(r.qty_sent);
-    });
-
-    ledgers.dismantling.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.disIn += Number(r.qty_in);
-      if (r.qty_sent) node.disOut += Number(r.qty_sent);
-      
-      // Strict Number parsing to ensure scrap sums properly
-      node.irScrap += (Number(r.ir_scrap) || Number(r.irScrap) || 0);
-      node.orScrap += (Number(r.or_scrap) || Number(r.orScrap) || 0);
-      node.cageScrap += (Number(r.cage_scrap) || Number(r.cageScrap) || 0);
-      node.ballScrap += (Number(r.ball_scrap) || Number(r.ballScrap) || 0);
-    });
-
-    ledgers.autopackaging.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.apIn += Number(r.qty_in);
-      if (r.qty_sent) node.apOut += Number(r.qty_sent);
-    });
-
-    ledgers.fps.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.fpsIn += Number(r.qty_in);
-      if (r.qty_sent) node.fpsOut += Number(r.qty_sent);
-    });
-
-    Object.keys(summaryMap).forEach(key => {
-      const s = summaryMap[key];
-      s.totalScrap = s.irScrap + s.orScrap + s.cageScrap + s.ballScrap;
-    });
-
-    let result = Object.values(summaryMap);
-    if (ledgerSearchQuery.trim()) {
-      result = result.filter(item => item.mo.toLowerCase().includes(ledgerSearchQuery.toLowerCase()));
-    }
-    return result;
-  };
-
-  const filteredLedgerData = () => {
-    if (activeTab === 'summary') return generateSummaryData();
-    const list = ledgers[activeTab] || [];
-    if (!ledgerSearchQuery.trim()) return list;
-    return list.filter(item => (item.mo || '').toLowerCase().includes(ledgerSearchQuery.toLowerCase()));
   };
 
   const renderDepartmentLedger = (deptKey, deptName) => {
@@ -394,18 +314,14 @@ const Afterchannel = () => {
       </datalist>
       
       <datalist id="mo-list">
-        {dynamicMosList.map(mo => <option key={mo} value={mo} />)}
-      </datalist>
-
-      <datalist id="variants-list">
-        {dynamicVariantsList.map(v => <option key={v} value={v} />)}
+        {availableMos.map(mo => <option key={mo} value={mo} />)}
       </datalist>
 
       <div className="ac-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #cbd5e1', paddingBottom: '10px'}}>
         <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing</h1>
         <div className="tab-buttons" style={{display: 'flex', gap: '10px', flexWrap: 'wrap'}}>
           {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
-            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); resetComponentScrapStates();}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily('');}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
               {tab.toUpperCase()}
             </button>
           ))}
@@ -421,7 +337,7 @@ const Afterchannel = () => {
             
             <div style={{flex: 1}}>
               <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Variant</label>
-              <input list="variants-list" value={selectedVariant} onChange={handleVariantChange} placeholder="Select or Type Variant..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+              <input type="text" value={selectedVariant} onChange={handleVariantChange} placeholder="Type Variant First to Filter MO..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
             </div>
 
             <div style={{flex: 1}}>
@@ -443,7 +359,7 @@ const Afterchannel = () => {
               📤 LOG OUT (Dispatch)
             </button>
             {editingRecord && (
-              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); resetComponentScrapStates(); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
+              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); setBearingFamily(''); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
                 Cancel Edit
               </button>
             )}
@@ -463,7 +379,7 @@ const Afterchannel = () => {
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
-                    <div><label>PC No</label><input type="text" name="pc" defaultValue={editingRecord?.pc_no || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>PC No</label><input type="text" name="pcNo" defaultValue={editingRecord?.pc_no || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
                   </div>
@@ -493,7 +409,7 @@ const Afterchannel = () => {
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>CPS Assembly - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    <div><label>Item</label><select name="item" defaultValue={editingRecord?.item_type || ''} style={{width:'100%', padding:'6px'}}><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>
+                    <div><label>Item</label><select name="itemType" defaultValue={editingRecord?.item_type || ''} style={{width:'100%', padding:'6px'}}><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>RC No</label><input type="text" name="rcNo" defaultValue={editingRecord?.rc_no || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -527,10 +443,14 @@ const Afterchannel = () => {
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Rework Station - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Bearing Family</label><select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}}><option></option><option value="DGBB">DGBB</option><option value="TRB">TRB</option></select></div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Line Segment</label><input type="text" name="lineType" defaultValue={editingRecord?.line_type || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Rework Activity</label><input type="text" name="reworkActivity" defaultValue={editingRecord?.rework_activity || ''} style={{width:'100%', padding:'6px'}}/></div>
                   </div>
                 </fieldset>
               ) : (
@@ -540,7 +460,9 @@ const Afterchannel = () => {
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Shift</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Operator</label><input type="text" name="operator" defaultValue={editingRecord?.operator || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Remark</label><input type="text" name="remark" defaultValue={editingRecord?.remark || ''} style={{width:'100%', padding:'6px'}}/></div>
                   </div>
                 </fieldset>
               )}
@@ -558,28 +480,52 @@ const Afterchannel = () => {
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Dismantling - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
+                    <div><label>Bearing Family</label><select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}} required><option></option><option value="DGBB">DGBB</option><option value="TRB">TRB</option></select></div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Line Segment</label><input type="text" name="lineType" defaultValue={editingRecord?.line_type || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Reason</label><select name="reason" defaultValue={editingRecord?.reason || ''} style={{width:'100%', padding:'6px'}}><option></option><option>D4</option><option>OD Mark</option></select></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Activity</label><select name="activity" defaultValue={editingRecord?.activity || ''} style={{width:'100%', padding:'6px'}}><option></option><option>Ball Remove</option><option>Rivet Press</option></select></div>
                   </div>
                 </fieldset>
               ) : (
                 <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Dismantling - Dispatch & Scrap Log</legend>
                   
-                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginBottom: '20px', background: '#fef2f2', padding: '15px', borderRadius: '6px', border: '1px solid #fca5a5'}}>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>IR Scrap</label><input type="number" name="irScrap" value={irScrapVal} onChange={(e) => setIrScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>OR Scrap</label><input type="number" name="orScrap" value={orScrapVal} onChange={(e) => setOrScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>Cage Scrap</label><input type="number" name="cageScrap" value={cageScrapVal} onChange={(e) => setCageScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>Ball/Roller Scrap</label><input type="number" name="ballScrap" value={ballScrapVal} onChange={(e) => setBallScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
+                  <div style={{background: '#fee2e2', padding: '15px', borderRadius: '6px', border: '1px solid #ef4444', marginBottom: '20px'}}>
+                    <h4 style={{margin: '0 0 10px 0', color: '#b91c1c'}}>Auto-Scrap Calculator</h4>
+                    <div style={{display: 'flex', gap: '15px', alignItems: 'flex-end'}}>
+                      <div style={{flex: 1}}><label>Bearing Scrap Qty (Total)</label><input type="number" value={bearingScrapQty} onChange={(e) => setBearingScrapQty(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="e.g. 100" /></div>
+                      <div style={{flex: 1, color: '#7f1d1d', fontSize: '0.9em', paddingBottom: '5px'}}>
+                        <em>Select Family (DGBB/TRB) above to auto-fill balls vs rollers.</em>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginBottom: '20px', paddingBottom: '15px', borderBottom: '1px dashed #cbd5e1'}}>
+                    <div><label>IR Scrap</label><input type="number" name="irScrap" value={bearingScrapQty || editingRecord?.ir_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>OR Scrap</label><input type="number" name="orScrap" value={bearingScrapQty || editingRecord?.or_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Cage Scrap</label><input type="number" name="cageScrap" value={bearingScrapQty || editingRecord?.cage_scrap || ''} onChange={()=>{}} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Seal Scrap</label><input type="number" name="sealScrap" defaultValue={editingRecord?.seal_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Shield Scrap</label><input type="number" name="shieldScrap" defaultValue={editingRecord?.shield_scrap || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    
+                    {bearingFamily === 'DGBB' ? (
+                      <div><label>Ball Scrap (Qty x 8)</label><input type="number" name="ballScrap" value={(bearingScrapQty ? bearingScrapQty * 8 : editingRecord?.ball_scrap) || ''} onChange={()=>{}} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                    ) : bearingFamily === 'TRB' ? (
+                      <div><label>Roller Scrap (Qty x 8)</label><input type="number" name="rollerScrap" value={(bearingScrapQty ? bearingScrapQty * 8 : editingRecord?.roller_scrap) || ''} onChange={()=>{}} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                    ) : null}
                   </div>
 
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Shift</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div><label>Operator</label><input type="text" name="operator" defaultValue={editingRecord?.operator || ''} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Remark</label><input type="text" name="remark" defaultValue={editingRecord?.remark || ''} style={{width:'100%', padding:'6px'}}/></div>
                   </div>
                 </fieldset>
               )}
@@ -647,66 +593,104 @@ const Afterchannel = () => {
           </div>
         )}
 
-        {/* ================= SUMMARY VIEW ================= */}
-        {activeTab === 'summary' && (
-          <div className="summary-view" style={{background: '#fff', padding: '25px', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)', border: '1px solid #e2e8f0'}}>
-            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px'}}>
-              <h2 style={{fontSize: '1.4em', margin: 0, color: '#0f172a', fontWeight: 'bold'}}>Summary Data</h2>
-              <input type="text" placeholder="Search Master Order (MO)..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '10px 15px', width: '350px', border: '2px solid #cbd5e1', borderRadius: '6px', outline: 'none'}} />
-            </div>
+        {/* ================= ORIGINAL SUMMARY VIEW RESTORED ================= */}
+        {activeTab === 'summary' && (() => {
+          const globalBreakdown = [];
+          filteredMos.forEach(mo => {
+            const rawRows = moCache[mo] || [];
+            const variants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
             
-            <div style={{overflowX: 'auto'}}>
-              <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.90em'}}>
-                <thead>
-                  <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>MO Number</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Accurate IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Accurate OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Rework IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Rework OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Dismantling IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Dismantling OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Autopackaging IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Autopackaging OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>IR Scrap</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>OR Scrap</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>Cage Scrap</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>Ball Scrap</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fca5a5', fontWeight:'bold'}}>Total Scrap</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredLedgerData().map((row, index) => (
-                    <tr key={index}>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', fontWeight: 'bold', color: '#2563eb', cursor: 'pointer', textDecoration: 'underline'}}>{row.mo}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.cpsIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.cpsOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.rwIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.rwOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.disIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.disOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.apIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.apOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.irScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.orScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.cageScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.ballScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fee2e2', fontWeight:'bold'}}>{row.totalScrap || '-'}</td>
+            variants.forEach(v => {
+              const prodQty = calculateProduction(rawRows, v);
+              
+              const accLedger = ledgers.accurate.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+              const accIn = accLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+              const accOut = accLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
+
+              const cpsLedger = ledgers.cps.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+              const cpsIn = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+              const cpsOut = cpsLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
+
+              const rwLedger = ledgers.rework.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+              const rwIn = rwLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+              const rwOut = rwLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
+
+              const disLedger = ledgers.dismantling.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
+              const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
+              const disOut = disLedger.reduce((sum, l) => !isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
+              
+              const irScrap = disLedger.reduce((sum, l) => sum + (Number(l.ir_scrap) || 0), 0);
+              const orScrap = disLedger.reduce((sum, l) => sum + (Number(l.or_scrap) || 0), 0);
+              const cageScrap = disLedger.reduce((sum, l) => sum + (Number(l.cage_scrap) || 0), 0);
+              const rollScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap) || 0) + (Number(l.roller_scrap) || 0), 0);
+              const accScrap = disLedger.reduce((sum, l) => sum + (Number(l.seal_scrap) || 0) + (Number(l.shield_scrap) || 0), 0);
+
+              globalBreakdown.push({
+                mo, variant: v, prodQty, accIn, accOut, cpsIn, cpsOut, rwIn, rwOut, disIn, disOut,
+                irScrap, orScrap, cageScrap, rollScrap, accScrap
+              });
+            });
+          });
+
+          return (
+            <div className="summary-view" style={{background: '#fff', padding: '25px', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)', border: '1px solid #cbd5e1'}}>
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px'}}>
+                <h2 style={{fontSize: '1.4em', margin: 0, color: '#0f172a', fontWeight: 'bold'}}>Cross-Department Flow Summary Ledger</h2>
+                <input type="text" placeholder="Search Master Order (MO)..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{padding: '10px 15px', width: '350px', border: '2px solid #cbd5e1', borderRadius: '6px', outline: 'none'}} />
+              </div>
+              
+              <div style={{overflowX: 'auto'}}>
+                <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.85em', border: '1px solid #94a3b8'}}>
+                  <thead>
+                    <tr style={{background: '#334155', color: '#fff'}}>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>MO ID</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>Variant Model</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#166534'}}>Prod Qty</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Acc In</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#1e40af'}}>Acc Out</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS In</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#86198f'}}>CPS Out</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>RW In</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>RW Out</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis In</th>
+                      <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis Out</th>
+                      <th colSpan="5" style={{border: '1px solid #475569', padding: '8px', background: '#991b1b', textAlign: 'center'}}>Granular Scrap Components (Dismantling)</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                    <tr style={{background: '#7f1d1d', color: '#fff', fontSize: '0.9em'}}>
+                      <th style={{border: '1px solid #475569', padding: '8px'}}>IR</th>
+                      <th style={{border: '1px solid #475569', padding: '8px'}}>OR</th>
+                      <th style={{border: '1px solid #475569', padding: '8px'}}>Cage</th>
+                      <th style={{border: '1px solid #475569', padding: '8px'}}>Ball/Roller</th>
+                      <th style={{border: '1px solid #475569', padding: '8px'}}>Seal/Shield</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {globalBreakdown.map((row, i) => (
+                      <tr key={i} style={{background: i % 2 === 0 ? '#fff' : '#f1f5f9', borderBottom: '1px solid #cbd5e1', textAlign: 'center'}}>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', fontWeight:'bold', textAlign:'left', color: '#2563eb'}}>{row.mo}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', fontWeight:'bold', textAlign:'left', color: '#334155'}}>{row.variant}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', background:'#dcfce7', color:'#166534', fontWeight:'bold'}}>{row.prodQty > 0 ? row.prodQty.toLocaleString() : '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#1e40af'}}>{row.accOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#86198f'}}>{row.cpsOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#b45309'}}>{row.rwOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.irScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.orScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.cageScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.rollScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.accScrap || '-'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

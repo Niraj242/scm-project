@@ -376,27 +376,17 @@ def submit_vibration(entry: VibrationEntry):
     try:
         in_d = entry.inDate if entry.inDate else None
         out_d = entry.outDate if entry.outDate else None
-        total_rolling_scrap = (entry.ballScrap or 0) + (entry.rollerScrap or 0)
-
         if entry.id:
             cursor.execute("""
-                UPDATE vibration_dismantling_ledger 
-                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, 
-                    next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, 
-                    ir_scrap=%s, or_scrap=%s, cage_scrap=%s, ball_scrap=%s
-                WHERE id=%s
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, 
-                  entry.nextStation, entry.qtySent, out_d, entry.shiftOut, 
-                  entry.irScrap, entry.orScrap, entry.cageScrap, total_rolling_scrap, entry.id))
+                UPDATE vibration_dismantling_ledger SET mo=%s, in_date=%s::date, shift_in=%s, channel=%s, bearing_type=%s, bearing_family=%s, line_type=%s, reason=%s, material_in_from=%s, qty_in=%s, activity=%s, ball_scrap=%s, roller_scrap=%s, cage_scrap=%s, seal_scrap=%s, shield_scrap=%s, ir_scrap=%s, or_scrap=%s, ring_type=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, operator=%s, remark=%s WHERE id=%s
+            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.rollerScrap, entry.cageScrap, entry.sealScrap, entry.shieldScrap, entry.irScrap, entry.orScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
         else:
             cursor.execute("""
-                INSERT INTO vibration_dismantling_ledger 
-                (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out, ir_scrap, or_scrap, cage_scrap, ball_scrap)
-                VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, %s)
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, total_rolling_scrap))
-
+                INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, bearing_family, line_type, reason, material_in_from, qty_in, activity, ball_scrap, roller_scrap, cage_scrap, seal_scrap, shield_scrap, ir_scrap, or_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
+                VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
+            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.rollerScrap, entry.cageScrap, entry.sealScrap, entry.shieldScrap, entry.irScrap, entry.orScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+            
             handle_auto_forward(cursor, "Dismantling", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
-        
         conn.commit()
         return {"status": "success", "message": "Dismantling entry logged"}
     except Exception as e:
@@ -405,6 +395,9 @@ def submit_vibration(entry: VibrationEntry):
     finally:
         cursor.close()
         conn.close()
+
+
+
 
 @router.post("/api/afterchannel/autopackaging")
 def submit_autopackaging(entry: AutopackagingEntry):

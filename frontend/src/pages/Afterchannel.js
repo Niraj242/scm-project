@@ -12,6 +12,8 @@ const Afterchannel = () => {
   const [selectedMoDetail, setSelectedMoDetail] = useState(null);
 
   const [moNumber, setMoNumber] = useState('');
+  const [availableVariants, setAvailableVariants] = useState([]);
+  const [availableMos, setAvailableMos] = useState([]);
   const [selectedVariant, setSelectedVariant] = useState('');
   const [actualProductionQty, setActualProductionQty] = useState(0);
   
@@ -21,18 +23,16 @@ const Afterchannel = () => {
   // Date state used specifically to filter reverse MO Lookups
   const [formDate, setFormDate] = useState('');
 
-  // Explicit family tracking state across both Dismantling and Rework modules
+  // Scrap logic states
   const [bearingFamily, setBearingFamily] = useState(''); 
-
-  // Track component scrap piece entries individually
-  const [irScrapVal, setIrScrapVal] = useState('');
-  const [orScrapVal, setOrScrapVal] = useState('');
-  const [cageScrapVal, setCageScrapVal] = useState('');
-  const [ballScrapVal, setBallScrapVal] = useState('');
-  const [rollerScrapVal, setRollerScrapVal] = useState('');
-  const [sealScrapVal, setSealScrapVal] = useState('');
-  const [shieldScrapVal, setShieldScrapVal] = useState('');
-  const [customQtySent, setCustomQtySent] = useState('');
+  const [bearingScrapQty, setBearingScrapQty] = useState('');
+  const [irScrap, setIrScrap] = useState('');
+  const [orScrap, setOrScrap] = useState('');
+  const [cageScrap, setCageScrap] = useState('');
+  const [ballScrap, setBallScrap] = useState('');
+  const [rollerScrap, setRollerScrap] = useState('');
+  const [sealScrap, setSealScrap] = useState('');
+  const [shieldScrap, setShieldScrap] = useState('');
 
   useEffect(() => {
     fetchMasterData();
@@ -45,6 +45,7 @@ const Afterchannel = () => {
       const data = await res.json();
       if (data.status === 'success') {
         setMoCache(data.data || {});
+        setAvailableMos(Object.keys(data.data || {}));
       }
     } catch (err) {
       console.error("Master Reference Load Failure:", err);
@@ -101,31 +102,53 @@ const Afterchannel = () => {
     }, 0);
   };
 
-  // ================= Pt 4. DYNAMIC TWO-WAY CROSS FILTERING ENGINE =================
-  const allUniqueVariants = [...new Set(Object.values(moCache).flatMap(rows => rows.map(r => getTypeFromRow(r))))].filter(Boolean);
-  const allUniqueMos = Object.keys(moCache);
+  // Two-way filter logic for Variant + Date -> MO list
+  useEffect(() => {
+    if (!selectedVariant) {
+      setAvailableMos(Object.keys(moCache));
+      return;
+    }
+    
+    let matchingMos = Object.keys(moCache).filter(mo => {
+      return moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant);
+    });
 
-  // Filter variants list depending on if an MO is typed first
-  const dynamicVariantsList = moNumber.trim() && moCache[moNumber.trim().toUpperCase()]
-    ? [...new Set(moCache[moNumber.trim().toUpperCase()].map(r => getTypeFromRow(r)))].filter(Boolean)
-    : allUniqueVariants;
+    if (formDate) {
+      const inputTime = new Date(formDate).getTime();
+      matchingMos = matchingMos.filter(mo => {
+        return moCache[mo].some(r => {
+          if (getTypeFromRow(r).toUpperCase() !== selectedVariant) return false;
+          if (!r.date) return true; // If no date recorded in backend, keep it
+          const moTime = new Date(r.date).getTime();
+          const diffDays = Math.abs((moTime - inputTime) / (1000 * 3600 * 24));
+          return diffDays <= 2;
+        });
+      });
+    }
 
-  // Filter MO list depending on if a variant is selected first
-  const dynamicMosList = selectedVariant.trim()
-    ? allUniqueMos.filter(mo => moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant.trim().toUpperCase()))
-    : allUniqueMos;
+    setAvailableMos(matchingMos);
+  }, [selectedVariant, formDate, moCache]);
 
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
       const rawRows = moCache[key];
       const uniqueVariants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
+      setAvailableVariants(uniqueVariants.map(type => ({ type })));
 
       if (uniqueVariants.length === 1) {
         const vType = uniqueVariants[0];
         setSelectedVariant(vType);
         setActualProductionQty(calculateProduction(rawRows, vType));
+      } else {
+        setSelectedVariant('');
+        setActualProductionQty(0);
       }
+    } else {
+      setAvailableVariants([]);
+      setSelectedVariant('');
+      setActualProductionQty(0);
+      setAvailableMos(Object.keys(moCache)); 
     }
   };
 
@@ -138,13 +161,42 @@ const Afterchannel = () => {
     }
   };
 
-  // Automated layout tracker for structural Flow quantity calculation (Pt 2 & 5)
-  const structuralRingsFlowCalculated = Math.max(
-    (Number(orScrapVal) || 0),
-    (Number(irScrapVal) || 0)
-  );
+  const handleBearingScrapQtyChange = (val) => {
+    setBearingScrapQty(val);
+    if (val === '') {
+      setIrScrap('');
+      setOrScrap('');
+      setCageScrap('');
+      setBallScrap('');
+      setRollerScrap('');
+    } else {
+      const num = Number(val) || 0;
+      setIrScrap(num);
+      setOrScrap(num);
+      setCageScrap(num);
+      if (bearingFamily === 'DGBB') {
+        setBallScrap(num * 8);
+        setRollerScrap('');
+      } else if (bearingFamily === 'TRB') {
+        setRollerScrap(num * 8);
+        setBallScrap('');
+      }
+    }
+  };
 
-  const displayedQtySent = customQtySent !== '' ? customQtySent : (structuralRingsFlowCalculated > 0 ? structuralRingsFlowCalculated : '');
+  const handleBearingFamilyChange = (val) => {
+    setBearingFamily(val);
+    if (bearingScrapQty !== '') {
+      const num = Number(bearingScrapQty) || 0;
+      if (val === 'DGBB') {
+        setBallScrap(num * 8);
+        setRollerScrap('');
+      } else if (val === 'TRB') {
+        setRollerScrap(num * 8);
+        setBallScrap('');
+      }
+    }
+  };
 
   const handleFormSubmit = async (e, endpoint) => {
     e.preventDefault();
@@ -154,44 +206,17 @@ const Afterchannel = () => {
       id: editingRecord ? editingRecord.id : undefined,
       mo: moNumber.toUpperCase(),
       bearing_type: selectedVariant.toUpperCase(),
-      type: selectedVariant.toUpperCase()
+      type: selectedVariant.toUpperCase(),
+      bearingFamily: bearingFamily // Explicitly force selection state to append
     };
 
-    // Pt 6. Comprehensive mapping of values to protect backend from non-null constraints
-    const numFields = [
-      'qtyIn', 'qtySent', 'qty_in', 'qty_sent', 
-      'ballScrap', 'rollerScrap', 'cageScrap', 'sealScrap', 'shieldScrap', 'irScrap', 'orScrap',
-      'ball_scrap', 'roller_scrap', 'cage_scrap', 'seal_scrap', 'shield_scrap', 'ir_scrap', 'or_scrap'
-    ];
-
-    // Explicitly seed all component variables to 0 if working inside dismantling
-    if (endpoint === 'dismantling') {
-      const dismantlingScrapKeys = ['irScrap', 'orScrap', 'cageScrap', 'ballScrap', 'rollerScrap', 'sealScrap', 'shieldScrap'];
-      dismantlingScrapKeys.forEach(k => {
-        payload[k] = 0;
-        const snake = k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-        payload[snake] = 0;
-      });
-    }
+    const numFields = ['qtyIn', 'qtySent', 'qty_in', 'qty_sent', 'ballScrap', 'rollerScrap', 'cageScrap', 'sealScrap', 'shieldScrap', 'irScrap', 'orScrap'];
 
     for (let [key, value] of fd.entries()) {
-      let finalValue = value;
-      if (numFields.includes(key)) {
-        finalValue = (value !== '' && !isNaN(Number(value))) ? Number(value) : 0;
-      } else if (!value) {
-        finalValue = null;
-      }
-      
+      const finalValue = numFields.includes(key) ? (Number(value) || 0) : (value || null);
       payload[key] = finalValue;
       const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
       if (snakeKey !== key) payload[snakeKey] = finalValue;
-    }
-
-    // Force calculated flow quantity tracking to prevent routing mismatch drops
-    if (endpoint === 'dismantling' && entryMode === 'OUT') {
-      const finalSentValue = displayedQtySent !== '' ? Number(displayedQtySent) : 0;
-      payload['qtySent'] = finalSentValue;
-      payload['qty_sent'] = finalSentValue;
     }
 
     try {
@@ -207,39 +232,35 @@ const Afterchannel = () => {
       alert(editingRecord ? "Entry Updated Successfully!" : "Operational Record Logged Successfully!");
       e.target.reset();
       setEditingRecord(null);
-      resetComponentScrapStates();
+      setBearingScrapQty(''); 
+      setIrScrap('');
+      setOrScrap('');
+      setCageScrap('');
+      setBallScrap('');
+      setRollerScrap('');
+      setSealScrap('');
+      setShieldScrap('');
+      setBearingFamily('');
       await fetchLedgers();
     } catch (err) {
       alert("Submission Error: " + err.message);
     }
   };
 
-  const resetComponentScrapStates = () => {
-    setIrScrapVal('');
-    setOrScrapVal('');
-    setCageScrapVal('');
-    setBallScrapVal('');
-    setRollerScrapVal('');
-    setSealScrapVal('');
-    setShieldScrapVal('');
-    setCustomQtySent('');
-  };
-
   const handleEdit = (record) => {
     setMoNumber(record.mo || '');
     setSelectedVariant(record.type || record.bearing_type || '');
-    setBearingFamily(record.bearing_family || record.bearingFamily || '');
+    setBearingFamily(record.bearing_family || '');
     setEntryMode((record.qty_sent || record.qtySent) ? 'OUT' : 'IN');
     
-    // Set component fields if editing a dismantling transaction
-    setIrScrapVal(record.ir_scrap || record.irScrap || '');
-    setOrScrapVal(record.or_scrap || record.orScrap || '');
-    setCageScrapVal(record.cage_scrap || record.cageScrap || '');
-    setBallScrapVal(record.ball_scrap || record.ballScrap || '');
-    setRollerScrapVal(record.roller_scrap || record.rollerScrap || '');
-    setSealScrapVal(record.seal_scrap || record.sealScrap || '');
-    setShieldScrapVal(record.shield_scrap || record.shieldScrap || '');
-    setCustomQtySent(record.qty_sent || record.qtySent || '');
+    setIrScrap(record.ir_scrap !== undefined ? record.ir_scrap : '');
+    setOrScrap(record.or_scrap !== undefined ? record.or_scrap : '');
+    setCageScrap(record.cage_scrap !== undefined ? record.cage_scrap : '');
+    setBallScrap(record.ball_scrap !== undefined ? record.ball_scrap : '');
+    setRollerScrap(record.roller_scrap !== undefined ? record.roller_scrap : '');
+    setSealScrap(record.seal_scrap !== undefined ? record.seal_scrap : '');
+    setShieldScrap(record.shield_scrap !== undefined ? record.shield_scrap : '');
+    setBearingScrapQty('');
 
     setEditingRecord(record);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -289,27 +310,15 @@ const Afterchannel = () => {
       const disIn = disLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
       const disOut = disLedger.reduce((sum, l) => !isScrapStation(l.next_station || l.nextStation) ? sum + (Number(l.qty_sent || l.qtySent) || 0) : sum, 0);
       
-      const apLedger = ledgers.autopackaging.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
-      const apIn = apLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
-      const apOut = apLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
-
-      const fpsLedger = ledgers.fps.filter(l => (l.mo||'').toUpperCase() === mo && matchVariant(l, v));
-      const fpsIn = fpsLedger.reduce((sum, l) => sum + (Number(l.qty_in || l.qtyIn) || 0), 0);
-      const fpsOut = fpsLedger.reduce((sum, l) => sum + (Number(l.qty_sent || l.qtySent) || 0), 0);
-
-      // Pt 1. Granular component calculation for complete summary modal mapping
-      const irScrap = disLedger.reduce((sum, l) => sum + (Number(l.ir_scrap || l.irScrap) || 0), 0);
-      const orScrap = disLedger.reduce((sum, l) => sum + (Number(l.or_scrap || l.orScrap) || 0), 0);
-      const cageScrap = disLedger.reduce((sum, l) => sum + (Number(l.cage_scrap || l.cageScrap) || 0), 0);
-      const ballScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap || l.ballScrap) || 0), 0);
-      const rollerScrap = disLedger.reduce((sum, l) => sum + (Number(l.roller_scrap || l.rollerScrap) || 0), 0);
-      const sealScrap = disLedger.reduce((sum, l) => sum + (Number(l.seal_scrap || l.sealScrap) || 0), 0);
-      const shieldScrap = disLedger.reduce((sum, l) => sum + (Number(l.shield_scrap || l.shieldScrap) || 0), 0);
+      const irScrap = disLedger.reduce((sum, l) => sum + (Number(l.ir_scrap) || 0), 0);
+      const orScrap = disLedger.reduce((sum, l) => sum + (Number(l.or_scrap) || 0), 0);
+      const cageScrap = disLedger.reduce((sum, l) => sum + (Number(l.cage_scrap) || 0), 0);
+      const rollScrap = disLedger.reduce((sum, l) => sum + (Number(l.ball_scrap) || 0) + (Number(l.roller_scrap) || 0), 0);
+      const accScrap = disLedger.reduce((sum, l) => sum + (Number(l.seal_scrap) || 0) + (Number(l.shield_scrap) || 0), 0);
 
       return {
         variant: v, prodQty, accIn, accOut, cpsIn, cpsOut, rwIn, rwOut, disIn, disOut,
-        apIn, apOut, fpsIn, fpsOut,
-        irScrap, orScrap, cageScrap, ballScrap, rollerScrap, sealScrap, shieldScrap
+        irScrap, orScrap, cageScrap, rollScrap, accScrap
       };
     });
 
@@ -403,20 +412,15 @@ const Afterchannel = () => {
         {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
       </datalist>
       
-      {/* Dynamic Filter Reference Lists (Pt. 4) */}
       <datalist id="mo-list">
-        {dynamicMosList.map(mo => <option key={mo} value={mo} />)}
-      </datalist>
-
-      <datalist id="variants-list">
-        {dynamicVariantsList.map(v => <option key={v} value={v} />)}
+        {availableMos.map(mo => <option key={mo} value={mo} />)}
       </datalist>
 
       <div className="ac-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #cbd5e1', paddingBottom: '10px'}}>
         <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing</h1>
         <div className="tab-buttons" style={{display: 'flex', gap: '10px', flexWrap: 'wrap'}}>
           {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
-            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily(''); resetComponentScrapStates();}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily(''); setBearingScrapQty(''); setIrScrap(''); setOrScrap(''); setCageScrap(''); setBallScrap(''); setRollerScrap(''); setSealScrap(''); setShieldScrap('');}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
               {tab.toUpperCase()}
             </button>
           ))}
@@ -432,7 +436,7 @@ const Afterchannel = () => {
             
             <div style={{flex: 1}}>
               <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Variant</label>
-              <input list="variants-list" value={selectedVariant} onChange={handleVariantChange} placeholder="Select or Type Variant..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+              <input type="text" value={selectedVariant} onChange={handleVariantChange} placeholder="Type Variant First to Filter MO..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
             </div>
 
             <div style={{flex: 1}}>
@@ -447,14 +451,14 @@ const Afterchannel = () => {
           </div>
 
           <div style={{display: 'flex', gap: '20px', marginTop: '15px', paddingTop: '15px', borderTop: '1px dashed #cbd5e1'}}>
-            <button type="button" onClick={() => setEntryMode('IN')} style={{padding: '8px 20px', background: entryMode === 'IN' ? '#2563eb' : '#fff', color: entryMode === 'IN' ? '#fff' : '#2563eb', border: '2px solid #2563eb', borderRadius: '4px', fontWeight: 'bold', cursor:'pointer'}}>
+            <button type="button" onClick={() => setEntryMode('IN')} style={{padding: '8px 20px', background: entryMode === 'IN' ? '#2563eb' : '#fff', color: entryMode === 'IN' ? '#fff' : '#2563eb', border: '2px solid #2563eb', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer'}}>
               📥 LOG IN (Receiving)
             </button>
-            <button type="button" onClick={() => setEntryMode('OUT')} style={{padding: '8px 20px', background: entryMode === 'OUT' ? '#ea580c' : '#fff', color: entryMode === 'OUT' ? '#fff' : '#ea580c', border: '2px solid #ea580c', borderRadius: '4px', fontWeight: 'bold', cursor:'pointer'}}>
+            <button type="button" onClick={() => setEntryMode('OUT')} style={{padding: '8px 20px', background: entryMode === 'OUT' ? '#ea580c' : '#fff', color: entryMode === 'OUT' ? '#fff' : '#ea580c', border: '2px solid #ea580c', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer'}}>
               📤 LOG OUT (Dispatch)
             </button>
             {editingRecord && (
-              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); setBearingFamily(''); resetComponentScrapStates(); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
+              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); setBearingFamily(''); setBearingScrapQty(''); setIrScrap(''); setOrScrap(''); setCageScrap(''); setBallScrap(''); setRollerScrap(''); setSealScrap(''); setShieldScrap(''); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
                 Cancel Edit
               </button>
             )}
@@ -534,19 +538,20 @@ const Afterchannel = () => {
         {activeTab === 'rework' && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'rework')}>
+              {/* Separate Persistent Global Selection Option for TRB and DGBB */}
+              <div style={{marginBottom: '15px', padding: '12px', background: '#f1f5f9', borderRadius: '6px', border: '1px solid #cbd5e1', display: 'flex', alignItems: 'center', gap: '10px'}}>
+                <label style={{fontWeight: 'bold', color: '#334155'}}>Bearing Family Specification:</label>
+                <select name="bearingFamily" value={bearingFamily} onChange={(e) => setBearingFamily(e.target.value)} style={{padding: '6px', width: '200px', borderRadius: '4px', border: '1px solid #cbd5e1'}} required>
+                  <option value=""></option>
+                  <option value="DGBB">DGBB</option>
+                  <option value="TRB">TRB</option>
+                </select>
+              </div>
+
               {entryMode === 'IN' ? (
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Rework Station - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    {/* Pt 3. Core Specification Selector for Rework */}
-                    <div>
-                      <label style={{fontWeight: '600'}}>Bearing Family</label>
-                      <select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}} required>
-                        <option value=""></option>
-                        <option value="DGBB">DGBB (Deep Groove Ball Bearing)</option>
-                        <option value="TRB">TRB (Tapered Roller Bearing)</option>
-                      </select>
-                    </div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -579,19 +584,20 @@ const Afterchannel = () => {
         {activeTab === 'dismantling' && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'dismantling')}>
+              {/* Separate Persistent Global Selection Option for TRB and DGBB */}
+              <div style={{marginBottom: '15px', padding: '12px', background: '#f1f5f9', borderRadius: '6px', border: '1px solid #cbd5e1', display: 'flex', alignItems: 'center', gap: '10px'}}>
+                <label style={{fontWeight: 'bold', color: '#334155'}}>Bearing Family Specification:</label>
+                <select name="bearingFamily" value={bearingFamily} onChange={(e) => handleBearingFamilyChange(e.target.value)} style={{padding: '6px', width: '200px', borderRadius: '4px', border: '1px solid #cbd5e1'}} required>
+                  <option value=""></option>
+                  <option value="DGBB">DGBB</option>
+                  <option value="TRB">TRB</option>
+                </select>
+              </div>
+
               {entryMode === 'IN' ? (
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Dismantling - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    {/* Pt 3. Core Specification Selector for Dismantling */}
-                    <div>
-                      <label style={{fontWeight: '600'}}>Bearing Family</label>
-                      <select name="bearingFamily" value={bearingFamily} onChange={(e)=>setBearingFamily(e.target.value)} style={{width:'100%', padding:'6px'}} required>
-                        <option value=""></option>
-                        <option value="DGBB">DGBB (Deep Groove Ball Bearing)</option>
-                        <option value="TRB">TRB (Tapered Roller Bearing)</option>
-                      </select>
-                    </div>
                     <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -604,61 +610,35 @@ const Afterchannel = () => {
                 </fieldset>
               ) : (
                 <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}>
-                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Dismantling - Dispatch & Component Scrap Entry</legend>
+                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Dismantling - Dispatch & Scrap Log</legend>
                   
-                  {/* Pt 2 & 5. Granular Component Selection Interface */}
-                  <div style={{background: '#f8fafc', padding: '15px', borderRadius: '6px', border: '1px solid #cbd5e1', marginBottom: '20px'}}>
-                    <h4 style={{margin: '0 0 12px 0', color: '#0f172a', borderBottom: '1px solid #e2e8f0', paddingBottom: '6px'}}>Component Scrap Entry</h4>
-                    
-                    <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '12px'}}>
-                      <div>
-                        <label style={{fontSize: '0.85em', fontWeight: '600'}}>IR (Inner Ring) Scrap</label>
-                        <input type="number" name="irScrap" value={irScrapVal} onChange={(e) => setIrScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
-                      </div>
-                      <div>
-                        <label style={{fontSize: '0.85em', fontWeight: '600'}}>OR (Outer Ring) Scrap</label>
-                        <input type="number" name="orScrap" value={orScrapVal} onChange={(e) => setOrScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
-                      </div>
-                      <div>
-                        <label style={{fontSize: '0.85em', fontWeight: '600'}}>Cage Scrap</label>
-                        <input type="number" name="cageScrap" value={cageScrapVal} onChange={(e) => setCageScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
-                      </div>
-                      <div>
-                        <label style={{fontSize: '0.85em', fontWeight: '600'}}>Ball Scrap</label>
-                        <input type="number" name="ballScrap" value={ballScrapVal} onChange={(e) => setBallScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
-                      </div>
-                      <div>
-                        <label style={{fontSize: '0.85em', fontWeight: '600'}}>Roller Scrap</label>
-                        <input type="number" name="rollerScrap" value={rollerScrapVal} onChange={(e) => setRollerScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
-                      </div>
-                      <div>
-                        <label style={{fontSize: '0.85em', fontWeight: '600'}}>Seal Scrap</label>
-                        <input type="number" name="sealScrap" value={sealScrapVal} onChange={(e) => setSealScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
-                      </div>
-                      <div>
-                        <label style={{fontSize: '0.85em', fontWeight: '600'}}>Shield Scrap</label>
-                        <input type="number" name="shieldScrap" value={shieldScrapVal} onChange={(e) => setShieldScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
+                  <div style={{background: '#fee2e2', padding: '15px', borderRadius: '6px', border: '1px solid #ef4444', marginBottom: '20px'}}>
+                    <h4 style={{margin: '0 0 10px 0', color: '#b91c1c'}}>Auto-Scrap Calculator</h4>
+                    <div style={{display: 'flex', gap: '15px', alignItems: 'flex-end'}}>
+                      <div style={{flex: 1}}><label>Bearing Scrap Qty (Total)</label><input type="number" value={bearingScrapQty} onChange={(e) => handleBearingScrapQtyChange(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="e.g. 100" /></div>
+                      <div style={{flex: 1, color: '#7f1d1d', fontSize: '0.9em', paddingBottom: '5px'}}>
+                        <em>Adjust the master total quantity to populate core internal components automatically.</em>
                       </div>
                     </div>
                   </div>
 
+                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginBottom: '20px', paddingBottom: '15px', borderBottom: '1px dashed #cbd5e1'}}>
+                    <div><label>IR Scrap</label><input type="number" name="irScrap" value={irScrap} onChange={(e) => setIrScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>OR Scrap</label><input type="number" name="orScrap" value={orScrap} onChange={(e) => setOrScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Cage Scrap</label><input type="number" name="cageScrap" value={cageScrap} onChange={(e) => setCageScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Seal Scrap</label><input type="number" name="sealScrap" value={sealScrap} onChange={(e) => setSealScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
+                    <div><label>Shield Scrap</label><input type="number" name="shieldScrap" value={shieldScrap} onChange={(e) => setShieldScrap(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
+                    
+                    {bearingFamily === 'DGBB' ? (
+                      <div><label>Ball Scrap (Qty x 8)</label><input type="number" name="ballScrap" value={ballScrap} onChange={(e) => setBallScrap(e.target.value)} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                    ) : bearingFamily === 'TRB' ? (
+                      <div><label>Roller Scrap (Qty x 8)</label><input type="number" name="rollerScrap" value={rollerScrap} onChange={(e) => setRollerScrap(e.target.value)} style={{width:'100%', padding:'6px', background: '#dbeafe'}}/></div>
+                    ) : null}
+                  </div>
+
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
-                    
-                    {/* Multi-component calculated balance equivalent output quantity (Pt 2) */}
-                    <div>
-                      <label style={{fontWeight: 'bold', color: '#1e3a8a'}}>Overall Flow Qty Sent</label>
-                      <input 
-                        type="number" 
-                        name="qtySent" 
-                        value={displayedQtySent} 
-                        onChange={(e) => setCustomQtySent(e.target.value)} 
-                        style={{width:'100%', padding:'6px', background: customQtySent === '' ? '#eff6ff' : '#fff', fontWeight: 'bold', border: '1px solid #1e40af'}} 
-                        placeholder="Calculated automatically or override"
-                      />
-                      <span style={{fontSize:'0.75em', color:'#475569'}}>Defaults to structural Ring flow volume logic</span>
-                    </div>
-
+                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Shift</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Operator</label><input type="text" name="operator" defaultValue={editingRecord?.operator || ''} style={{width:'100%', padding:'6px'}}/></div>
@@ -766,13 +746,13 @@ const Afterchannel = () => {
 
       {selectedMoDetail && (
         <div className="modal-backdrop" style={{position: 'fixed', top:0, left:0, width:'100vw', height:'100vh', background:'rgba(15, 23, 42, 0.75)', display:'flex', justifyContent:'center', alignItems:'center', zIndex: 1000}}>
-          <div className="modal-window" style={{background:'#fff', padding:'30px', borderRadius:'10px', width:'98%', maxWidth:'1650px', maxHeight:'90vh', overflowY:'auto', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'}}>
+          <div className="modal-window" style={{background:'#fff', padding:'30px', borderRadius:'10px', width:'95%', maxWidth:'1500px', maxHeight:'85vh', overflowY:'auto', boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)'}}>
             <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', borderBottom:'3px solid #0f172a', paddingBottom:'15px', marginBottom:'25px'}}>
               <h2 style={{margin: 0, color: '#0f172a'}}>Cross-Department Flow Trace: <span style={{color: '#2563eb'}}>{selectedMoDetail.mo}</span></h2>
               <button onClick={() => setSelectedMoDetail(null)} style={{fontSize:'2em', cursor:'pointer', border:'none', background:'none', color: '#64748b', lineHeight: '1'}}>&times;</button>
             </div>
             
-            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.82em', border: '1px solid #94a3b8'}}>
+            <table style={{width: '100%', borderCollapse: 'collapse', fontSize: '0.85em', border: '1px solid #94a3b8'}}>
               <thead>
                 <tr style={{background: '#334155', color: '#fff'}}>
                   <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', textAlign: 'left'}}>Variant Model</th>
@@ -785,21 +765,14 @@ const Afterchannel = () => {
                   <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#b45309'}}>RW Out</th>
                   <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis In</th>
                   <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#374151'}}>Dis Out</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#16a34a'}}>AP In</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#16a34a'}}>AP Out</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#083344'}}>FPS In</th>
-                  <th rowSpan="2" style={{border: '1px solid #475569', padding: '12px', background: '#083344'}}>FPS Out</th>
-                  {/* Pt 1. Unmerged scrap headings tracking all 7 parameters independently */}
-                  <th colSpan="7" style={{border: '1px solid #475569', padding: '8px', background: '#991b1b', textAlign: 'center'}}>Granular Scrap Components (Dismantling Section Break-out)</th>
+                  <th colSpan="5" style={{border: '1px solid #475569', padding: '8px', background: '#991b1b', textAlign: 'center'}}>Granular Scrap Components (Dismantling)</th>
                 </tr>
-                <tr style={{background: '#7f1d1d', color: '#fff', fontSize: '0.88em'}}>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>IR Ring</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>OR Ring</th>
+                <tr style={{background: '#7f1d1d', color: '#fff', fontSize: '0.9em'}}>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>IR</th>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>OR</th>
                   <th style={{border: '1px solid #475569', padding: '8px'}}>Cage</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>Ball</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>Roller</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>Seal</th>
-                  <th style={{border: '1px solid #475569', padding: '8px'}}>Shield</th>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>Ball/Roller</th>
+                  <th style={{border: '1px solid #475569', padding: '8px'}}>Seal/Shield</th>
                 </tr>
               </thead>
               <tbody>
@@ -819,21 +792,12 @@ const Afterchannel = () => {
                     
                     <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disIn || '-'}</td>
                     <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#374151'}}>{row.disOut || '-'}</td>
-
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#16a34a'}}>{row.apIn || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#16a34a'}}>{row.apOut || '-'}</td>
-
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#083344'}}>{row.fpsIn || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#083344'}}>{row.fpsOut || '-'}</td>
                     
-                    {/* Pt 1. Display cells mapped clearly to distinct states */}
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', fontWeight: row.irScrap ? 'bold' : 'normal'}}>{row.irScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', fontWeight: row.orScrap ? 'bold' : 'normal'}}>{row.orScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', fontWeight: row.cageScrap ? 'bold' : 'normal'}}>{row.cageScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', fontWeight: row.ballScrap ? 'bold' : 'normal'}}>{row.ballScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', fontWeight: row.rollerScrap ? 'bold' : 'normal'}}>{row.rollerScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', fontWeight: row.sealScrap ? 'bold' : 'normal'}}>{row.sealScrap || '-'}</td>
-                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b', fontWeight: row.shieldScrap ? 'bold' : 'normal'}}>{row.shieldScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.irScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.orScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.cageScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.rollScrap || '-'}</td>
+                    <td style={{border: '1px solid #cbd5e1', padding:'12px', color: '#991b1b'}}>{row.accScrap || '-'}</td>
                   </tr>
                 ))}
               </tbody>

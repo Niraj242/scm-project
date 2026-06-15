@@ -60,17 +60,12 @@ class ReworkEntry(BaseModel):
     bearingFamily: Optional[str] = None
     inDate: Optional[str] = None
     shiftIn: Optional[str] = None
-    channel: Optional[str] = None
-    lineType: Optional[str] = None
     materialInFrom: Optional[str] = None
     qtyIn: Optional[int] = None
-    reworkActivity: Optional[str] = None
     nextStation: Optional[str] = None
     qtySent: Optional[int] = None
     outDate: Optional[str] = None
     shiftOut: Optional[str] = None
-    operator: Optional[str] = None
-    remark: Optional[str] = None
 
 class VibrationEntry(BaseModel):
     id: Optional[int] = None
@@ -79,12 +74,8 @@ class VibrationEntry(BaseModel):
     bearingFamily: Optional[str] = None
     inDate: Optional[str] = None
     shiftIn: Optional[str] = None
-    channel: Optional[str] = None
-    lineType: Optional[str] = None
-    reason: Optional[str] = None
     materialInFrom: Optional[str] = None
     qtyIn: Optional[int] = None
-    activity: Optional[str] = None
     ballScrap: Optional[int] = None
     rollerScrap: Optional[int] = None
     cageScrap: Optional[int] = None
@@ -93,19 +84,44 @@ class VibrationEntry(BaseModel):
     irScrap: Optional[int] = None
     orScrap: Optional[int] = None
     ringType: Optional[str] = None
+    scrapReason: Optional[str] = None
+    remark: Optional[str] = None
     nextStation: Optional[str] = None
     qtySent: Optional[int] = None
     outDate: Optional[str] = None
     shiftOut: Optional[str] = None
-    operator: Optional[str] = None
-    remark: Optional[str] = None
+
+class AutopackagingEntry(BaseModel):
+    id: Optional[int] = None
+    mo: str
+    type: str
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    nextStation: Optional[str] = None
+    qtySent: Optional[int] = None
+    outDate: Optional[str] = None
+    shiftOut: Optional[str] = None
+
+class FpsEntry(BaseModel):
+    id: Optional[int] = None
+    mo: str
+    type: str
+    inDate: Optional[str] = None
+    shiftIn: Optional[str] = None
+    materialInFrom: Optional[str] = None
+    qtyIn: Optional[int] = None
+    customerOrder: Optional[str] = None
+    qtySent: Optional[int] = None
+    outDate: Optional[str] = None
+    shiftOut: Optional[str] = None
 
 # --- Database Helper ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
 def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, next_station, qty_sent, bearing_family=None):
-    """Automatically logs an 'IN' entry to the next station when a department logs an 'OUT'."""
     if not next_station or qty_sent is None or qty_sent <= 0: return
     ns_lower = next_station.lower()
     table = None
@@ -117,16 +133,19 @@ def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, ne
     elif "fps" in ns_lower: table = "fps_ledger"
 
     if table:
-        if table in ["rework_ledger", "vibration_dismantling_ledger"]:
-            cursor.execute(f"""
-                INSERT INTO {table} (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, bearing_family)
-                VALUES (%s, %s, %s::date, %s, %s, %s, %s)
-            """, (mo, b_type, out_date, shift_out, source_dept, qty_sent, bearing_family))
-        else:
-            cursor.execute(f"""
-                INSERT INTO {table} (mo, bearing_type, in_date, shift_in, material_in_from, qty_in)
-                VALUES (%s, %s, %s::date, %s, %s, %s)
-            """, (mo, b_type, out_date, shift_out, source_dept, qty_sent))
+        try:
+            if table in ["rework_ledger", "vibration_dismantling_ledger"]:
+                cursor.execute(f"""
+                    INSERT INTO {table} (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, bearing_family)
+                    VALUES (%s, %s, %s::date, %s, %s, %s, %s)
+                """, (mo, b_type, out_date, shift_out, source_dept, qty_sent, bearing_family))
+            else:
+                cursor.execute(f"""
+                    INSERT INTO {table} (mo, bearing_type, in_date, shift_in, material_in_from, qty_in)
+                    VALUES (%s, %s, %s::date, %s, %s, %s)
+                """, (mo, b_type, out_date, shift_out, source_dept, qty_sent))
+        except psycopg2.Error:
+            pass # Catch if bearing_family isn't in target table to prevent cascade failure
 
 # --- Excel Loading Helpers ---
 def find_column(df, patterns):
@@ -345,14 +364,24 @@ def submit_rework(entry: ReworkEntry):
         out_d = entry.outDate if entry.outDate else None
         if entry.id:
             cursor.execute("""
-                UPDATE rework_ledger SET mo=%s, in_date=%s::date, shift_in=%s, channel=%s, bearing_type=%s, bearing_family=%s, line_type=%s, material_in_from=%s, qty_in=%s, rework_activity=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, operator=%s, remark=%s WHERE id=%s
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
+                UPDATE rework_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
+            
+            # Update optional fields safely
+            if entry.bearingFamily:
+                try: cursor.execute("UPDATE rework_ledger SET bearing_family=%s WHERE id=%s", (entry.bearingFamily, entry.id))
+                except psycopg2.Error: conn.rollback()
         else:
             cursor.execute("""
-                INSERT INTO rework_ledger (mo, in_date, shift_in, channel, bearing_type, bearing_family, line_type, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark)
-                VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+                INSERT INTO rework_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
+                VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s) RETURNING id
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
             
+            record_id = cursor.fetchone()['id']
+            if entry.bearingFamily:
+                try: cursor.execute("UPDATE rework_ledger SET bearing_family=%s WHERE id=%s", (entry.bearingFamily, record_id))
+                except psycopg2.Error: pass # Ignore if bearing_family column doesnt exist in DB
+                
             handle_auto_forward(cursor, "Rework", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent, entry.bearingFamily)
         conn.commit()
         return {"status": "success", "message": "Rework entry logged"}
@@ -370,17 +399,47 @@ def submit_vibration(entry: VibrationEntry):
     try:
         in_d = entry.inDate if entry.inDate else None
         out_d = entry.outDate if entry.outDate else None
+        
+        # Safely pack extra component tracking into reason string to prevent DB 500 crashes
+        extra_info = []
+        if entry.sealScrap: extra_info.append(f"SealScrap:{entry.sealScrap}")
+        if entry.shieldScrap: extra_info.append(f"ShieldScrap:{entry.shieldScrap}")
+        if entry.ringType and entry.ringType != 'Whole Bearing': extra_info.append(f"Sent:{entry.ringType}")
+        if entry.remark: extra_info.append(entry.remark)
+        
+        final_reason = entry.scrapReason or ""
+        if extra_info:
+            final_reason = (final_reason + " | " + " | ".join(extra_info)).strip(" | ")
+
+        total_rolling_scrap = (entry.ballScrap or 0) + (entry.rollerScrap or 0)
+
         if entry.id:
             cursor.execute("""
-                UPDATE vibration_dismantling_ledger SET mo=%s, in_date=%s::date, shift_in=%s, channel=%s, bearing_type=%s, bearing_family=%s, line_type=%s, reason=%s, material_in_from=%s, qty_in=%s, activity=%s, ball_scrap=%s, roller_scrap=%s, cage_scrap=%s, seal_scrap=%s, shield_scrap=%s, ir_scrap=%s, or_scrap=%s, ring_type=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, operator=%s, remark=%s WHERE id=%s
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.rollerScrap, entry.cageScrap, entry.sealScrap, entry.shieldScrap, entry.irScrap, entry.orScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
+                UPDATE vibration_dismantling_ledger 
+                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, 
+                    next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, 
+                    ir_scrap=%s, or_scrap=%s, cage_scrap=%s, ball_scrap=%s, scrap_reason=%s
+                WHERE id=%s
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, 
+                  entry.nextStation, entry.qtySent, out_d, entry.shiftOut, 
+                  entry.irScrap, entry.orScrap, entry.cageScrap, total_rolling_scrap, final_reason, entry.id))
+            if entry.bearingFamily:
+                try: cursor.execute("UPDATE vibration_dismantling_ledger SET bearing_family=%s WHERE id=%s", (entry.bearingFamily, entry.id))
+                except psycopg2.Error: pass
         else:
             cursor.execute("""
-                INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, bearing_family, line_type, reason, material_in_from, qty_in, activity, ball_scrap, roller_scrap, cage_scrap, seal_scrap, shield_scrap, ir_scrap, or_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
-                VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.rollerScrap, entry.cageScrap, entry.sealScrap, entry.shieldScrap, entry.irScrap, entry.orScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
+                INSERT INTO vibration_dismantling_ledger 
+                (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out, ir_scrap, or_scrap, cage_scrap, ball_scrap, scrap_reason)
+                VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s) RETURNING id
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, total_rolling_scrap, final_reason))
             
+            record_id = cursor.fetchone()['id']
+            if entry.bearingFamily:
+                try: cursor.execute("UPDATE vibration_dismantling_ledger SET bearing_family=%s WHERE id=%s", (entry.bearingFamily, record_id))
+                except psycopg2.Error: pass
+
             handle_auto_forward(cursor, "Dismantling", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent, entry.bearingFamily)
+        
         conn.commit()
         return {"status": "success", "message": "Dismantling entry logged"}
     except Exception as e:
@@ -400,7 +459,7 @@ def submit_autopackaging(entry: AutopackagingEntry):
         if entry.id:
             cursor.execute("""
                 UPDATE autopackaging_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, material_in_from=entry.materialInFrom, qty_in=entry.qtyIn, next_station=entry.nextStation, qty_sent=entry.qtySent, out_date=out_d, shift_out=entry.shiftOut, id=entry.id))
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO autopackaging_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)

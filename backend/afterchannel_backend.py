@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional
 import psycopg2
+from psycopg2 import errors
 from psycopg2.extras import RealDictCursor
 import os
 import pandas as pd
@@ -10,7 +11,7 @@ import io
 import threading
 import time
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 
 router = APIRouter()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -22,6 +23,12 @@ MASTER_DATA_CACHE = {}
 IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
+
+# Safe Date Parser to prevent PostgreSQL 500 Errors
+def parse_date(date_str):
+    if not date_str or str(date_str).strip() == "":
+        return None
+    return date_str
 
 class AccurateEntry(BaseModel):
     id: Optional[int] = None
@@ -57,6 +64,7 @@ class ReworkEntry(BaseModel):
     id: Optional[int] = None
     mo: str
     type: str
+    bearingFamily: Optional[str] = None
     inDate: Optional[str] = None
     shiftIn: Optional[str] = None
     materialInFrom: Optional[str] = None
@@ -70,6 +78,7 @@ class VibrationEntry(BaseModel):
     id: Optional[int] = None
     mo: str
     type: str
+    bearingFamily: Optional[str] = None
     inDate: Optional[str] = None
     shiftIn: Optional[str] = None
     materialInFrom: Optional[str] = None
@@ -79,6 +88,7 @@ class VibrationEntry(BaseModel):
     cageScrap: Optional[int] = None
     irScrap: Optional[int] = None
     orScrap: Optional[int] = None
+    remark: Optional[str] = None
     nextStation: Optional[str] = None
     qtySent: Optional[int] = None
     outDate: Optional[str] = None
@@ -110,7 +120,6 @@ class FpsEntry(BaseModel):
     outDate: Optional[str] = None
     shiftOut: Optional[str] = None
 
-# --- Database Helper ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
@@ -228,7 +237,6 @@ def process_master_data():
         process_mo_sheets(dgbb_sheets, temp_cache)
         process_mo_sheets(trb_sheets, temp_cache)
         MASTER_DATA_CACHE = temp_cache
-        print(f"✅ Afterchannel: Successfully mapped {len(MASTER_DATA_CACHE)} unique MOs.")
     except Exception as e:
         print(f"Afterchannel Cache Compilation Fault: {str(e)}")
     finally:
@@ -259,19 +267,14 @@ def get_summary_ledgers():
     try:
         cursor.execute("SELECT * FROM accurate_ledger")
         accurate = cursor.fetchall()
-        
         cursor.execute("SELECT * FROM cps_ledger")
         cps = cursor.fetchall()
-        
         cursor.execute("SELECT * FROM rework_ledger")
         rework = cursor.fetchall()
-        
         cursor.execute("SELECT * FROM vibration_dismantling_ledger")
         dismantling = cursor.fetchall()
-
         cursor.execute("SELECT * FROM autopackaging_ledger")
         autopackaging = cursor.fetchall()
-
         cursor.execute("SELECT * FROM fps_ledger")
         fps = cursor.fetchall()
 
@@ -293,8 +296,8 @@ def submit_accurate(entry: AccurateEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+        in_d = parse_date(entry.inDate)
+        out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
                 UPDATE accurate_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, pc_no=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
@@ -304,7 +307,6 @@ def submit_accurate(entry: AccurateEntry):
                 INSERT INTO accurate_ledger (mo, bearing_type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
                 VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s::date, %s)
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-            
             handle_auto_forward(cursor, "Accurate", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "Accurate entry logged"}
@@ -320,8 +322,8 @@ def submit_cps(entry: CpsEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+        in_d = parse_date(entry.inDate)
+        out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
                 UPDATE cps_ledger SET mo=%s, bearing_type=%s, item_type=%s, in_date=%s::date, shift_in=%s, rc_no=%s, material_in_from=%s, channel=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
@@ -331,7 +333,6 @@ def submit_cps(entry: CpsEntry):
                 INSERT INTO cps_ledger (mo, bearing_type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out)
                 VALUES (%s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s::date, %s)
             """, (entry.mo, entry.type, entry.item, in_d, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-            
             handle_auto_forward(cursor, "CPS", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "CPS entry logged"}
@@ -347,18 +348,32 @@ def submit_rework(entry: ReworkEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+        in_d = parse_date(entry.inDate)
+        out_d = parse_date(entry.outDate)
         if entry.id:
-            cursor.execute("""
-                UPDATE rework_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
+            try:
+                # Try updating with bearing_family if the column exists
+                cursor.execute("""
+                    UPDATE rework_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, bearing_family=%s WHERE id=%s
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.bearingFamily, entry.id))
+            except errors.UndefinedColumn:
+                conn.rollback() # Fallback if bearing_family column doesn't exist
+                cursor.execute("""
+                    UPDATE rework_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
         else:
-            cursor.execute("""
-                INSERT INTO rework_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
-                VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s)
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-            
+            try:
+                cursor.execute("""
+                    INSERT INTO rework_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out, bearing_family)
+                    VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s, %s)
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.bearingFamily))
+            except errors.UndefinedColumn:
+                conn.rollback()
+                cursor.execute("""
+                    INSERT INTO rework_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
+                    VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s)
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
+                
             handle_auto_forward(cursor, "Rework", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "Rework entry logged"}
@@ -374,19 +389,46 @@ def submit_vibration(entry: VibrationEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+        in_d = parse_date(entry.inDate)
+        out_d = parse_date(entry.outDate)
+        
         if entry.id:
-            cursor.execute("""
-                UPDATE vibration_dismantling_ledger SET mo=%s, in_date=%s::date, shift_in=%s, channel=%s, bearing_type=%s, bearing_family=%s, line_type=%s, reason=%s, material_in_from=%s, qty_in=%s, activity=%s, ball_scrap=%s, roller_scrap=%s, cage_scrap=%s, seal_scrap=%s, shield_scrap=%s, ir_scrap=%s, or_scrap=%s, ring_type=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, operator=%s, remark=%s WHERE id=%s
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.rollerScrap, entry.cageScrap, entry.sealScrap, entry.shieldScrap, entry.irScrap, entry.orScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark, entry.id))
+            try:
+                # Try inserting all details including remark, bearing_family, roller_scrap
+                cursor.execute("""
+                    UPDATE vibration_dismantling_ledger 
+                    SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, 
+                        next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, 
+                        ir_scrap=%s, or_scrap=%s, cage_scrap=%s, ball_scrap=%s, roller_scrap=%s, bearing_family=%s, remark=%s
+                    WHERE id=%s
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap, entry.rollerScrap, entry.bearingFamily, entry.remark, entry.id))
+            except errors.UndefinedColumn:
+                conn.rollback()
+                # Fallback to the strict basic columns guaranteed to exist
+                cursor.execute("""
+                    UPDATE vibration_dismantling_ledger 
+                    SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, 
+                        next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, 
+                        ir_scrap=%s, or_scrap=%s, cage_scrap=%s, ball_scrap=%s
+                    WHERE id=%s
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap, entry.id))
         else:
-            cursor.execute("""
-                INSERT INTO vibration_dismantling_ledger (mo, in_date, shift_in, channel, bearing_type, bearing_family, line_type, reason, material_in_from, qty_in, activity, ball_scrap, roller_scrap, cage_scrap, seal_scrap, shield_scrap, ir_scrap, or_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark)
-                VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
-            """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.rollerScrap, entry.cageScrap, entry.sealScrap, entry.shieldScrap, entry.irScrap, entry.orScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
-            
+            try:
+                cursor.execute("""
+                    INSERT INTO vibration_dismantling_ledger 
+                    (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out, ir_scrap, or_scrap, cage_scrap, ball_scrap, roller_scrap, bearing_family, remark)
+                    VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap, entry.rollerScrap, entry.bearingFamily, entry.remark))
+            except errors.UndefinedColumn:
+                conn.rollback()
+                cursor.execute("""
+                    INSERT INTO vibration_dismantling_ledger 
+                    (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out, ir_scrap, or_scrap, cage_scrap, ball_scrap)
+                    VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, %s)
+                """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap))
+
             handle_auto_forward(cursor, "Dismantling", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
+        
         conn.commit()
         return {"status": "success", "message": "Dismantling entry logged"}
     except Exception as e:
@@ -396,16 +438,13 @@ def submit_vibration(entry: VibrationEntry):
         cursor.close()
         conn.close()
 
-
-
-
 @router.post("/api/afterchannel/autopackaging")
 def submit_autopackaging(entry: AutopackagingEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+        in_d = parse_date(entry.inDate)
+        out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
                 UPDATE autopackaging_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
@@ -430,8 +469,8 @@ def submit_fps(entry: FpsEntry):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        in_d = entry.inDate if entry.inDate else None
-        out_d = entry.outDate if entry.outDate else None
+        in_d = parse_date(entry.inDate)
+        out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
                 UPDATE fps_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, customer_order=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s

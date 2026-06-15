@@ -100,37 +100,11 @@ class VibrationEntry(BaseModel):
     operator: Optional[str] = None
     remark: Optional[str] = None
 
-class AutopackagingEntry(BaseModel):
-    id: Optional[int] = None
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    nextStation: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-
-class FpsEntry(BaseModel):
-    id: Optional[int] = None
-    mo: str
-    type: str
-    inDate: Optional[str] = None
-    shiftIn: Optional[str] = None
-    materialInFrom: Optional[str] = None
-    qtyIn: Optional[int] = None
-    customerOrder: Optional[str] = None
-    qtySent: Optional[int] = None
-    outDate: Optional[str] = None
-    shiftOut: Optional[str] = None
-
 # --- Database Helper ---
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
 
-def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, next_station, qty_sent):
+def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, next_station, qty_sent, bearing_family=None):
     """Automatically logs an 'IN' entry to the next station when a department logs an 'OUT'."""
     if not next_station or qty_sent is None or qty_sent <= 0: return
     ns_lower = next_station.lower()
@@ -143,14 +117,19 @@ def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, ne
     elif "fps" in ns_lower: table = "fps_ledger"
 
     if table:
-        cursor.execute(f"""
-            INSERT INTO {table} (mo, bearing_type, in_date, shift_in, material_in_from, qty_in)
-            VALUES (%s, %s, %s::date, %s, %s, %s)
-        """, (mo, b_type, out_date, shift_out, source_dept, qty_sent))
+        if table in ["rework_ledger", "vibration_dismantling_ledger"]:
+            cursor.execute(f"""
+                INSERT INTO {table} (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, bearing_family)
+                VALUES (%s, %s, %s::date, %s, %s, %s, %s)
+            """, (mo, b_type, out_date, shift_out, source_dept, qty_sent, bearing_family))
+        else:
+            cursor.execute(f"""
+                INSERT INTO {table} (mo, bearing_type, in_date, shift_in, material_in_from, qty_in)
+                VALUES (%s, %s, %s::date, %s, %s, %s)
+            """, (mo, b_type, out_date, shift_out, source_dept, qty_sent))
 
 # --- Excel Loading Helpers ---
 def find_column(df, patterns):
-    # FIXED: Return the exact, original column name from df.columns to avoid KeyError
     for p in patterns:
         norm_p = re.sub(r'[^a-z0-9]', '', str(p).lower())
         for orig_c in df.columns:
@@ -187,7 +166,6 @@ def process_mo_sheets(sheets_dict, temp_cache):
         
         if not mo_col or not type_col: continue
 
-        # FIXED: Enforce that the columns actually exist in the dataframe before filtering
         target_cols = [c for c in [mo_col, type_col, qty_col, date_col] if c is not None and c in df.columns]
         df_records = df[target_cols].to_dict('records')
 
@@ -321,7 +299,6 @@ def submit_accurate(entry: AccurateEntry):
                 VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s::date, %s)
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
             
-            # Auto-forward
             handle_auto_forward(cursor, "Accurate", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "Accurate entry logged"}
@@ -376,7 +353,7 @@ def submit_rework(entry: ReworkEntry):
                 VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
             """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.materialInFrom, entry.qtyIn, entry.reworkActivity, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
             
-            handle_auto_forward(cursor, "Rework", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
+            handle_auto_forward(cursor, "Rework", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent, entry.bearingFamily)
         conn.commit()
         return {"status": "success", "message": "Rework entry logged"}
     except Exception as e:
@@ -403,7 +380,7 @@ def submit_vibration(entry: VibrationEntry):
                 VALUES (%s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::date, %s, %s, %s)
             """, (entry.mo, in_d, entry.shiftIn, entry.channel, entry.type, entry.bearingFamily, entry.lineType, entry.reason, entry.materialInFrom, entry.qtyIn, entry.activity, entry.ballScrap, entry.rollerScrap, entry.cageScrap, entry.sealScrap, entry.shieldScrap, entry.irScrap, entry.orScrap, entry.ringType, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.operator, entry.remark))
             
-            handle_auto_forward(cursor, "Dismantling", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
+            handle_auto_forward(cursor, "Dismantling", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent, entry.bearingFamily)
         conn.commit()
         return {"status": "success", "message": "Dismantling entry logged"}
     except Exception as e:
@@ -423,7 +400,7 @@ def submit_autopackaging(entry: AutopackagingEntry):
         if entry.id:
             cursor.execute("""
                 UPDATE autopackaging_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, material_in_from=entry.materialInFrom, qty_in=entry.qtyIn, next_station=entry.nextStation, qty_sent=entry.qtySent, out_date=out_d, shift_out=entry.shiftOut, id=entry.id))
         else:
             cursor.execute("""
                 INSERT INTO autopackaging_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)

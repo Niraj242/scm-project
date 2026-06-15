@@ -150,6 +150,7 @@ def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, ne
 
 # --- Excel Loading Helpers ---
 def find_column(df, patterns):
+    # FIXED: Return the exact, original column name from df.columns to avoid KeyError
     for p in patterns:
         norm_p = re.sub(r'[^a-z0-9]', '', str(p).lower())
         for orig_c in df.columns:
@@ -186,6 +187,7 @@ def process_mo_sheets(sheets_dict, temp_cache):
         
         if not mo_col or not type_col: continue
 
+        # FIXED: Enforce that the columns actually exist in the dataframe before filtering
         target_cols = [c for c in [mo_col, type_col, qty_col, date_col] if c is not None and c in df.columns]
         df_records = df[target_cols].to_dict('records')
 
@@ -242,6 +244,7 @@ def process_master_data():
         process_mo_sheets(dgbb_sheets, temp_cache)
         process_mo_sheets(trb_sheets, temp_cache)
         MASTER_DATA_CACHE = temp_cache
+        print(f"✅ Afterchannel: Successfully mapped {len(MASTER_DATA_CACHE)} unique MOs.")
     except Exception as e:
         print(f"Afterchannel Cache Compilation Fault: {str(e)}")
     finally:
@@ -270,23 +273,22 @@ def get_summary_ledgers():
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
     try:
-        # FULLY RESTORED: Exact SQL Aliases so React tables map columns correctly
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out FROM accurate_ledger")
+        cursor.execute("SELECT * FROM accurate_ledger")
         accurate = cursor.fetchall()
         
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out FROM cps_ledger")
+        cursor.execute("SELECT * FROM cps_ledger")
         cps = cursor.fetchall()
         
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, bearing_family, in_date, shift_in, channel, line_type as line_segment, material_in_from, qty_in, rework_activity, next_station, qty_sent, out_date, shift_out, operator, remark FROM rework_ledger")
+        cursor.execute("SELECT * FROM rework_ledger")
         rework = cursor.fetchall()
         
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, bearing_family, in_date, shift_in, channel, line_type as line_segment, reason, material_in_from, qty_in, activity, ball_scrap, cage_seal_scrap, roller_scrap, cage_scrap, seal_scrap, shield_scrap, ir_scrap, or_scrap, ring_type, next_station, qty_sent, out_date, shift_out, operator, remark FROM vibration_dismantling_ledger")
+        cursor.execute("SELECT * FROM vibration_dismantling_ledger")
         dismantling = cursor.fetchall()
 
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out FROM autopackaging_ledger")
+        cursor.execute("SELECT * FROM autopackaging_ledger")
         autopackaging = cursor.fetchall()
 
-        cursor.execute("SELECT id, upper(mo) as mo, upper(bearing_type) as type, in_date, shift_in, material_in_from, qty_in, customer_order, qty_sent, out_date, shift_out FROM fps_ledger")
+        cursor.execute("SELECT * FROM fps_ledger")
         fps = cursor.fetchall()
 
         return {

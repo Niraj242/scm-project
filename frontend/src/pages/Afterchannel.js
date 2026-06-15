@@ -21,12 +21,17 @@ const Afterchannel = () => {
 
   const [formDate, setFormDate] = useState('');
 
+  // Top Level Family state for Rework/Dismantling
+  const [bearingFamily, setBearingFamily] = useState(''); 
+
   // Component states
   const [irScrapVal, setIrScrapVal] = useState('');
   const [orScrapVal, setOrScrapVal] = useState('');
   const [cageScrapVal, setCageScrapVal] = useState('');
   const [ballScrapVal, setBallScrapVal] = useState('');
   const [rollerScrapVal, setRollerScrapVal] = useState('');
+  const [remarkVal, setRemarkVal] = useState('');
+  const [customQtySent, setCustomQtySent] = useState('');
 
   useEffect(() => {
     fetchMasterData();
@@ -138,7 +143,8 @@ const Afterchannel = () => {
       id: editingRecord ? editingRecord.id : undefined,
       mo: moNumber.toUpperCase(),
       bearing_type: selectedVariant.toUpperCase(),
-      type: selectedVariant.toUpperCase()
+      type: selectedVariant.toUpperCase(),
+      bearingFamily: bearingFamily || null
     };
 
     const numFields = [
@@ -150,11 +156,11 @@ const Afterchannel = () => {
       let finalValue = value;
       if (numFields.includes(key)) {
         finalValue = (value !== '' && !isNaN(Number(value))) ? Number(value) : 0;
-      } else if (!value) {
+      } else if (!value || value.trim() === '') {
         finalValue = null;
       }
-      
       payload[key] = finalValue;
+      
       const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
       if (snakeKey !== key) payload[snakeKey] = finalValue;
     }
@@ -185,18 +191,23 @@ const Afterchannel = () => {
     setCageScrapVal('');
     setBallScrapVal('');
     setRollerScrapVal('');
+    setRemarkVal('');
+    setCustomQtySent('');
   };
 
   const handleEdit = (record) => {
     setMoNumber(record.mo || '');
     setSelectedVariant(record.type || record.bearing_type || '');
+    setBearingFamily(record.bearing_family || record.bearingFamily || '');
     setEntryMode((record.qty_sent || record.qtySent) ? 'OUT' : 'IN');
     
-    setIrScrapVal(record.ir_scrap !== undefined ? record.ir_scrap : '');
-    setOrScrapVal(record.or_scrap !== undefined ? record.or_scrap : '');
-    setCageScrapVal(record.cage_scrap !== undefined ? record.cage_scrap : '');
-    setBallScrapVal(record.ball_scrap !== undefined ? record.ball_scrap : '');
-    setRollerScrapVal('');
+    setIrScrapVal(record.ir_scrap !== undefined && record.ir_scrap !== null ? record.ir_scrap : '');
+    setOrScrapVal(record.or_scrap !== undefined && record.or_scrap !== null ? record.or_scrap : '');
+    setCageScrapVal(record.cage_scrap !== undefined && record.cage_scrap !== null ? record.cage_scrap : '');
+    setBallScrapVal(record.ball_scrap !== undefined && record.ball_scrap !== null ? record.ball_scrap : '');
+    setRollerScrapVal(record.roller_scrap !== undefined && record.roller_scrap !== null ? record.roller_scrap : '');
+    setRemarkVal(record.remark || '');
+    setCustomQtySent(record.qty_sent || record.qtySent || '');
 
     setEditingRecord(record);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -231,7 +242,7 @@ const Afterchannel = () => {
       if (!item.mo) return;
       if (!summaryMap[item.mo]) {
         summaryMap[item.mo] = {
-          mo: item.mo, pc: item.pc_no || item.pc || '-',
+          mo: item.mo,
           accIn: 0, accOut: 0, cpsIn: 0, cpsOut: 0, rwIn: 0, rwOut: 0,
           disIn: 0, disOut: 0, apIn: 0, apOut: 0, fpsIn: 0, fpsOut: 0,
           irScrap: 0, orScrap: 0, cageScrap: 0, ballScrap: 0, totalScrap: 0
@@ -267,10 +278,10 @@ const Afterchannel = () => {
       if (r.qty_sent) node.disOut += Number(r.qty_sent);
       
       // Strict Number parsing to ensure scrap sums properly
-      node.irScrap += (Number(r.ir_scrap) || Number(r.irScrap) || 0);
-      node.orScrap += (Number(r.or_scrap) || Number(r.orScrap) || 0);
-      node.cageScrap += (Number(r.cage_scrap) || Number(r.cageScrap) || 0);
-      node.ballScrap += (Number(r.ball_scrap) || Number(r.ballScrap) || 0);
+      node.irScrap += (Number(r.ir_scrap) || 0);
+      node.orScrap += (Number(r.or_scrap) || 0);
+      node.cageScrap += (Number(r.cage_scrap) || 0);
+      node.ballScrap += (Number(r.ball_scrap) || 0) + (Number(r.roller_scrap) || 0);
     });
 
     ledgers.autopackaging.forEach(r => {
@@ -376,10 +387,6 @@ const Afterchannel = () => {
     );
   };
 
-  const filteredMos = Object.keys(moCache).filter(mo => 
-    mo.toUpperCase().includes(searchQuery.toUpperCase())
-  );
-
   return (
     <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
       
@@ -405,7 +412,7 @@ const Afterchannel = () => {
         <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing</h1>
         <div className="tab-buttons" style={{display: 'flex', gap: '10px', flexWrap: 'wrap'}}>
           {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
-            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); resetComponentScrapStates();}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily(''); resetComponentScrapStates();}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>
               {tab.toUpperCase()}
             </button>
           ))}
@@ -443,7 +450,7 @@ const Afterchannel = () => {
               📤 LOG OUT (Dispatch)
             </button>
             {editingRecord && (
-              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); resetComponentScrapStates(); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
+              <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); setBearingFamily(''); resetComponentScrapStates(); }} style={{padding: '8px 20px', background: '#64748b', color: '#fff', border: 'none', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer', marginLeft: 'auto'}}>
                 Cancel Edit
               </button>
             )}
@@ -523,6 +530,15 @@ const Afterchannel = () => {
         {activeTab === 'rework' && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'rework')}>
+              <div style={{marginBottom: '15px', padding: '12px', background: '#f1f5f9', borderRadius: '6px', border: '1px solid #cbd5e1', display: 'flex', alignItems: 'center', gap: '10px'}}>
+                <label style={{fontWeight: 'bold', color: '#334155'}}>Bearing Family Specification:</label>
+                <select name="bearingFamily" value={bearingFamily} onChange={(e) => setBearingFamily(e.target.value)} style={{padding: '6px', width: '200px', borderRadius: '4px', border: '1px solid #cbd5e1'}} required>
+                  <option value=""></option>
+                  <option value="DGBB">DGBB</option>
+                  <option value="TRB">TRB</option>
+                </select>
+              </div>
+
               {entryMode === 'IN' ? (
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Rework Station - Receiving Log</legend>
@@ -554,6 +570,15 @@ const Afterchannel = () => {
         {activeTab === 'dismantling' && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'dismantling')}>
+              <div style={{marginBottom: '15px', padding: '12px', background: '#f1f5f9', borderRadius: '6px', border: '1px solid #cbd5e1', display: 'flex', alignItems: 'center', gap: '10px'}}>
+                <label style={{fontWeight: 'bold', color: '#334155'}}>Bearing Family Specification:</label>
+                <select name="bearingFamily" value={bearingFamily} onChange={(e) => setBearingFamily(e.target.value)} style={{padding: '6px', width: '200px', borderRadius: '4px', border: '1px solid #cbd5e1'}} required>
+                  <option value=""></option>
+                  <option value="DGBB">DGBB</option>
+                  <option value="TRB">TRB</option>
+                </select>
+              </div>
+
               {entryMode === 'IN' ? (
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Dismantling - Receiving Log</legend>
@@ -566,20 +591,47 @@ const Afterchannel = () => {
                 </fieldset>
               ) : (
                 <fieldset style={{border: '1px solid #ea580c', padding: '15px', borderRadius: '6px'}}>
-                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Dismantling - Dispatch & Scrap Log</legend>
+                  <legend style={{fontWeight: 'bold', color: '#ea580c'}}>Dismantling - Dispatch & Component Scrap Entry</legend>
                   
-                  <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '15px', marginBottom: '20px', background: '#fef2f2', padding: '15px', borderRadius: '6px', border: '1px solid #fca5a5'}}>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>IR Scrap</label><input type="number" name="irScrap" value={irScrapVal} onChange={(e) => setIrScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>OR Scrap</label><input type="number" name="orScrap" value={orScrapVal} onChange={(e) => setOrScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>Cage Scrap</label><input type="number" name="cageScrap" value={cageScrapVal} onChange={(e) => setCageScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
-                    <div><label style={{color: '#991b1b', fontWeight: 'bold'}}>Ball/Roller Scrap</label><input type="number" name="ballScrap" value={ballScrapVal} onChange={(e) => setBallScrapVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Pieces" /></div>
+                  <div style={{background: '#f8fafc', padding: '15px', borderRadius: '6px', border: '1px solid #cbd5e1', marginBottom: '20px'}}>
+                    <h4 style={{margin: '0 0 12px 0', color: '#0f172a', borderBottom: '1px solid #e2e8f0', paddingBottom: '6px'}}>Component Scrap Entry</h4>
+                    
+                    <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: '12px'}}>
+                      <div>
+                        <label style={{fontSize: '0.85em', fontWeight: '600', color:'#991b1b'}}>IR Scrap</label>
+                        <input type="number" name="irScrap" value={irScrapVal} onChange={(e) => setIrScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
+                      </div>
+                      <div>
+                        <label style={{fontSize: '0.85em', fontWeight: '600', color:'#991b1b'}}>OR Scrap</label>
+                        <input type="number" name="orScrap" value={orScrapVal} onChange={(e) => setOrScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
+                      </div>
+                      <div>
+                        <label style={{fontSize: '0.85em', fontWeight: '600', color:'#991b1b'}}>Cage Scrap</label>
+                        <input type="number" name="cageScrap" value={cageScrapVal} onChange={(e) => setCageScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
+                      </div>
+                      {bearingFamily === 'TRB' ? (
+                        <div>
+                          <label style={{fontSize: '0.85em', fontWeight: '600', color:'#991b1b'}}>Roller Scrap</label>
+                          <input type="number" name="rollerScrap" value={rollerScrapVal} onChange={(e) => setRollerScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
+                        </div>
+                      ) : (
+                        <div>
+                          <label style={{fontSize: '0.85em', fontWeight: '600', color:'#991b1b'}}>Ball Scrap</label>
+                          <input type="number" name="ballScrap" value={ballScrapVal} onChange={(e) => setBallScrapVal(e.target.value)} style={{width:'100%', padding:'5px'}} placeholder="Pieces" />
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
-                    <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div>
+                      <label>Overall Qty Sent</label>
+                      <input type="number" name="qtySent" value={customQtySent} onChange={(e) => setCustomQtySent(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="e.g. 10 Rings" />
+                    </div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                    <div style={{gridColumn: 'span 2'}}><label>Remarks (e.g. 10 OR sent, 2 IR scrapped)</label><input type="text" name="remark" value={remarkVal} onChange={(e) => setRemarkVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="Write specific flow description here"/></div>
                   </div>
                 </fieldset>
               )}
@@ -675,14 +727,14 @@ const Afterchannel = () => {
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>IR Scrap</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>OR Scrap</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>Cage Scrap</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>Ball Scrap</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>Ball/Roll Scrap</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fca5a5', fontWeight:'bold'}}>Total Scrap</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filteredLedgerData().map((row, index) => (
                     <tr key={index}>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', fontWeight: 'bold', color: '#2563eb', cursor: 'pointer', textDecoration: 'underline'}}>{row.mo}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '10px', fontWeight: 'bold', color: '#2563eb'}}>{row.mo}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accIn || '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accOut || '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.cpsIn || '-'}</td>
@@ -695,11 +747,11 @@ const Afterchannel = () => {
                       <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.apOut || '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsIn || '-'}</td>
                       <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.irScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.orScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.cageScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2'}}>{row.ballScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fee2e2', fontWeight:'bold'}}>{row.totalScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.irScrap ? 'bold' : 'normal'}}>{row.irScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.orScrap ? 'bold' : 'normal'}}>{row.orScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.cageScrap ? 'bold' : 'normal'}}>{row.cageScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.ballScrap ? 'bold' : 'normal'}}>{row.ballScrap || '-'}</td>
+                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fee2e2', color: '#b91c1c', fontWeight:'bold'}}>{row.totalScrap || '-'}</td>
                     </tr>
                   ))}
                 </tbody>

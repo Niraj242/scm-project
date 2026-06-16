@@ -6,6 +6,7 @@ import threading
 import time
 import re
 import math
+import os
 from datetime import datetime, timedelta, date
 from concurrent.futures import ThreadPoolExecutor
 
@@ -20,14 +21,13 @@ CACHE_DURATION_MINUTES = 5
 GLOBAL_CH_ROWS = []
 GLOBAL_TB_ROWS = []
 GLOBAL_SHO_ROWS = []
-GLOBAL_SCRAP_ROWS = [] # Tracks OD & Face Scrap
+GLOBAL_SCRAP_ROWS = []
 
 NUM_REGEX = re.compile(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?')
 PREFIX_REGEX = re.compile(r'^(CH-|CH\.|CH|CHANNEL-|CHANNEL|SHEET-|SHEET)')
 FAM_REGEX = re.compile(r'(\d{3,5})')
 
 def format_dt(dt):
-    """Standardizes all dates sent to the frontend to DD-MM-YYYY"""
     if dt and not pd.isna(dt):
         return dt.strftime("%d-%m-%Y")
     return "-"
@@ -39,7 +39,6 @@ def safe_ceil(value):
 
 def repair_sheet_headers(df):
     if df.empty: return df
-    # Added "automotive" and "defect" to easily identify the Scrap sheets
     targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity", "automotive", "defect"}
     best_row_idx = -1
     max_score = 0
@@ -53,7 +52,6 @@ def repair_sheet_headers(df):
             
     if max_score >= 2 and best_row_idx >= 0:
         raw_cols = df.iloc[best_row_idx].tolist()
-        
         new_cols = []
         for i, c in enumerate(raw_cols):
             c_str = str(c).strip()
@@ -136,14 +134,19 @@ def parse_family_and_type(prod_text):
 
 def clean_nan(value):
     if pd.isna(value): return 0.0
-    val_str = str(value)
-    match = NUM_REGEX.search(val_str.replace(',', ''))
+    val_str = str(value).replace(',', '').strip()
+    if not val_str: return 0.0
+    
+    # NEW: Handle cell formulas like "9+1" found in scrap logs
+    if '+' in val_str:
+        try:
+            return sum(float(NUM_REGEX.search(p).group()) for p in val_str.split('+') if NUM_REGEX.search(p))
+        except: pass
+
+    match = NUM_REGEX.search(val_str)
     if match: return float(match.group())
     return 0.0
 
-# -------------------------------------------------------------------------
-# DATE PARSER - STRICTLY SEPARATED LOGIC BY SOURCE (UNTOUCHED)
-# -------------------------------------------------------------------------
 def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
     try:
         if pd.isna(value) or value is None: 
@@ -152,7 +155,6 @@ def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
         val_str = str(value).strip().split(' ')[0].split('T')[0]
         if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]: return None
 
-        # 1. Excel serial number rescue
         if val_str.replace('.', '', 1).isdigit():
             val_float = float(val_str)
             if 30000 < val_float < 60000:
@@ -160,24 +162,17 @@ def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
 
         val_clean = val_str.replace('/', '-').replace('.', '-')
 
-        # ---------------------------------------------------------
-        # TRANSIT BUFFER, CHANNEL & SCRAP LOGIC (Native ISO respect)
-        # ---------------------------------------------------------
         if source in ["tb", "ch", "scrap"]:
             if re.match(r'^\d{4}-\d{1,2}-\d{1,2}$', val_clean):
                 try: return datetime.strptime(val_clean, "%Y-%m-%d").date()
                 except ValueError: pass
 
-        # ---------------------------------------------------------
-        # JOBWORK / DD-MM-YYYY LOGIC (With SHO Reverse ISO Rescue)
-        # ---------------------------------------------------------
         if date_format == "dd-mm-yyyy":
             try: return datetime.strptime(val_clean, "%d-%m-%Y").date()
             except ValueError: pass
             try: return datetime.strptime(val_clean, "%d-%m-%y").date()
             except ValueError: pass
             
-            # SHO ONLY: Rescue reversed Excel exports (e.g. Feb 7th -> July 2nd)
             if source == "sho":
                 try: return datetime.strptime(val_clean, "%Y-%d-%m").date()
                 except ValueError: pass
@@ -185,19 +180,14 @@ def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
             try: return datetime.strptime(val_clean, "%Y-%m-%d").date()
             except ValueError: pass
 
-        # ---------------------------------------------------------
-        # CHANNEL / MM-DD-YYYY LOGIC
-        # ---------------------------------------------------------
-        else: # mm-dd-yyyy
+        else: 
             try: return datetime.strptime(val_clean, "%m-%d-%Y").date()
             except ValueError: pass
             try: return datetime.strptime(val_clean, "%m-%d-%y").date()
             except ValueError: pass
-            
             try: return datetime.strptime(val_clean, "%Y-%m-%d").date()
             except ValueError: pass
 
-        # Final safety net
         parsed = pd.to_datetime(val_str, dayfirst=(date_format == "dd-mm-yyyy"), errors='coerce')
         if pd.notna(parsed): return parsed.date()
 
@@ -214,7 +204,6 @@ def load_excel_sheets(url):
         try: xls = pd.ExcelFile(content, engine='calamine')
         except: xls = pd.ExcelFile(content)
         time.sleep(0.05) 
-        # dtype=str FORCES Python to read it as string text instead of auto-converting
         return {sheet: repair_sheet_headers(xls.parse(sheet, dtype=str)) for sheet in xls.sheet_names}
     except Exception as e:
         print(f"⚠️ Error reading workbook stream: {e}")
@@ -251,9 +240,7 @@ def process_master_sheets(sheets_dict, is_trb):
             
             base_family, _ = parse_family_and_type(prod_str)
             qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
-            
             dt = parse_date_safe(row.get(d_col), date_format="mm-dd-yyyy", source="ch") 
-
             ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
     return ch_list
 
@@ -265,15 +252,15 @@ def process_scrap_sheets(sheets_dict):
         
         date_col = find_column(df, ["date"])
         type_col = find_column(df, ["type", "variant", "part"])
-        qty_col = find_column(df, ["defectqty", "defectqty.", "defectquantity", "scrapqty", "qty"])
+        qty_col = find_column(df, ["defectqty.", "defectqty", "defectquantity", "scrapqty", "qty", "totaldefect"])
         seg_col = find_column(df, ["automotive", "industrial", "segment"]) 
         
-        if not type_col or not qty_col: continue
+        if not type_col or not qty_col or not date_col: continue
         
         target_cols = [c for c in [date_col, type_col, qty_col, seg_col] if c]
         for row in df[target_cols].to_dict('records'):
             seg_val = str(row.get(seg_col, "")).strip().upper()
-            if "AUTO" in seg_val: continue # Exclude AUTOMOTIVE
+            if "AUTO" in seg_val: continue
             
             prod_str = str(row.get(type_col)).strip()
             if prod_str.upper() in ["", "NAN", "NONE"]: continue
@@ -345,7 +332,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             "channel_ref": ch, "mo_ref": mo_list if not pd.isna(mo_list) else "",
             "product_variant": fam, "ring_type": r_type,
             "sho_qty": 0.0, "sho_dates": [],
-            "scrap_qty": 0.0, # Track Scrap
+            "scrap_qty": 0.0,
             "tb_qty": safe_ceil(row.get("tb_qty")), 
             "tb_out": format_dt(row.get("tb_max_date")),
             "ch_qty": safe_ceil(row.get("ch_qty")),
@@ -373,7 +360,6 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             orphan_sho[k]["sho_qty"] += sho_qty
             if sho_date: orphan_sho[k]["sho_dates"].append(sho_date)
 
-    # Attach Scrap Data
     scrap_grouped = {}
     for r in filtered_scrap:
         k = (r["fam"], r["type"])
@@ -427,14 +413,16 @@ def process_tbe_data():
     try:
         from settings import settings
         
+        od_url = getattr(settings, 'SHO_ODSCRAP_URL', os.getenv('SHO_ODSCRAP_URL', ''))
+        face_url = getattr(settings, 'SHO_FACESCRAP_URL', os.getenv('SHO_FACESCRAP_URL', ''))
+
         with ThreadPoolExecutor(max_workers=6) as executor:
             future_ring = executor.submit(load_excel_sheets, getattr(settings, 'RINGWT_TRANSITBUFFER_URL', ''))
             future_trb = executor.submit(load_excel_sheets, getattr(settings, 'TRB_MASTER_URL', ''))
             future_dgbb = executor.submit(load_excel_sheets, getattr(settings, 'DGBB_MASTER_URL', ''))
             future_jw = executor.submit(load_excel_sheets, getattr(settings, 'JOBWORK_REPORT_URL', ''))
-            # Fetch Scrap Data
-            future_od = executor.submit(load_excel_sheets, getattr(settings, 'SHO_ODSCRAP_URL', ''))
-            future_face = executor.submit(load_excel_sheets, getattr(settings, 'SHO_FACESCRAP_URL', ''))
+            future_od = executor.submit(load_excel_sheets, od_url)
+            future_face = executor.submit(load_excel_sheets, face_url)
             
             ring_wt_sheets = future_ring.result()
             trb_sheets = future_trb.result()
@@ -505,7 +493,6 @@ def process_tbe_data():
         GLOBAL_CH_ROWS = ch_list
         GLOBAL_TB_ROWS = tb_list
         GLOBAL_SHO_ROWS = sho_list
-        # Build Scrap Data
         GLOBAL_SCRAP_ROWS = process_scrap_sheets(od_sheets) + process_scrap_sheets(face_sheets)
 
         MASTER_CACHE = compile_summary_data(None, None)
@@ -543,7 +530,7 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         filtered = []
         for r in rows:
             if r.get("fam") != fam: continue
-            if "ch" in r and r["ch"] != ch: continue # Only filter 'ch' if the list has a 'ch' key (Scrap/SHO don't)
+            if "ch" in r and r["ch"] != ch: continue 
             if s_dt or e_dt:
                 if not r["date"]: continue
                 if s_dt and e_dt and not (s_dt <= r["date"] <= e_dt): continue
@@ -581,12 +568,10 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
         raw_mo = str(r.get("mo", "")).strip()
         norm_v = str(r["variant"]).upper().replace("-", "").replace(" ", "")
         if not norm_v: continue
-        
         norm_key = (norm_v, raw_mo)
         if norm_key not in ch_map: ch_map[norm_key] = {"label": r["variant"], "exact_mo": raw_mo, "qty": 0.0, "dates": []}
         ch_map[norm_key]["qty"] += r["qty"]
         if r["date"]: ch_map[norm_key]["dates"].append(r["date"])
-            
         if raw_mo not in mo_summary_map: mo_summary_map[raw_mo] = {"qty": 0.0, "dates": []}
         mo_summary_map[raw_mo]["qty"] += r["qty"]
         if r["date"]: mo_summary_map[raw_mo]["dates"].append(r["date"])
@@ -600,44 +585,21 @@ def get_tbe_variant_details(ch: str = Query(...), fam: str = Query(...), start_d
 
     sequential_rows = []
     for k, data in sho_map.items():
-        sequential_rows.append({
-            "mo_ref": mo_group_display, "department": "SHO Department", "variant": data["label"],
-            "in_date": format_dt(min(data["dates"])) if data["dates"] else "-", "out_date": "-",  
-            "qty": safe_ceil(data["qty"]), "status": "Allocated"
-        })
+        sequential_rows.append({"mo_ref": mo_group_display, "department": "SHO Department", "variant": data["label"], "in_date": format_dt(min(data["dates"])) if data["dates"] else "-", "out_date": "-", "qty": safe_ceil(data["qty"]), "status": "Allocated"})
 
-    # NEW: Scrap Breakdown
     for k, data in scrap_map.items():
-        sequential_rows.append({
-            "mo_ref": mo_group_display, "department": "Scrap (OD/Face)", "variant": data["label"],
-            "in_date": format_dt(min(data["dates"])) if data["dates"] else "-", "out_date": "-",  
-            "qty": safe_ceil(data["qty"]), "status": "Scrapped"
-        })
+        sequential_rows.append({"mo_ref": mo_group_display, "department": "Scrap (OD/Face)", "variant": data["label"], "in_date": format_dt(min(data["dates"])) if data["dates"] else "-", "out_date": "-", "qty": safe_ceil(data["qty"]), "status": "Scrapped"})
 
     for k, data in tb_map.items():
-        sequential_rows.append({
-            "mo_ref": mo_group_display, "department": "Transit Buffer", "variant": data["label"],
-            "in_date": "-", "out_date": format_dt(max(data["dates"])) if data["dates"] else "-",
-            "qty": safe_ceil(data["qty"]), "status": "In Transit"
-        })
+        sequential_rows.append({"mo_ref": mo_group_display, "department": "Transit Buffer", "variant": data["label"], "in_date": "-", "out_date": format_dt(max(data["dates"])) if data["dates"] else "-", "qty": safe_ceil(data["qty"]), "status": "In Transit"})
         
     for exact_mo, data in mo_summary_map.items():
         ch_mo_display = f"{exact_mo} (Ch: {ch})" if exact_mo and ch else (exact_mo if exact_mo else (f"Ch: {ch}" if ch else "-"))
-        sequential_rows.append({
-            "mo_ref": ch_mo_display, "department": "Channel (MO Summary)", "variant": "ALL VARIANTS",
-            "in_date": format_dt(min(data["dates"])) if data["dates"] else "-",
-            "out_date": format_dt(max(data["dates"])) if data["dates"] else "-",
-            "qty": safe_ceil(data["qty"]), "status": "MO Total"
-        })
+        sequential_rows.append({"mo_ref": ch_mo_display, "department": "Channel (MO Summary)", "variant": "ALL VARIANTS", "in_date": format_dt(min(data["dates"])) if data["dates"] else "-", "out_date": format_dt(max(data["dates"])) if data["dates"] else "-", "qty": safe_ceil(data["qty"]), "status": "MO Total"})
 
     for k, data in ch_map.items():
         exact_mo = data["exact_mo"]
         ch_mo_display = f"{exact_mo} (Ch: {ch})" if exact_mo and ch else (exact_mo if exact_mo else (f"Ch: {ch}" if ch else "-"))
-        sequential_rows.append({
-            "mo_ref": ch_mo_display, "department": "Channel Section", "variant": data["label"],
-            "in_date": format_dt(min(data["dates"])) if data["dates"] else "-",
-            "out_date": format_dt(max(data["dates"])) if data["dates"] else "-",
-            "qty": safe_ceil(data["qty"]), "status": "Completed"
-        })
+        sequential_rows.append({"mo_ref": ch_mo_display, "department": "Channel Section", "variant": data["label"], "in_date": format_dt(min(data["dates"])) if data["dates"] else "-", "out_date": format_dt(max(data["dates"])) if data["dates"] else "-", "qty": safe_ceil(data["qty"]), "status": "Completed"})
 
     return {"status": "success", "data": sequential_rows}

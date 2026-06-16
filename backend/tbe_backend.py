@@ -117,6 +117,7 @@ def parse_family_and_type(prod_text):
     t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
     words = t_norm.split()
     
+    # Reliably forces "OR" to "OM" and "IR" to "IM" regardless of formatting
     if any(w in ["IM", "IR", "INNER"] for w in words) or "INNER" in text or "IM" in text or "IR" in text:
         r_type = "IM"
     elif any(w in ["OM", "OR", "OUTER"] for w in words) or "OUTER" in text or "OM" in text or "OR" in text:
@@ -137,10 +138,8 @@ def clean_nan(value):
     val_str = str(value).replace(',', '').strip()
     if not val_str: return 0.0
     
-    # NEW: Handle cell formulas like "9+1" found in scrap logs
     if '+' in val_str:
-        try:
-            return sum(float(NUM_REGEX.search(p).group()) for p in val_str.split('+') if NUM_REGEX.search(p))
+        try: return sum(float(NUM_REGEX.search(p).group()) for p in val_str.split('+') if NUM_REGEX.search(p))
         except: pass
 
     match = NUM_REGEX.search(val_str)
@@ -149,9 +148,7 @@ def clean_nan(value):
 
 def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
     try:
-        if pd.isna(value) or value is None: 
-            return None
-            
+        if pd.isna(value) or value is None: return None
         val_str = str(value).strip().split(' ')[0].split('T')[0]
         if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]: return None
 
@@ -176,10 +173,8 @@ def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
             if source == "sho":
                 try: return datetime.strptime(val_clean, "%Y-%d-%m").date()
                 except ValueError: pass
-            
             try: return datetime.strptime(val_clean, "%Y-%m-%d").date()
             except ValueError: pass
-
         else: 
             try: return datetime.strptime(val_clean, "%m-%d-%Y").date()
             except ValueError: pass
@@ -256,6 +251,9 @@ def process_scrap_sheets(sheets_dict):
         seg_col = find_column(df, ["automotive", "industrial", "segment"]) 
         
         if not type_col or not qty_col or not date_col: continue
+        
+        # THIS FIXES THE MERGED CELLS ISSUE -> Forces the date to cascade down to blank cells
+        df[date_col] = df[date_col].replace(['nan', 'None', '', 'NaN', 'NaT'], pd.NA).ffill()
         
         target_cols = [c for c in [date_col, type_col, qty_col, seg_col] if c]
         for row in df[target_cols].to_dict('records'):

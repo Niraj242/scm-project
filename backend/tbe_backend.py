@@ -37,9 +37,25 @@ def safe_ceil(value):
     try: return math.ceil(float(value))
     except: return 0
 
+def clean_nan(value):
+    """Force any input to a clean float number, handling commas, whitespace, and basic inline formulas (+)"""
+    if pd.isna(value) or value is None: return 0.0
+    val_str = str(value).replace(',', '').strip()
+    if not val_str or val_str.lower() in ["nan", "none", "na"]: return 0.0
+    
+    # Handle cell formulas like "9+1" found in scrap logs
+    if '+' in val_str:
+        try:
+            return sum(float(NUM_REGEX.search(p).group()) for p in val_str.split('+') if NUM_REGEX.search(p))
+        except: pass
+
+    match = NUM_REGEX.search(val_str)
+    if match: return float(match.group())
+    return 0.0
+
 def repair_sheet_headers(df):
     if df.empty: return df
-    targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity", "automotive", "defect"}
+    targets = {"ch", "chno", "type", "noofrings", "date", "netwt", "ringwt", "qty", "quantity", "automotive", "defect", "scrap"}
     best_row_idx = -1
     max_score = 0
     
@@ -112,17 +128,28 @@ def normalize_channel(value, force_t_prefix=False):
 
 def parse_family_and_type(prod_text):
     text = str(prod_text).strip().upper()
+    
+    # 1. FIX TYPOS
+    if "INDUSTRILA" in text:
+        text = text.replace("INDUSTRILA", "INDUSTRIAL")
+        
+    # 2. STRICT AUTOMOTIVE EXCLUSION
+    if "AUTOMOTIVE" in text:
+        return None, None
+    
     if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN", "ASSEMBLY"
+    
     r_type = "ASSEMBLY"
     t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
     words = t_norm.split()
     
-    # Reliably forces "OR" to "OM" and "IR" to "IM" regardless of formatting
+    # 3. IDENTIFY IM vs OM (Securely catches IR and OR suffixes)
     if any(w in ["IM", "IR", "INNER"] for w in words) or "INNER" in text or "IM" in text or "IR" in text:
         r_type = "IM"
     elif any(w in ["OM", "OR", "OUTER"] for w in words) or "OUTER" in text or "OM" in text or "OR" in text:
         r_type = "OM"
         
+    # 4. EXTRACT BASE FAMILY
     match = FAM_REGEX.search(text)
     base = match.group(1) if match else text.split()[0].split('-')[0]
     
@@ -133,22 +160,11 @@ def parse_family_and_type(prod_text):
         
     return base, r_type
 
-def clean_nan(value):
-    if pd.isna(value): return 0.0
-    val_str = str(value).replace(',', '').strip()
-    if not val_str: return 0.0
-    
-    if '+' in val_str:
-        try: return sum(float(NUM_REGEX.search(p).group()) for p in val_str.split('+') if NUM_REGEX.search(p))
-        except: pass
-
-    match = NUM_REGEX.search(val_str)
-    if match: return float(match.group())
-    return 0.0
-
 def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
     try:
-        if pd.isna(value) or value is None: return None
+        if pd.isna(value) or value is None: 
+            return None
+            
         val_str = str(value).strip().split(' ')[0].split('T')[0]
         if val_str.lower() in ["nan", "nat", "", "-", "none", "null"]: return None
 
@@ -173,8 +189,10 @@ def parse_date_safe(value, date_format="dd-mm-yyyy", source=None):
             if source == "sho":
                 try: return datetime.strptime(val_clean, "%Y-%d-%m").date()
                 except ValueError: pass
+            
             try: return datetime.strptime(val_clean, "%Y-%m-%d").date()
             except ValueError: pass
+
         else: 
             try: return datetime.strptime(val_clean, "%m-%d-%Y").date()
             except ValueError: pass
@@ -223,6 +241,10 @@ def process_master_sheets(sheets_dict, is_trb):
 
         target_cols = [c for c in [ch_col, mo_col, type_col, d_col, prod_col] if c]
         for row in df[target_cols].to_dict('records'):
+            prod_str = str(row.get(type_col)).strip()
+            base_family, r_type = parse_family_and_type(prod_str)
+            if base_family is None: continue # Excluded via Automotive check
+            
             c_val = row.get(ch_col) if ch_col else sheet_name
             ch = normalize_channel(c_val, force_t_prefix=is_trb)
             if not ch or ch == "0": ch = normalize_channel(sheet_name, force_t_prefix=is_trb)
@@ -230,13 +252,9 @@ def process_master_sheets(sheets_dict, is_trb):
             mo_val = str(row.get(mo_col)).strip() if mo_col else ""
             if mo_val.upper() in ["NAN", "NONE"]: mo_val = ""
             
-            prod_str = str(row.get(type_col)).strip()
-            if prod_str.upper() in ["", "NAN"]: continue
-            
-            base_family, _ = parse_family_and_type(prod_str)
-            qty = clean_nan(row.get(prod_col)) if prod_col else 0.0
+            qty = clean_nan(row.get(prod_col))
             dt = parse_date_safe(row.get(d_col), date_format="mm-dd-yyyy", source="ch") 
-            ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "mo": mo_val, "qty": qty, "date": dt})
+            ch_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "type": r_type, "mo": mo_val, "qty": qty, "date": dt})
     return ch_list
 
 def process_scrap_sheets(sheets_dict):
@@ -245,29 +263,33 @@ def process_scrap_sheets(sheets_dict):
         time.sleep(0.01)
         if df.empty: continue
         
-        date_col = find_column(df, ["date"])
+        date_col = find_column(df, ["date", "datetime"])
         type_col = find_column(df, ["type", "variant", "part"])
         qty_col = find_column(df, ["defectqty.", "defectqty", "defectquantity", "scrapqty", "qty", "totaldefect"])
-        seg_col = find_column(df, ["automotive", "industrial", "segment"]) 
         
         if not type_col or not qty_col or not date_col: continue
         
-        # THIS FIXES THE MERGED CELLS ISSUE -> Forces the date to cascade down to blank cells
+        # 1. FORWARD-FILL DATES (Fixes the merged cell issue natively)
         df[date_col] = df[date_col].replace(['nan', 'None', '', 'NaN', 'NaT'], pd.NA).ffill()
         
-        target_cols = [c for c in [date_col, type_col, qty_col, seg_col] if c]
-        for row in df[target_cols].to_dict('records'):
-            seg_val = str(row.get(seg_col, "")).strip().upper()
-            if "AUTO" in seg_val: continue
+        for _, row in df.iterrows():
+            row_dict = row.to_dict()
+            row_str = " ".join([str(v).upper() for v in row_dict.values()])
             
-            prod_str = str(row.get(type_col)).strip()
-            if prod_str.upper() in ["", "NAN", "NONE"]: continue
-            
+            # Identify and exclude Automotive, but protect Industrial records
+            if "INDUSTRILA" in row_str:
+                row_str = row_str.replace("INDUSTRILA", "INDUSTRIAL")
+            if "AUTO" in row_str and "INDUSTRIAL" not in row_str:
+                continue
+
+            prod_str = str(row_dict.get(type_col)).strip()
             base_family, r_type = parse_family_and_type(prod_str)
-            qty = clean_nan(row.get(qty_col))
+            if base_family is None: continue 
+            
+            qty = clean_nan(row_dict.get(qty_col))
             if qty <= 0: continue
             
-            dt = parse_date_safe(row.get(date_col), date_format="dd-mm-yyyy", source="scrap")
+            dt = parse_date_safe(row_dict.get(date_col), date_format="dd-mm-yyyy", source="scrap")
             scrap_list.append({"fam": base_family, "type": r_type, "qty": qty, "date": dt, "label": prod_str})
             
     return scrap_list
@@ -338,7 +360,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             "ch_out": format_dt(row.get("ch_max_date"))
         })
 
-    orphan_sho = {}
+    orphan_records = {}
     
     for sho in filtered_sho:
         sho_fam, sho_type, sho_mo, sho_qty, sho_date = sho["fam"], sho["type"], sho["mo"], sho["qty"], sho["date"]
@@ -354,9 +376,9 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
             
         if not assigned:
             k = (sho_fam, sho_type)
-            if k not in orphan_sho: orphan_sho[k] = {"sho_qty": 0.0, "sho_dates": [], "scrap_qty": 0.0}
-            orphan_sho[k]["sho_qty"] += sho_qty
-            if sho_date: orphan_sho[k]["sho_dates"].append(sho_date)
+            if k not in orphan_records: orphan_records[k] = {"sho_qty": 0.0, "sho_dates": [], "scrap_qty": 0.0}
+            orphan_records[k]["sho_qty"] += sho_qty
+            if sho_date: orphan_records[k]["sho_dates"].append(sho_date)
 
     scrap_grouped = {}
     for r in filtered_scrap:
@@ -369,8 +391,8 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         if candidates:
             candidates[0]["scrap_qty"] += sqty
         else:
-            if k not in orphan_sho: orphan_sho[k] = {"sho_qty": 0.0, "sho_dates": [], "scrap_qty": 0.0}
-            orphan_sho[k]["scrap_qty"] += sqty
+            if k not in orphan_records: orphan_records[k] = {"sho_qty": 0.0, "sho_dates": [], "scrap_qty": 0.0}
+            orphan_records[k]["scrap_qty"] += sqty
 
     compiled_summary = []
     for r in base_rows:
@@ -387,7 +409,7 @@ def compile_summary_data(start_date_str=None, end_date_str=None):
         del r["sho_dates"] 
         compiled_summary.append(r)
 
-    for k, data in orphan_sho.items():
+    for k, data in orphan_records.items():
         fam, r_type = k
         compiled_summary.append({
             "channel_ref": "-", "mo_ref": "-",
@@ -440,23 +462,23 @@ def process_tbe_data():
             f_col = find_column(df, ["type", "ringfamily", "family", "variant", "product"])
             d_col = find_column(df, ["date", "indate", "outdate", "day"])
             q_col = next((c for c in df.columns if str(c).lower().replace(" ", "").replace("#", "") == "noofrings"), find_column(df, ["qty", "quantity", "total"]))
+            
             if not f_col: continue 
 
             target_cols = [c for c in [c_col, f_col, d_col, q_col] if c]
             for row in df[target_cols].to_dict('records'):
+                prod_str = str(row.get(f_col)).strip()
+                base_family, r_type = parse_family_and_type(prod_str)
+                if base_family is None: continue 
+                
                 c_val = row.get(c_col) if c_col else sheet_name
                 ch = normalize_channel(c_val, force_t_prefix=False) 
                 if not ch or ch == "0": ch = normalize_channel(sheet_name, force_t_prefix=False)
                 
-                prod_text = str(row.get(f_col)).strip()
-                if prod_text.upper() in ["", "NAN"]: continue
-                
-                base_family, r_type = parse_family_and_type(prod_text)
-                qty = clean_nan(row.get(q_col)) if q_col else 0.0
-                
+                qty = clean_nan(row.get(q_col))
                 dt = parse_date_safe(row.get(d_col), date_format="dd-mm-yyyy", source="tb")
 
-                tb_list.append({"ch": ch, "fam": base_family, "variant": prod_text, "type": r_type, "qty": qty, "date": dt})
+                tb_list.append({"ch": ch, "fam": base_family, "variant": prod_str, "type": r_type, "qty": qty, "date": dt})
 
         sho_list = []
         for sheet_name, df in jw_sheets.items():
@@ -473,24 +495,25 @@ def process_tbe_data():
             
             target_cols = [c for c in [mo_col, prod_col, qty_col, date_col] if c]
             for row in df[target_cols].to_dict('records'):
+                prod_str = str(row.get(prod_col, ""))
+                base_fam, comp_type = parse_family_and_type(prod_str)
+                if base_fam is None: continue 
+                
                 raw_mo = str(row.get(mo_col, "")).strip().upper().replace(" ", "")
                 if raw_mo.endswith(".0"): raw_mo = raw_mo[:-2]
                 if not raw_mo or raw_mo in ["NAN", "NONE", "NA"]: continue
                 
-                raw_product = str(row.get(prod_col, ""))
-                if raw_product.upper() in ["NAN", "NONE", "NA", ""]: continue
-                
-                base_fam, comp_type = parse_family_and_type(raw_product)
                 sho_qty = clean_nan(row.get(qty_col))
-                
                 sho_date = parse_date_safe(row.get(date_col), date_format="dd-mm-yyyy", source="sho")
                 
                 if sho_qty > 0:
-                    sho_list.append({"mo": raw_mo, "fam": base_fam, "type": comp_type, "qty": sho_qty, "date": sho_date, "label": raw_product})
+                    sho_list.append({"mo": raw_mo, "fam": base_fam, "type": comp_type, "qty": sho_qty, "date": sho_date, "label": prod_str})
 
         GLOBAL_CH_ROWS = ch_list
         GLOBAL_TB_ROWS = tb_list
         GLOBAL_SHO_ROWS = sho_list
+        
+        # Build Scrap Data using our isolated processor
         GLOBAL_SCRAP_ROWS = process_scrap_sheets(od_sheets) + process_scrap_sheets(face_sheets)
 
         MASTER_CACHE = compile_summary_data(None, None)

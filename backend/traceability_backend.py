@@ -243,7 +243,7 @@ def process_traceability_data():
             
             if "pdiv" in df.columns:
                 df["pdiv"] = df["pdiv"].fillna("").astype(str).str.strip().str.upper()
-                df = df[df["pdiv"].isin(["227D", "227T"])]
+                df = df[df["pdiv"].isin(["227Y", "227T"])]
 
             for row in df.to_dict('records'):
                 raw_mo = clean_mo(row.get("mo#"))

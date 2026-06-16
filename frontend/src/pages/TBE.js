@@ -12,6 +12,7 @@ const TBE = () => {
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState('');
   
+  // Drilldown Breakout States
   const [selectedFamily, setSelectedFamily] = useState(null); 
   const [detailData, setDetailData] = useState([]);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -24,22 +25,31 @@ const TBE = () => {
 
   const timerRef = useRef(null);
 
+  // --- CALCULATOR LOGIC ---
   const selectionTotal = Object.values(selectedCells).reduce((sum, val) => sum + val, 0);
 
   const handleMouseDown = (e, cellId, value) => {
+    // Left click only
     if (e.button !== 0) return;
+    
     const numVal = parseFloat(String(value).replace(/,/g, '')) || 0;
     
     if (e.ctrlKey || e.metaKey) {
+      // Toggle selection with Ctrl/Cmd
       setSelectedCells(prev => {
         const newSel = { ...prev };
-        if (newSel[cellId] !== undefined) delete newSel[cellId];
-        else newSel[cellId] = numVal;
+        if (newSel[cellId] !== undefined) {
+          delete newSel[cellId];
+        } else {
+          newSel[cellId] = numVal;
+        }
         return newSel;
       });
     } else {
+      // Normal click: Start fresh selection
       setSelectedCells({ [cellId]: numVal });
     }
+    
     setIsDragging(true);
   };
 
@@ -70,6 +80,7 @@ const TBE = () => {
         if (currentOperation === '-') res -= selectionTotal;
         if (currentOperation === '*') res *= selectionTotal;
         if (currentOperation === '/') res = selectionTotal !== 0 ? res / selectionTotal : 0;
+        
         setCalcResult(res);
         setCurrentOperation(null);
         setSelectedCells({});
@@ -77,6 +88,7 @@ const TBE = () => {
       return;
     }
 
+    // Set operation (+, -, *, /)
     if (calcResult === null) {
       setCalcResult(selectionTotal);
     } else if (currentOperation) {
@@ -91,6 +103,7 @@ const TBE = () => {
     setSelectedCells({});
   };
 
+  // Re-fetch data whenever date filters change to calculate strict sums server-side
   useEffect(() => {
     fetchTBEDashboard();
     return () => {
@@ -103,12 +116,14 @@ const TBE = () => {
       setDetailData([]);
       return;
     }
+
     const fetchVariantDetails = async () => {
       try {
         setDetailLoading(true);
         let url = `${API}/tbe_variant_details?ch=${encodeURIComponent(selectedFamily.ch)}&fam=${encodeURIComponent(selectedFamily.fam)}`;
         if (startDate) url += `&start_date=${startDate}`;
         if (endDate) url += `&end_date=${endDate}`;
+
         const res = await fetch(url);
         if (!res.ok) throw new Error("Could not retrieve variant sequential logs.");
         const json = await res.json();
@@ -119,6 +134,7 @@ const TBE = () => {
         setDetailLoading(false);
       }
     };
+
     fetchVariantDetails();
   }, [selectedFamily, startDate, endDate]);
 
@@ -135,6 +151,7 @@ const TBE = () => {
 
       const res = await fetch(url);
       if (!res.ok) throw new Error(`Server returned status code: ${res.status}`);
+      
       const json = await res.json();
       
       if (json.status === 'initializing') {
@@ -154,25 +171,6 @@ const TBE = () => {
     }
   };
 
-  const exportToCSV = () => {
-    const headers = ['Channel', 'MO Reference', 'Family/Variant', 'Ring Type', 'SHO In', 'SHO QTY', 'SCRAP QTY', 'TB Out', 'TB QTY', 'CH In', 'CH Out', 'CH QTY', 'Status Flow'];
-    const csvRows = [
-      headers.join(','),
-      ...summaryData.map(r => [
-        `"${r.channel_ref}"`, `"${r.mo_ref}"`, `"${r.product_variant}"`, `"${r.ring_type}"`,
-        `"${r.sho_in}"`, r.sho_qty, r.scrap_qty, `"${r.tb_out}"`, r.tb_qty, 
-        `"${r.ch_in}"`, `"${r.ch_out}"`, r.ch_qty, `"${r.status}"`
-      ].join(','))
-    ].join('\n');
-
-    const blob = new Blob([csvRows], { type: 'text/csv' });
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `TBE_Export_${new Date().toISOString().split('T')[0]}.csv`;
-    a.click();
-  };
-
   const filteredSummary = summaryData.filter(item => {
     return (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
       (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase())) ||
@@ -180,8 +178,12 @@ const TBE = () => {
   });
 
   const sortedSummary = [...filteredSummary].sort((a, b) => {
-    if (a.channel_ref !== b.channel_ref) return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
-    if (a.product_variant !== b.product_variant) return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
+    if (a.channel_ref !== b.channel_ref) {
+      return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
+    }
+    if (a.product_variant !== b.product_variant) {
+      return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
+    }
     return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
   });
 
@@ -190,7 +192,9 @@ const TBE = () => {
     if (!currentRef) return 1;
     if (currentIndex > 0 && dataArray[currentIndex - 1].channel_ref === currentRef) return 0; 
     let span = 1;
-    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef) span++;
+    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef) {
+      span++;
+    }
     return span;
   };
 
@@ -198,12 +202,22 @@ const TBE = () => {
     const currentRef = dataArray[currentIndex].channel_ref;
     const currentFam = dataArray[currentIndex].product_variant;
     if (!currentRef || !currentFam) return 1;
-    if (currentIndex > 0 && dataArray[currentIndex - 1].channel_ref === currentRef && dataArray[currentIndex - 1].product_variant === currentFam) return 0; 
+    
+    if (currentIndex > 0 && 
+        dataArray[currentIndex - 1].channel_ref === currentRef &&
+        dataArray[currentIndex - 1].product_variant === currentFam) {
+      return 0; 
+    }
     let span = 1;
-    while (currentIndex + span < dataArray.length && dataArray[currentIndex + span].channel_ref === currentRef && dataArray[currentIndex + span].product_variant === currentFam) span++;
+    while (currentIndex + span < dataArray.length && 
+           dataArray[currentIndex + span].channel_ref === currentRef &&
+           dataArray[currentIndex + span].product_variant === currentFam) {
+      span++;
+    }
     return span;
   };
 
+  // Check if calculator should be visible
   const isCalcActive = Object.keys(selectedCells).length > 0 || calcResult !== null;
 
   return (
@@ -238,38 +252,80 @@ const TBE = () => {
         </div>
 
         <div className="control-actions">
-          <input type="date" className="search-box" title="Start Date" value={startDate} onChange={(e) => setStartDate(e.target.value)} />
+          <input 
+            type="date" 
+            className="search-box" 
+            title="Start Date"
+            value={startDate} 
+            onChange={(e) => setStartDate(e.target.value)} 
+          />
           <span style={{margin: '0 5px', color: '#64748b'}}>to</span>
-          <input type="date" className="search-box" title="End Date" value={endDate} onChange={(e) => setEndDate(e.target.value)} />
-          <button className="back-btn" style={{margin: '0 10px'}} onClick={exportToCSV}>Export CSV</button>
+          <input 
+            type="date" 
+            className="search-box" 
+            title="End Date"
+            value={endDate} 
+            onChange={(e) => setEndDate(e.target.value)} 
+          />
+
           <button className="back-btn" style={{margin: '0 10px'}} onClick={fetchTBEDashboard} disabled={loading}>
             {loading ? 'Refreshing...' : '🔄 Reload'}
           </button>
-          <input className="search-box" placeholder="Search Channel, MO, or Family..." value={search} onChange={(e) => setSearch(e.target.value)} disabled={isInitializing} />
+          
+          <input
+            className="search-box"
+            placeholder="Search Channel, MO, or Family..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            disabled={isInitializing}
+          />
         </div>
       </div>
 
       {error && <div className="error-box">⚠️ Network Error: {error}</div>}
-      {isInitializing && <div className="initializing-box"><div className="spinner"></div><p><strong>Compiling Remote Workbook Matrix Caches...</strong></p></div>}
+      
+      {isInitializing && (
+        <div className="initializing-box">
+          <div className="spinner"></div>
+          <p><strong>Compiling Remote Workbook Matrix Caches...</strong></p>
+        </div>
+      )}
+
       {loading && !isInitializing && <div className="loading-spinner">Querying server memory buffer...</div>}
 
       {!loading && !isInitializing && (
+        /* Dynamic container giving constrained height + elegant card framing shadow */
         <div className="table-wrapper" style={{ maxHeight: '680px', overflowY: 'auto', border: '1px solid #cbd5e1', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', position: 'relative' }}>
-          <table className="table table-hover mb-0" style={{ whiteSpace: 'nowrap', borderCollapse: 'collapse', width: '100%', textAlign: 'center' }}>
-            <thead style={{ backgroundColor: '#f1f5f9', borderBottom: '2px solid #cbd5e1' }}>
-              <tr>
-                <th style={{ padding: '15px', color: '#475569' }}>Channel</th>
-                <th style={{ padding: '15px', color: '#475569' }}>MO Reference</th>
-                <th style={{ padding: '15px', color: '#475569' }}>Family Variant</th>
-                <th style={{ padding: '15px', color: '#475569' }}>Type</th>
-                <th style={{ padding: '15px', textAlign: 'center', color: '#475569' }}>SHO In</th>
-                <th style={{ padding: '15px', textAlign: 'center', color: '#475569', backgroundColor: '#eef2ff' }}>SHO QTY</th>
-                <th style={{ padding: '15px', textAlign: 'center', color: '#991b1b', backgroundColor: '#fef2f2' }}>SCRAP</th>
-                <th style={{ padding: '15px', textAlign: 'center', color: '#475569' }}>TB Out</th>
-                <th style={{ padding: '15px', textAlign: 'center', color: '#475569', backgroundColor: '#eef2ff' }}>TB QTY</th>
-                <th style={{ padding: '15px', textAlign: 'center', color: '#475569' }}>CH In/Out</th>
-                <th style={{ padding: '15px', textAlign: 'center', color: '#475569', backgroundColor: '#eef2ff' }}>CH QTY</th>
-                <th style={{ padding: '15px', color: '#475569' }}>Status Flow</th>
+          <table className="trace-table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
+            <thead>
+              {/* Row 1 Sticky Headers with high-contrast distinct section colors */}
+              <tr className="super-header" style={{ height: '42px' }}>
+                <th colSpan="4" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#334155', color: '#ffffff', border: '1px solid #475569', fontWeight: '600', padding: '10px' }}>Connection Mapping</th>
+                <th colSpan="3" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0284c7', color: '#ffffff', border: '1px solid #0369a1', fontWeight: '600', padding: '10px' }}>SHO Department & Scrap (Split)</th>
+                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#ea580c', color: '#ffffff', border: '1px solid #c2410c', fontWeight: '600', padding: '10px' }}>Transit Buffer (Split)</th>
+                <th colSpan="3" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#16a34a', color: '#ffffff', border: '1px solid #15803d', fontWeight: '600', padding: '10px' }}>Channel Section (Combined Rollup)</th>
+                <th style={{ position: 'sticky', top: 0, zIndex: 10, background: '#475569', color: '#ffffff', border: '1px solid #576880', fontWeight: '600', padding: '10px' }}>Status Tracker</th>
+              </tr>
+              {/* Row 2 Sticky Headers with corresponding matching tint colors */}
+              <tr className="sub-header" style={{ height: '38px' }}>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Channel Ref</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>MO</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Family</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Type</th>
+                
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>In Date</th>
+                {/* NEW SCRAP COLUMN INJECTED HERE */}
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', padding: '10px', fontSize: '0.9em' }}>Scrap Qty</th>
+
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
+                
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>In Date</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
+                
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Tracking Status</th>
               </tr>
             </thead>
             <tbody>
@@ -278,130 +334,178 @@ const TBE = () => {
                 const familySpan = getFamilyRowSpan(sortedSummary, idx);
                 const uniqueKey = `${row.channel_ref || 'b'}-${row.product_variant || 'b'}-${row.ring_type || 'b'}-${idx}`;
                 
-                return (
-                  <tr key={uniqueKey} className="tbe-row" style={{ borderBottom: '1px solid #e2e8f0' }}>
-                    {channelSpan > 0 && (
-                      <td rowSpan={channelSpan} style={{ padding: '12px 15px', fontWeight: '600', color: '#0f172a', borderBottom: '1px solid #e2e8f0', verticalAlign: 'middle' }}>{row.channel_ref || '-'}</td>
-                    )}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} style={{ padding: '12px 15px', borderBottom: '1px solid #e2e8f0', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', verticalAlign: 'middle' }}>
-                        <span className="badge bg-light text-dark border text-wrap text-start" style={{ lineHeight: '1.4' }}>{row.mo_ref || '-'}</span>
-                      </td>
-                    )}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} style={{ padding: '12px 15px', fontWeight: '700', color: '#334155', borderBottom: '1px solid #e2e8f0', cursor: 'pointer', verticalAlign: 'middle' }} onClick={() => setSelectedFamily({ ch: row.channel_ref, fam: row.product_variant })}>
-                        <span style={{ textDecoration: 'underline', color: '#0284c7' }}>{row.product_variant}</span>
-                      </td>
-                    )}
-                    <td style={{ padding: '12px 15px', borderBottom: '1px solid #e2e8f0' }}>
-                      <span className={`badge ${row.ring_type === 'OM' ? 'bg-primary' : row.ring_type === 'IM' ? 'bg-success' : 'bg-secondary'}`}>{row.ring_type}</span>
-                    </td>
-                    
-                    <td style={{ padding: '12px 15px', textAlign: 'center', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}>{row.sho_in || '-'}</td>
-                    <td 
-                      onMouseDown={(e) => handleMouseDown(e, `sho-${idx}`, row.sho_qty)} 
-                      onMouseEnter={(e) => handleMouseEnter(e, `sho-${idx}`, row.sho_qty)} 
-                      style={{ padding: '12px 15px', textAlign: 'center', borderBottom: '1px solid #e2e8f0', background: selectedCells[`sho-${idx}`] !== undefined ? '#bae6fd' : '', cursor: 'cell', fontWeight: 'bold' }}>
-                      {row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}
-                    </td>
-                    
-                    <td 
-                      onMouseDown={(e) => handleMouseDown(e, `scrap-${idx}`, row.scrap_qty)} 
-                      onMouseEnter={(e) => handleMouseEnter(e, `scrap-${idx}`, row.scrap_qty)} 
-                      style={{ padding: '12px 15px', textAlign: 'center', borderBottom: '1px solid #e2e8f0', color: '#b91c1c', background: selectedCells[`scrap-${idx}`] !== undefined ? '#fecaca' : '#fef2f2', cursor: 'cell', fontWeight: 'bold' }}>
-                      {row.scrap_qty ? Number(row.scrap_qty).toLocaleString() : '0'}
-                    </td>
+                // Beautiful subtle zebra lines for alternate rows
+                const rowBg = idx % 2 === 0 ? '#ffffff' : '#fdfdfd';
 
-                    <td style={{ padding: '12px 15px', textAlign: 'center', borderBottom: '1px solid #e2e8f0', color: '#64748b' }}>{row.tb_out || '-'}</td>
-                    <td 
-                      onMouseDown={(e) => handleMouseDown(e, `tb-${idx}`, row.tb_qty)} 
-                      onMouseEnter={(e) => handleMouseEnter(e, `tb-${idx}`, row.tb_qty)} 
-                      style={{ padding: '12px 15px', textAlign: 'center', borderBottom: '1px solid #e2e8f0', background: selectedCells[`tb-${idx}`] !== undefined ? '#bae6fd' : '', cursor: 'cell', fontWeight: 'bold' }}>
-                      {row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}
-                    </td>
-                    
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} style={{ padding: '12px 15px', textAlign: 'center', borderBottom: '1px solid #e2e8f0', color: '#64748b', fontSize: '0.85rem', verticalAlign: 'middle' }}>
-                        <div>{row.ch_in || '-'}</div>
-                        <div>to</div>
-                        <div>{row.ch_out || '-'}</div>
+                return (
+                  <tr key={uniqueKey} className="data-row" style={{ backgroundColor: rowBg, transition: 'background 0.2s' }}>
+                    {/* Channel Column */}
+                    {channelSpan > 0 && (
+                      <td rowSpan={channelSpan} className="merged-mo-cell fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f1f5f9', color: '#334155', verticalAlign: 'middle' }}>
+                        {row.channel_ref || '-'}
                       </td>
                     )}
+                    
+                    {/* MO Column */}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f8fafc', fontSize: '0.9em', verticalAlign: 'middle' }}>
+                        {row.mo_ref || '-'}
+                      </td>
+                    )}
+
+                    {/* Ring Family Column */}
                     {familySpan > 0 && (
                       <td 
                         rowSpan={familySpan} 
-                        onMouseDown={(e) => handleMouseDown(e, `ch-${idx}`, row.ch_qty)} 
-                        onMouseEnter={(e) => handleMouseEnter(e, `ch-${idx}`, row.ch_qty)} 
-                        style={{ padding: '12px 15px', textAlign: 'center', borderBottom: '1px solid #e2e8f0', background: selectedCells[`ch-${idx}`] !== undefined ? '#bae6fd' : '', cursor: 'cell', fontWeight: 'bold', verticalAlign: 'middle' }}>
-                        {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
+                        className="fw-bold text-primary clickable-family-cell"
+                        title="Click to view full variant routing entries"
+                        onClick={() => setSelectedFamily({ ch: row.channel_ref, fam: row.product_variant })}
+                        style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0f9ff', color: '#0284c7', cursor: 'pointer', verticalAlign: 'middle', textDecoration: 'underline' }}
+                      >
+                        {row.product_variant}
                       </td>
                     )}
                     
-                    <td style={{ padding: '12px 15px', borderBottom: '1px solid #e2e8f0' }}>
-                      <span className={`status-pill ${row.status && row.status.includes('Completed') ? 'status-completed' : 'status-default'}`}>{row.status || 'In Process'}</span>
+                    {/* Ring Type Column */}
+                    <td className="fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#1e293b' }}>{row.ring_type}</td>
+                    
+                    {/* SHO Split */}
+                    <td 
+                      onMouseDown={(e) => handleMouseDown(e, `sho-${idx}`, row.sho_qty)}
+                      onMouseEnter={(e) => handleMouseEnter(e, `sho-${idx}`, row.sho_qty)}
+                      style={{ 
+                        border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', 
+                        background: selectedCells[`sho-${idx}`] !== undefined ? '#bae6fd' : '#f0f9ff',
+                        userSelect: 'none', cursor: 'cell' 
+                      }}>
+                      {row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}
+                    </td>
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_in || '-'}</td>
+                    
+                    {/* SCRAP Split */}
+                    <td 
+                      onMouseDown={(e) => handleMouseDown(e, `scrap-${idx}`, row.scrap_qty)}
+                      onMouseEnter={(e) => handleMouseEnter(e, `scrap-${idx}`, row.scrap_qty)}
+                      style={{ 
+                        border: '1px solid #e2e8f0', padding: '11px 10px', color: '#b91c1c', 
+                        background: selectedCells[`scrap-${idx}`] !== undefined ? '#fecaca' : '#fef2f2',
+                        userSelect: 'none', cursor: 'cell', fontWeight: 'bold'
+                      }}>
+                      {row.scrap_qty ? Number(row.scrap_qty).toLocaleString() : '0'}
+                    </td>
+
+                    {/* TB Split */}
+                    <td 
+                      onMouseDown={(e) => handleMouseDown(e, `tb-${idx}`, row.tb_qty)}
+                      onMouseEnter={(e) => handleMouseEnter(e, `tb-${idx}`, row.tb_qty)}
+                      style={{ 
+                        border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', 
+                        background: selectedCells[`tb-${idx}`] !== undefined ? '#fed7aa' : '#fff7ed',
+                        userSelect: 'none', cursor: 'cell'
+                      }}>
+                      {row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}
+                    </td>
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_out || '-'}</td>
+                    
+                    {/* Channel Section */}
+                    {familySpan > 0 && (
+                      <td 
+                        rowSpan={familySpan} 
+                        className="merged-channel-cell fw-bold text-success" 
+                        onMouseDown={(e) => handleMouseDown(e, `ch-${idx}`, row.ch_qty)}
+                        onMouseEnter={(e) => handleMouseEnter(e, `ch-${idx}`, row.ch_qty)}
+                        style={{ 
+                          border: '1px solid #e2e8f0', padding: '11px 10px', 
+                          background: selectedCells[`ch-${idx}`] !== undefined ? '#bbf7d0' : '#f0fdf4', 
+                          color: '#16a34a', verticalAlign: 'middle', userSelect: 'none', cursor: 'cell'
+                        }}>
+                        {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
+                      </td>
+                    )}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_in || '-'}</td>
+                    )}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_out || '-'}</td>
+                    )}
+                    
+                    {/* Status Tracker */}
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px' }}>
+                      <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
+                        {row.status || 'In Process'}
+                      </span>
                     </td>
                   </tr>
                 );
               })}
               {sortedSummary.length === 0 && (
-                <tr><td colSpan="12" className="text-center py-5 text-muted">No matrices found for current filter criteria.</td></tr>
+                <tr>
+                  <td colSpan="13" className="empty-state" style={{ padding: '30px', color: '#64748b', fontStyle: 'italic' }}>
+                    No records found matching the current search criteria or date range.
+                  </td>
+                </tr>
               )}
             </tbody>
           </table>
         </div>
       )}
 
-      {/* Drilldown Modal */}
+      {/* Redesigned Stacked Layout Detail Breakdown Modal */}
       {selectedFamily && (
         <div className="modal-overlay" onClick={() => setSelectedFamily(null)}>
-          <div className="modal-content-custom" onClick={e => e.stopPropagation()}>
-            <div className="modal-header-custom bg-dark text-white p-3 d-flex justify-content-between align-items-center rounded-top">
-              <h5 className="mb-0">Execution Details: <span className="text-warning">{selectedFamily.fam}</span> (Channel: {selectedFamily.ch})</h5>
-              <button className="btn btn-sm btn-light fw-bold" onClick={() => setSelectedFamily(null)}>Close</button>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div>
+                <h3>Variant Specific Location Breakdown</h3>
+                <p className="modal-subheading">Family Scope: <strong>{selectedFamily.fam}</strong></p>
+              </div>
+              <button className="close-modal-btn" onClick={() => setSelectedFamily(null)}>&times;</button>
             </div>
-            <div className="modal-body-custom p-4 bg-white rounded-bottom" style={{ maxHeight: '70vh', overflowY: 'auto' }}>
+            <div className="modal-body">
               {detailLoading ? (
-                <div className="text-center py-5 text-muted fw-bold">Extracting sequential timeline...</div>
+                <div className="detail-loading-box">
+                  <div className="spinner"></div>
+                  <p>Querying breakdown registries...</p>
+                </div>
               ) : detailData.length === 0 ? (
-                <div className="text-center py-5 text-muted">No specific breakdown found for this variant.</div>
+                <div className="empty-state">No independent deployment logs located for this variant structure within chosen dates.</div>
               ) : (
-                <div className="table-responsive">
-                  <table className="table table-sm table-bordered">
-                    <thead className="table-light">
-                      <tr>
-                        <th style={{ color: '#475569', padding: '10px' }}>MO Block</th>
-                        <th style={{ color: '#475569', padding: '10px' }}>Department Node</th>
-                        <th style={{ color: '#475569', padding: '10px' }}>Logged Variant</th>
-                        <th style={{ textAlign: 'center', color: '#475569', padding: '10px' }}>In Date</th>
-                        <th style={{ textAlign: 'center', color: '#475569', padding: '10px' }}>Out Date</th>
-                        <th style={{ textAlign: 'center', color: '#475569', padding: '10px', backgroundColor: '#eef2ff' }}>Quantity</th>
-                        <th style={{ textAlign: 'center', color: '#475569', padding: '10px' }}>Execution State</th>
+                <div className="modal-table-wrapper" style={{ maxHeight: '420px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
+                  <table className="detail-variant-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                    <thead>
+                      <tr style={{ background: '#334155', color: '#ffffff', height: '40px' }}>
+                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>MO / Channel Reference</th>
+                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Department / Specific Location</th>
+                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Product / Part Sub Variant</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>In Date</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Out Date</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Qty</th>
+                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Execution Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {detailData.map((vRow, vIdx) => (
-                        <tr key={vIdx} className="execution-row">
-                          <td className="text-start" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.mo_ref}</td>
+                        <tr key={vIdx} className="modal-data-row" style={{ background: vIdx % 2 === 0 ? '#ffffff' : '#f8fafc' }}>
+                          <td className="text-start text-muted" style={{ fontSize: '0.95em', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.mo_ref}</td>
                           <td className="text-start" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0' }}>
-                            <span className={`dept-tag ${vRow.department.toLowerCase().replace(/[\s\(\)\/]+/g, '-')}`}>
+                            <span className={`dept-tag ${vRow.department.toLowerCase().replace(/\s+/g, '-')}`}>
                               {vRow.department}
                             </span>
                           </td>
                           <td className="text-start fw-bold" style={{ color: '#0f172a', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.variant}</td>
                           <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.in_date}</td>
                           <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.out_date}</td>
-                          
-                          <td className="fw-bold" 
+                          <td 
+                            className="fw-bold" 
                             onMouseDown={(e) => handleMouseDown(e, `modal-qty-${vIdx}`, vRow.qty)}
                             onMouseEnter={(e) => handleMouseEnter(e, `modal-qty-${vIdx}`, vRow.qty)}
                             style={{ 
                               padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center',
                               background: selectedCells[`modal-qty-${vIdx}`] !== undefined ? '#bae6fd' : 'inherit',
-                              userSelect: 'none', cursor: 'cell'
+                              userSelect: 'none', cursor: 'cell' 
                             }}>
                             {Number(vRow.qty).toLocaleString()}
                           </td>
-                          
                           <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>
                             <span className="execution-status-dot">{vRow.status}</span>
                           </td>

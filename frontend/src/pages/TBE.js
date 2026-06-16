@@ -171,6 +171,35 @@ const TBE = () => {
     }
   };
 
+  const exportToCSV = () => {
+    const headers = ['Channel', 'MO Reference', 'Family/Variant', 'Ring Type', 'SHO In', 'SHO QTY', 'Scrap QTY', 'TB Out', 'TB QTY', 'CH In', 'CH Out', 'CH QTY', 'Status Flow'];
+    const csvRows = [
+      headers.join(','),
+      ...summaryData.map(r => [
+        `"${r.channel_ref}"`,
+        `"${r.mo_ref}"`,
+        `"${r.product_variant}"`,
+        `"${r.ring_type}"`,
+        `"${r.sho_in}"`,
+        r.sho_qty,
+        r.scrap_qty,
+        `"${r.tb_out}"`,
+        r.tb_qty,
+        `"${r.ch_in}"`,
+        `"${r.ch_out}"`,
+        r.ch_qty,
+        `"${r.status}"`
+      ].join(','))
+    ].join('\n');
+
+    const blob = new Blob([csvRows], { type: 'text/csv' });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `TBE_Export_${new Date().toISOString().split('T')[0]}.csv`;
+    a.click();
+  };
+
   const filteredSummary = summaryData.filter(item => {
     return (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
       (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase())) ||
@@ -268,6 +297,8 @@ const TBE = () => {
             onChange={(e) => setEndDate(e.target.value)} 
           />
 
+          <button className="back-btn" style={{margin: '0 10px'}} onClick={exportToCSV}>Export CSV</button>
+
           <button className="back-btn" style={{margin: '0 10px'}} onClick={fetchTBEDashboard} disabled={loading}>
             {loading ? 'Refreshing...' : '🔄 Reload'}
           </button>
@@ -299,7 +330,7 @@ const TBE = () => {
             <thead>
               <tr className="super-header" style={{ height: '42px' }}>
                 <th colSpan="4" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#334155', color: '#ffffff', border: '1px solid #475569', fontWeight: '600', padding: '10px' }}>Connection Mapping</th>
-                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0284c7', color: '#ffffff', border: '1px solid #0369a1', fontWeight: '600', padding: '10px' }}>SHO Department (Split)</th>
+                <th colSpan="3" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0284c7', color: '#ffffff', border: '1px solid #0369a1', fontWeight: '600', padding: '10px' }}>SHO & Scrap Defect (Split)</th>
                 <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#ea580c', color: '#ffffff', border: '1px solid #c2410c', fontWeight: '600', padding: '10px' }}>Transit Buffer (Split)</th>
                 <th colSpan="3" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#16a34a', color: '#ffffff', border: '1px solid #15803d', fontWeight: '600', padding: '10px' }}>Channel Section (Combined Rollup)</th>
                 <th style={{ position: 'sticky', top: 0, zIndex: 10, background: '#475569', color: '#ffffff', border: '1px solid #576880', fontWeight: '600', padding: '10px' }}>Status Tracker</th>
@@ -309,13 +340,14 @@ const TBE = () => {
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>MO</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Family</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Type</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>Qty</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>In Date</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', padding: '10px', fontSize: '0.9em' }}>Scrap Qty</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Qty</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Qty</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>In Date</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
+                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Qty</th>
                 <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Tracking Status</th>
               </tr>
             </thead>
@@ -357,6 +389,8 @@ const TBE = () => {
                     {/* Ring Type Column */}
                     <td className="fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#1e293b' }}>{row.ring_type}</td>
                     
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_in || '-'}</td>
+                    
                     {/* SHO Split QTY (Selectable) */}
                     <td 
                       onMouseDown={(e) => handleMouseDown(e, `sho-${idx}`, row.sho_qty)}
@@ -368,7 +402,20 @@ const TBE = () => {
                       }}>
                       {row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}
                     </td>
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_in || '-'}</td>
+                    
+                    {/* Scrap QTY (Selectable) */}
+                    <td 
+                      onMouseDown={(e) => handleMouseDown(e, `scrap-${idx}`, row.scrap_qty)}
+                      onMouseEnter={(e) => handleMouseEnter(e, `scrap-${idx}`, row.scrap_qty)}
+                      style={{ 
+                        border: '1px solid #e2e8f0', padding: '11px 10px', color: '#b91c1c', 
+                        background: selectedCells[`scrap-${idx}`] !== undefined ? '#fecaca' : '#fef2f2',
+                        userSelect: 'none', cursor: 'cell', fontWeight: 'bold' 
+                      }}>
+                      {row.scrap_qty ? Number(row.scrap_qty).toLocaleString() : '0'}
+                    </td>
+
+                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_out || '-'}</td>
                     
                     {/* TB Split QTY (Selectable) */}
                     <td 
@@ -381,9 +428,14 @@ const TBE = () => {
                       }}>
                       {row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}
                     </td>
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_out || '-'}</td>
                     
                     {/* Channel Section QTY (Selectable) */}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_in || '-'}</td>
+                    )}
+                    {familySpan > 0 && (
+                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_out || '-'}</td>
+                    )}
                     {familySpan > 0 && (
                       <td 
                         rowSpan={familySpan} 
@@ -398,12 +450,6 @@ const TBE = () => {
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
                       </td>
                     )}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_in || '-'}</td>
-                    )}
-                    {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_out || '-'}</td>
-                    )}
                     
                     {/* Status Tracker */}
                     <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px' }}>
@@ -416,7 +462,7 @@ const TBE = () => {
               })}
               {sortedSummary.length === 0 && (
                 <tr>
-                  <td colSpan="12" className="empty-state" style={{ padding: '30px', color: '#64748b', fontStyle: 'italic' }}>
+                  <td colSpan="13" className="empty-state" style={{ padding: '30px', color: '#64748b', fontStyle: 'italic' }}>
                     No records found matching the current search criteria or date range.
                   </td>
                 </tr>
@@ -464,7 +510,7 @@ const TBE = () => {
                         <tr key={vIdx} className="modal-data-row" style={{ background: vIdx % 2 === 0 ? '#ffffff' : '#f8fafc' }}>
                           <td className="text-start text-muted" style={{ fontSize: '0.95em', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.mo_ref}</td>
                           <td className="text-start" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0' }}>
-                            <span className={`dept-tag ${vRow.department.toLowerCase().replace(/\s+/g, '-')}`}>
+                            <span className={`dept-tag ${vRow.department.toLowerCase().replace(/[\s\(\)\/]+/g, '-')}`}>
                               {vRow.department}
                             </span>
                           </td>

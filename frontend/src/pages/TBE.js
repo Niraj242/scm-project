@@ -224,7 +224,7 @@ const TBE = () => {
     <div className="traceability-container" style={{ fontFamily: 'Segoe UI, Roboto, sans-serif' }}>
       <div className="header-section" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px' }}>
         <div>
-          <h1>TRansit Buffer Entry Tracking Log</h1>
+          <h1>Transit Buffer Entry Tracking Log</h1>
           <p className="sub-tag">Synchronized Channel & Ring Family Sequencing Matrices</p>
         </div>
         

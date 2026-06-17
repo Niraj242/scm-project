@@ -5,86 +5,12 @@ export default function MainDashboard() {
   const navigate = useNavigate();
 
   const modules = [
+
     {
-      title: "AI Forecasting",
-      desc: "Demand prediction using machine learning",
-      path: "/forecasting",
-      icon: "📈",
-    },
-    {
-      title: "Order Management",
-      desc: "Customer & internal order tracking",
-      path: "/orders",
-      icon: "📑",
-    },
-    {
-      title: "Smart Inventory",
-      desc: "Automated stock optimization",
-      path: "/inventory",
-      icon: "📦",
-    },
-    {
-      title: "Production Planning",
-      desc: "AI-based production scheduling",
-      path: "/production",
-      icon: "🏭",
-    },
-    {
-      title: "SCM Procurement",
-      desc: "Procurement based on production schedule",
-      path: "/procurement",
-      icon: "🧾",
-    },
-    {
-      title: "Vendor Management",
-      desc: "Supplier performance & contracts",
-      path: "/vendor",
-      icon: "🤝",
-    },
-    {
-      title: "Finance & Payments",
-      desc: "Automated billing & payments",
-      path: "/finance",
-      icon: "💳",
-    },
-    {
-      title: "Logistics Optimization",
-      desc: "Route & transportation optimization",
-      path: "/logistics",
-      icon: "🚚",
-    },
-    {
-      title: "Supplier Chatbot",
-      desc: "AI chatbot for supplier search",
-      path: "/chatbot",
-      icon: "🤖",
-    },
-    {
-      title: "MO Traceability",
-      desc: "End-to-end manufacturing order tracking",
-      path: "/traceability",
-      icon: "🔍",
-    },
-    // --- ADDED TBE MODULE BELOW ---
-    {
-      title: "TBE Calibration",
+      title: "Transit Buffer Weighing Data",
       desc: "Transit Buffer Entry & Calibration tracking",
       path: "/tbe",
-      icon: "⚖️",
-    },
-
-    {
-      title: "Scrap",
-      desc: "Daily Scrap Entry",
-      path: "/scrap",
-      icon: "S",
-    },
-
-        {
-      title: "Afetr Channel Entries",
-      desc: "Dismantling, Rework, Accurate & CPS Entry",
-      path: "/afterchannel",
-      icon: "AC",
+      icon: "T",
     },
 
   ];

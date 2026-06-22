@@ -6,18 +6,22 @@ const API = 'https://scm-backend-pshv.onrender.com';
 const Afterchannel = () => {
   const [activeTab, setActiveTab] = useState('accurate');
   const [entryMode, setEntryMode] = useState('IN'); 
+  const [moCache, setMoCache] = useState({});
   const [ledgers, setLedgers] = useState({ accurate: [], cps: [], rework: [], dismantling: [], autopackaging: [], fps: [] });
   
   const [moNumber, setMoNumber] = useState('');
   const [selectedVariant, setSelectedVariant] = useState('');
-  const [bearingFamily, setBearingFamily] = useState(''); 
-  const [editingRecord, setEditingRecord] = useState(null);
+  const [actualProductionQty, setActualProductionQty] = useState(0);
   
+  const [editingRecord, setEditingRecord] = useState(null);
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
-  const [expandedMOs, setExpandedMOs] = useState({});
-  const [expandedVariants, setExpandedVariants] = useState({});
 
-  // Scraps & Dispatches
+  const [formDate, setFormDate] = useState('');
+
+  // Top Level Family state for Rework/Dismantling
+  const [bearingFamily, setBearingFamily] = useState(''); 
+
+  // Component Scraps & Dispatches
   const [irScrapVal, setIrScrapVal] = useState('');
   const [orScrapVal, setOrScrapVal] = useState('');
   const [cageScrapVal, setCageScrapVal] = useState('');
@@ -34,9 +38,25 @@ const Afterchannel = () => {
   const [rollerSentVal, setRollerSentVal] = useState('');
   const [rollerStationVal, setRollerStationVal] = useState('');
 
+  const [expandedMOs, setExpandedMOs] = useState({});
+  const [expandedVariants, setExpandedVariants] = useState({});
+
   useEffect(() => {
+    fetchMasterData();
     fetchLedgers();
   }, []);
+
+  const fetchMasterData = async () => {
+    try {
+      const res = await fetch(`${API}/api/mo-lookup`);
+      const data = await res.json();
+      if (data.status === 'success') {
+        setMoCache(data.data || {});
+      }
+    } catch (err) {
+      console.error("Master Reference Load Failure:", err);
+    }
+  };
 
   const fetchLedgers = async () => {
     try {
@@ -57,15 +77,76 @@ const Afterchannel = () => {
     }
   };
 
-  const resetComponentScrapStates = () => {
-    setIrScrapVal(''); setOrScrapVal(''); setCageScrapVal(''); setBallScrapVal(''); setRollerScrapVal(''); setRemarkVal('');
-    setIrSentVal(''); setIrStationVal(''); setOrSentVal(''); setOrStationVal('');
-    setCageSentVal(''); setCageStationVal(''); setRollerSentVal(''); setRollerStationVal('');
+  const getQtyFromRow = (row) => {
+    for (const key in row) {
+      const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (['qty', 'quantity', 'production', 'target', 'plan', 'total'].some(w => cleanKey.includes(w))) {
+        const val = parseFloat(String(row[key]).replace(/,/g, ''));
+        if (!isNaN(val) && val > 0) return val;
+      }
+    }
+    return 0;
+  };
+
+  const getTypeFromRow = (row) => {
+    for (const key in row) {
+      const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (['type', 'variant', 'model', 'bearing', 'item'].some(w => cleanKey.includes(w))) {
+        return String(row[key]).trim();
+      }
+    }
+    return 'UNKNOWN_VARIANT'; 
+  };
+
+  const calculateProduction = (rawRows, variantToMatch) => {
+    if (!rawRows || !Array.isArray(rawRows)) return 0;
+    const cleanMatch = String(variantToMatch || '').trim().toUpperCase();
+    return rawRows.reduce((sum, r) => {
+      const rowType = getTypeFromRow(r).toUpperCase();
+      if (rowType === cleanMatch) return sum + getQtyFromRow(r);
+      return sum;
+    }, 0);
+  };
+
+  // Two-way cross filter engines
+  const allUniqueVariants = [...new Set(Object.values(moCache).flatMap(rows => rows.map(r => getTypeFromRow(r))))].filter(Boolean);
+  const allUniqueMos = Object.keys(moCache);
+
+  const dynamicVariantsList = moNumber.trim() && moCache[moNumber.trim().toUpperCase()]
+    ? [...new Set(moCache[moNumber.trim().toUpperCase()].map(r => getTypeFromRow(r)))].filter(Boolean)
+    : allUniqueVariants;
+
+  const dynamicMosList = selectedVariant.trim()
+    ? allUniqueMos.filter(mo => moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant.trim().toUpperCase()))
+    : allUniqueMos;
+
+  const handleMoBlur = () => {
+    const key = moNumber.trim().toUpperCase();
+    if (moCache[key]) {
+      const rawRows = moCache[key];
+      const uniqueVariants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
+
+      if (uniqueVariants.length === 1) {
+        const vType = uniqueVariants[0];
+        setSelectedVariant(vType);
+        setActualProductionQty(calculateProduction(rawRows, vType));
+      }
+    }
+  };
+
+  const handleVariantChange = (e) => {
+    const variantName = e.target.value.toUpperCase();
+    setSelectedVariant(variantName);
+    
+    if (moNumber && moCache[moNumber.toUpperCase()]) {
+      setActualProductionQty(calculateProduction(moCache[moNumber.toUpperCase()], variantName));
+    }
   };
 
   const handleFormSubmit = async (e, endpoint) => {
     e.preventDefault();
     const fd = new FormData(e.target);
+    
     const payload = {
       id: editingRecord ? editingRecord.id : undefined,
       mo: moNumber.toUpperCase(),
@@ -74,12 +155,19 @@ const Afterchannel = () => {
       bearingFamily: bearingFamily || null
     };
 
-    const numFields = ['qtyIn', 'qtySent', 'qty_in', 'qty_sent', 'ballScrap', 'rollerScrap', 'cageScrap', 'irScrap', 'orScrap', 'irSent', 'orSent', 'cageSent', 'rollerSent'];
+    const numFields = [
+      'qtyIn', 'qtySent', 'qty_in', 'qty_sent', 
+      'ballScrap', 'rollerScrap', 'cageScrap', 'irScrap', 'orScrap',
+      'irSent', 'orSent', 'cageSent', 'rollerSent'
+    ];
 
     for (let [key, value] of fd.entries()) {
       let finalValue = value;
-      if (numFields.includes(key)) finalValue = (value !== '' && !isNaN(Number(value))) ? Number(value) : 0;
-      else if (!value || value.trim() === '') finalValue = null;
+      if (numFields.includes(key)) {
+        finalValue = (value !== '' && !isNaN(Number(value))) ? Number(value) : 0;
+      } else if (!value || value.trim() === '') {
+        finalValue = null;
+      }
       payload[key] = finalValue;
       
       const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
@@ -88,23 +176,42 @@ const Afterchannel = () => {
 
     try {
       const targetEndpoint = endpoint === 'dismantling' ? 'vibration' : endpoint;
-      const res = await fetch(`${API}/api/afterchannel/${targetEndpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-      if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
+      const response = await fetch(`${API}/api/afterchannel/${targetEndpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
       
-      alert(editingRecord ? "Entry Updated Successfully!" : "Record Logged Successfully!");
+      if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+      
+      alert(editingRecord ? "Entry Updated Successfully!" : "Operational Record Logged Successfully!");
       e.target.reset();
-      setEditingRecord(null); resetComponentScrapStates();
+      setEditingRecord(null);
+      resetComponentScrapStates();
       await fetchLedgers();
-    } catch (err) { alert("Submission Error: " + err.message); }
+    } catch (err) {
+      alert("Submission Error: " + err.message);
+    }
+  };
+
+  const resetComponentScrapStates = () => {
+    setIrScrapVal(''); setOrScrapVal(''); setCageScrapVal(''); setBallScrapVal(''); setRollerScrapVal(''); setRemarkVal('');
+    setIrSentVal(''); setIrStationVal(''); setOrSentVal(''); setOrStationVal('');
+    setCageSentVal(''); setCageStationVal(''); setRollerSentVal(''); setRollerStationVal('');
   };
 
   const handleEdit = (record) => {
-    setMoNumber(record.mo || ''); setSelectedVariant(record.type || record.bearing_type || '');
+    setMoNumber(record.mo || '');
+    setSelectedVariant(record.type || record.bearing_type || '');
     setBearingFamily(record.bearing_family || record.bearingFamily || '');
     setEntryMode((record.qty_sent || record.qtySent) ? 'OUT' : 'IN');
     
-    setIrScrapVal(record.ir_scrap ?? ''); setOrScrapVal(record.or_scrap ?? ''); setCageScrapVal(record.cage_scrap ?? '');
-    setBallScrapVal(record.ball_scrap ?? ''); setRollerScrapVal(record.roller_scrap ?? ''); setRemarkVal(record.remark || '');
+    setIrScrapVal(record.ir_scrap !== undefined && record.ir_scrap !== null ? record.ir_scrap : '');
+    setOrScrapVal(record.or_scrap !== undefined && record.or_scrap !== null ? record.or_scrap : '');
+    setCageScrapVal(record.cage_scrap !== undefined && record.cage_scrap !== null ? record.cage_scrap : '');
+    setBallScrapVal(record.ball_scrap !== undefined && record.ball_scrap !== null ? record.ball_scrap : '');
+    setRollerScrapVal(record.roller_scrap !== undefined && record.roller_scrap !== null ? record.roller_scrap : '');
+    setRemarkVal(record.remark || '');
     
     setIrSentVal(record.ir_sent ?? ''); setIrStationVal(record.ir_station || '');
     setOrSentVal(record.or_sent ?? ''); setOrStationVal(record.or_station || '');
@@ -117,11 +224,16 @@ const Afterchannel = () => {
 
   const handleDelete = async (id, tab) => {
     if(!window.confirm("Are you sure you want to delete this entry permanently?")) return;
+    const endpoint = tab === 'dismantling' ? 'vibration' : tab;
     try {
-      const endpoint = tab === 'dismantling' ? 'vibration' : tab;
-      const res = await fetch(`${API}/api/afterchannel/${endpoint}/${id}`, { method: 'DELETE' });
-      if(res.ok) { await fetchLedgers(); if(editingRecord && editingRecord.id === id) setEditingRecord(null); }
-    } catch(err) { alert("Delete Error: " + err.message); }
+      const response = await fetch(`${API}/api/afterchannel/${endpoint}/${id}`, { method: 'DELETE' });
+      if(response.ok) {
+        await fetchLedgers();
+        if(editingRecord && editingRecord.id === id) setEditingRecord(null);
+      }
+    } catch(err) {
+      alert("Delete Error: " + err.message);
+    }
   };
 
   const isScrapStation = (val) => String(val || '').trim().toLowerCase().includes('scrap');
@@ -216,31 +328,68 @@ const Afterchannel = () => {
   };
 
   const renderDepartmentLedger = (deptKey, deptName) => {
-    const records = (ledgers[deptKey] || []).filter(l => {
+    const deptData = ledgers[deptKey] || [];
+    const records = deptData.filter(l => {
       const search = ledgerSearchQuery.toUpperCase();
-      return (l.mo || '').toUpperCase().includes(search) || (l.bearing_type || l.type || l.item_type || '').toUpperCase().includes(search);
+      const moMatch = (l.mo || '').toUpperCase().includes(search);
+      const typeMatch = (l.bearing_type || l.type || l.item_type || '').toUpperCase().includes(search);
+      return moMatch || typeMatch;
     });
-    if (records.length === 0) return <div style={{marginTop: '30px', padding: '20px', textAlign: 'center', background: '#f8fafc', color: '#64748b'}}>No entries found.</div>;
+
+    if (records.length === 0) return (
+      <div style={{marginTop: '30px', padding: '20px', textAlign: 'center', background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: '8px', color: '#64748b'}}>
+        <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px'}}>
+          <span style={{fontWeight: 'bold', color: '#0f172a', fontSize: '1.2em'}}>{deptName} - Global Entry Log</span>
+          <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: '4px', width: '300px'}} />
+        </div>
+        No entries found.
+      </div>
+    );
+
     return (
-      <div style={{marginTop: '30px', background: '#fff', borderRadius: '8px', border: '1px solid #cbd5e1', overflow: 'hidden'}}>
-        <div style={{background: '#0f172a', padding: '15px', color: '#fff', fontWeight: 'bold'}}>{deptName} - Activity Log</div>
+      <div style={{marginTop: '30px', background: '#fff', borderRadius: '8px', border: '1px solid #cbd5e1', overflow: 'hidden', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)'}}>
+        <div style={{background: '#0f172a', padding: '15px 20px', color: '#fff', fontWeight: 'bold', fontSize: '1.2em', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+          <span>{deptName} - Global Entry Log</span>
+          <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '8px 12px', border: '1px solid #cbd5e1', borderRadius: '4px', width: '300px', outline: 'none', color: '#000'}} />
+        </div>
         <div style={{overflowX: 'auto'}}>
-          <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.9em'}}>
+          <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.95em'}}>
             <thead>
               <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
-                <th style={{padding: '10px'}}>MO</th><th style={{padding: '10px'}}>Variant</th><th style={{padding: '10px'}}>Date IN</th><th style={{padding: '10px', background: '#eff6ff'}}>Qty IN</th><th style={{padding: '10px'}}>Date OUT</th><th style={{padding: '10px'}}>Next Station</th><th style={{padding: '10px', background: '#fffbeb'}}>Qty OUT</th><th style={{padding: '10px'}}>Actions</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>MO</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Variant</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date IN</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Material From</th>
+                <th style={{padding: '12px 15px', color: '#1d4ed8', borderRight: '2px solid #cbd5e1', background: '#eff6ff'}}>Qty IN</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Date OUT</th>
+                <th style={{padding: '12px 15px', color: '#475569', borderRight: '1px solid #e2e8f0'}}>Next Station</th>
+                <th style={{padding: '12px 15px', color: '#b45309', background: '#fffbeb', borderRight: '1px solid #e2e8f0'}}>Qty OUT</th>
+                <th style={{padding: '12px 15px', color: '#475569'}}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {records.map((r, i) => (
-                <tr key={i} style={{borderBottom: '1px solid #e2e8f0', background: i%2===0?'#fff':'#f8fafc'}}>
-                  <td style={{padding: '10px', fontWeight: 'bold'}}>{r.mo || '-'}</td><td style={{padding: '10px'}}>{r.bearing_type || r.type || r.item_type || '-'}</td><td style={{padding: '10px'}}>{r.in_date || r.inDate || '-'}</td><td style={{padding: '10px', fontWeight: 'bold', color: '#1d4ed8'}}>{r.qty_in || r.qtyIn || '-'}</td><td style={{padding: '10px'}}>{r.out_date || r.outDate || '-'}</td><td style={{padding: '10px'}}>{r.next_station || r.nextStation || '-'}</td><td style={{padding: '10px', fontWeight: 'bold', color: '#b45309'}}>{r.qty_sent || r.qtySent || r.ir_sent || '-'}</td>
-                  <td style={{padding: '10px'}}>
-                    <button type="button" onClick={() => handleEdit(r)} style={{marginRight: '8px', cursor: 'pointer', border: 'none', background: 'none'}}>✏️</button>
-                    <button type="button" onClick={() => handleDelete(r.id, deptKey)} style={{cursor: 'pointer', border: 'none', background: 'none'}}>🗑️</button>
-                  </td>
-                </tr>
-              ))}
+              {records.map((r, i) => {
+                const isScrap = isScrapStation(r.next_station || r.nextStation);
+                return (
+                  <tr key={i} style={{borderBottom: '1px solid #e2e8f0', background: i % 2 === 0 ? '#fff' : '#f8fafc', transition: 'background 0.2s'}} onMouseEnter={(e) => e.currentTarget.style.background = '#e2e8f0'} onMouseLeave={(e) => e.currentTarget.style.background = i % 2 === 0 ? '#fff' : '#f8fafc'}>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.mo || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold'}}>{r.bearing_type || r.type || r.item_type || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.in_date || r.inDate || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.material_in_from || r.materialInFrom || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '2px solid #cbd5e1', fontWeight: 'bold', color: '#1d4ed8', background: '#eff6ff'}}>{r.qty_in || r.qtyIn || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0'}}>{r.out_date || r.outDate || '-'}</td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', color: isScrap ? '#dc2626' : '#334155', fontWeight: isScrap ? 'bold' : 'normal'}}>
+                      {r.next_station || r.nextStation || '-'}
+                      {isScrap && <span style={{marginLeft: '5px', fontSize: '0.8em'}}>⚠️</span>}
+                    </td>
+                    <td style={{padding: '12px 15px', borderRight: '1px solid #e2e8f0', fontWeight: 'bold', color: '#b45309', background: '#fffbeb'}}>{r.qty_sent || r.qtySent || r.ir_sent || '-'}</td>
+                    <td style={{padding: '12px 15px'}}>
+                      <button type="button" onClick={() => handleEdit(r)} style={{marginRight: '8px', cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Edit">✏️</button>
+                      <button type="button" onClick={() => handleDelete(r.id, deptKey)} style={{cursor: 'pointer', border: 'none', background: 'none', fontSize: '1.2em'}} title="Delete">🗑️</button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -251,12 +400,21 @@ const Afterchannel = () => {
   return (
     <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
       <datalist id="depts-list"><option value="Accurate" /><option value="CPS" /><option value="Rework" /><option value="Dismantling" /><option value="Autopackaging" /><option value="FPS" /><option value="Scrap" /></datalist>
+      <datalist id="channels-list">
+        {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
+      </datalist>
+      <datalist id="mo-list">
+        {dynamicMosList.map(mo => <option key={mo} value={mo} />)}
+      </datalist>
+      <datalist id="variants-list">
+        {dynamicVariantsList.map(v => <option key={v} value={v} />)}
+      </datalist>
       
       <div className="ac-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', borderBottom: '2px solid #cbd5e1', paddingBottom: '10px'}}>
         <h1 style={{fontSize: '1.6em', color: '#0f172a'}}>Afterchannel Processing</h1>
         <div className="tab-buttons" style={{display: 'flex', gap: '10px', flexWrap: 'wrap'}}>
           {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
-            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setBearingFamily(''); resetComponentScrapStates();}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>{tab.toUpperCase()}</button>
+            <button key={tab} className={activeTab === tab ? 'active' : ''} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily(''); resetComponentScrapStates();}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === tab ? '#0f172a' : '#e2e8f0', color: activeTab === tab ? '#fff' : '#000', border: 'none', borderRadius: '4px', fontWeight: '600'}}>{tab.toUpperCase()}</button>
           ))}
           <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === 'summary' ? '#16a34a' : '#bbf7d0', color: activeTab === 'summary' ? '#fff' : '#14532d', border: 'none', borderRadius: '4px', fontWeight: 'bold'}}>📊 SUMMARY</button>
         </div>
@@ -265,8 +423,18 @@ const Afterchannel = () => {
       {activeTab !== 'summary' && (
         <div style={{marginBottom: '20px', background: '#f8fafc', padding: '15px', borderRadius: '8px', border: '1px solid #e2e8f0'}}>
           <div style={{display: 'flex', gap: '20px'}}>
-            <div style={{flex: 1}}><label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Variant / Item Type</label><input value={selectedVariant} onChange={(e)=>setSelectedVariant(e.target.value)} placeholder="Type Variant..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required /></div>
-            <div style={{flex: 1}}><label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>MO Number</label><input value={moNumber} onChange={(e) => setMoNumber(e.target.value)} placeholder="Type MO..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required /></div>
+            <div style={{flex: 1}}>
+              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Variant</label>
+              <input list="variants-list" value={selectedVariant} onChange={handleVariantChange} placeholder="Select or Type Variant..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+            </div>
+            <div style={{flex: 1}}>
+              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>MO Number</label>
+              <input list="mo-list" value={moNumber} onChange={(e) => setMoNumber(e.target.value)} onBlur={handleMoBlur} placeholder="Select or Type MO..." style={{width: '100%', padding: '8px', border: '1px solid #cbd5e1', borderRadius: '4px'}} required />
+            </div>
+            <div style={{flex: 1}}>
+              <label style={{display: 'block', fontWeight: '600', marginBottom: '5px'}}>Target Production Qty</label>
+              <input type="text" value={actualProductionQty > 0 ? actualProductionQty.toLocaleString() : '0'} readOnly style={{width: '100%', padding: '8px', background: '#e2e8f0', border: '1px solid #cbd5e1', borderRadius: '4px', fontWeight: 'bold', color: '#16a34a'}} />
+            </div>
           </div>
           <div style={{display: 'flex', gap: '20px', marginTop: '15px', paddingTop: '15px', borderTop: '1px dashed #cbd5e1'}}>
             <button type="button" onClick={() => setEntryMode('IN')} style={{padding: '8px 20px', background: entryMode === 'IN' ? '#2563eb' : '#fff', color: entryMode === 'IN' ? '#fff' : '#2563eb', border: '2px solid #2563eb', borderRadius: '4px', fontWeight: 'bold', cursor: 'pointer'}}>📥 LOG IN (Receiving)</button>
@@ -277,7 +445,7 @@ const Afterchannel = () => {
       )}
 
       <div className="ac-content">
-        {/* OTHER TABS SIMPLIFIED FOR BREVITY, DISMANTLING FULLY EXPANDED */}
+        {/* OTHER TABS */}
         {['accurate', 'cps', 'rework', 'autopackaging', 'fps'].includes(activeTab) && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, activeTab)}>
@@ -286,17 +454,24 @@ const Afterchannel = () => {
                 <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
                     {entryMode === 'IN' ? (
                       <>
-                        <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                        {activeTab === 'cps' && <div><label>Item</label><select name="item" defaultValue={editingRecord?.item_type || ''} style={{width:'100%', padding:'6px'}}><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>}
+                        <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                         <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                        {activeTab === 'cps' && <div><label>RC No</label><input type="text" name="rcNo" defaultValue={editingRecord?.rc_no || ''} style={{width:'100%', padding:'6px'}}/></div>}
+                        {activeTab === 'accurate' && <div><label>PC No</label><input type="text" name="pc" defaultValue={editingRecord?.pc_no || ''} style={{width:'100%', padding:'6px'}}/></div>}
                         <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
+                        {activeTab === 'cps' && <div><label>Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} style={{width:'100%', padding:'6px'}}/></div>}
                         <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                        {activeTab === 'fps' && <div><label>Customer Order</label><input type="text" name="customerOrder" defaultValue={editingRecord?.customer_order || ''} style={{width:'100%', padding:'6px'}}/></div>}
                       </>
                     ) : (
                       <>
-                        <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
+                        {activeTab === 'fps' ? (
+                          <div><label>Customer Order</label><input type="text" name="customerOrder" defaultValue={editingRecord?.customer_order || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                        ) : (
+                          <div><label>Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} style={{width:'100%', padding:'6px'}}/></div>
+                        )}
                         <div><label>Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} style={{width:'100%', padding:'6px'}} required/></div>
-                        <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                        <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                         <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                       </>
                     )}
@@ -321,7 +496,7 @@ const Afterchannel = () => {
                 <fieldset style={{border: '1px solid #cbd5e1', padding: '15px', borderRadius: '6px'}}>
                   <legend style={{fontWeight: 'bold'}}>Dismantling - Receiving Log</legend>
                   <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '15px'}}>
-                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                     <div><label>Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} style={{width:'100%', padding:'6px'}} required/></div>
@@ -367,7 +542,7 @@ const Afterchannel = () => {
                     <div><label>Overall Qty Sent (Optional)</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent||''} style={{width:'100%', padding:'6px'}}/></div>
                     <div><label>Next Station (Overall)</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station||''} style={{width:'100%', padding:'6px'}}/></div>
                     <div style={{gridColumn: 'span 1'}}><label>Remarks</label><input type="text" name="remark" value={remarkVal} onChange={e=>setRemarkVal(e.target.value)} style={{width:'100%', padding:'6px'}} placeholder="General remarks..."/></div>
-                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date||''} style={{width:'100%', padding:'6px'}} required/></div>
+                    <div><label>Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date||''} onChange={(e) => setFormDate(e.target.value)} style={{width:'100%', padding:'6px'}} required/></div>
                     <div><label>Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out||''} style={{width:'100%', padding:'6px'}}><option></option><option>1</option><option>2</option><option>3</option></select></div>
                   </div>
                 </fieldset>

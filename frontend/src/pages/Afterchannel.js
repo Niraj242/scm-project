@@ -8,23 +8,18 @@ const Afterchannel = () => {
   const [entryMode, setEntryMode] = useState('IN'); 
   const [moCache, setMoCache] = useState({});
   const [ledgers, setLedgers] = useState({ accurate: [], cps: [], rework: [], dismantling: [], autopackaging: [], fps: [] });
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedMoDetail, setSelectedMoDetail] = useState(null);
-
+  
   const [moNumber, setMoNumber] = useState('');
-  const [availableMos, setAvailableMos] = useState([]);
   const [selectedVariant, setSelectedVariant] = useState('');
   const [actualProductionQty, setActualProductionQty] = useState(0);
   
   const [editingRecord, setEditingRecord] = useState(null);
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
+  const [expandedMoRow, setExpandedMoRow] = useState(null); // Track clicked MO in summary
 
   const [formDate, setFormDate] = useState('');
-
-  // Top Level Family state for Rework/Dismantling
   const [bearingFamily, setBearingFamily] = useState(''); 
 
-  // Component states
   const [irScrapVal, setIrScrapVal] = useState('');
   const [orScrapVal, setOrScrapVal] = useState('');
   const [cageScrapVal, setCageScrapVal] = useState('');
@@ -100,7 +95,6 @@ const Afterchannel = () => {
     }, 0);
   };
 
-  // Two-way cross filter engines
   const allUniqueVariants = [...new Set(Object.values(moCache).flatMap(rows => rows.map(r => getTypeFromRow(r))))].filter(Boolean);
   const allUniqueMos = Object.keys(moCache);
 
@@ -201,11 +195,11 @@ const Afterchannel = () => {
     setBearingFamily(record.bearing_family || record.bearingFamily || '');
     setEntryMode((record.qty_sent || record.qtySent) ? 'OUT' : 'IN');
     
-    setIrScrapVal(record.ir_scrap !== undefined && record.ir_scrap !== null ? record.ir_scrap : '');
-    setOrScrapVal(record.or_scrap !== undefined && record.or_scrap !== null ? record.or_scrap : '');
-    setCageScrapVal(record.cage_scrap !== undefined && record.cage_scrap !== null ? record.cage_scrap : '');
-    setBallScrapVal(record.ball_scrap !== undefined && record.ball_scrap !== null ? record.ball_scrap : '');
-    setRollerScrapVal(record.roller_scrap !== undefined && record.roller_scrap !== null ? record.roller_scrap : '');
+    setIrScrapVal(record.ir_scrap ?? '');
+    setOrScrapVal(record.or_scrap ?? '');
+    setCageScrapVal(record.cage_scrap ?? '');
+    setBallScrapVal(record.ball_scrap ?? '');
+    setRollerScrapVal(record.roller_scrap ?? '');
     setRemarkVal(record.remark || '');
     setCustomQtySent(record.qty_sent || record.qtySent || '');
 
@@ -228,75 +222,40 @@ const Afterchannel = () => {
   };
 
   const isScrapStation = (val) => String(val || '').trim().toLowerCase().includes('scrap');
-  const matchVariant = (l, v) => {
-    const lType = String(l.bearing_type || l.type || l.bearingType || l.variant || '').replace(/\s+/g, '').toUpperCase();
-    const vType = String(v).replace(/\s+/g, '').toUpperCase();
-    return lType === vType || lType === ''; 
-  };
 
   const generateSummaryData = () => {
     const summaryMap = {};
-    const allLists = [...ledgers.accurate, ...ledgers.cps, ...ledgers.rework, ...ledgers.dismantling, ...ledgers.autopackaging, ...ledgers.fps];
+    const allLists = [...ledgers.rework, ...ledgers.dismantling, ...ledgers.cps, ...ledgers.accurate, ...ledgers.autopackaging, ...ledgers.fps];
     
     allLists.forEach(item => {
       if (!item.mo) return;
       if (!summaryMap[item.mo]) {
         summaryMap[item.mo] = {
           mo: item.mo,
-          accIn: 0, accOut: 0, cpsIn: 0, cpsOut: 0, rwIn: 0, rwOut: 0,
-          disIn: 0, disOut: 0, apIn: 0, apOut: 0, fpsIn: 0, fpsOut: 0,
+          rwIn: 0, rwOut: 0,
+          disIn: 0, disOut: 0,
+          cpsIn: 0, cpsOut: 0,
+          accIn: 0, accOut: 0,
+          apIn: 0, apOut: 0,
+          fpsIn: 0, fpsOut: 0,
           irScrap: 0, orScrap: 0, cageScrap: 0, ballScrap: 0, totalScrap: 0
         };
       }
     });
 
-    ledgers.accurate.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.accIn += Number(r.qty_in);
-      if (r.qty_sent) node.accOut += Number(r.qty_sent);
-    });
-
-    ledgers.cps.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.cpsIn += Number(r.qty_in);
-      if (r.qty_sent) node.cpsOut += Number(r.qty_sent);
-    });
-
-    ledgers.rework.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.rwIn += Number(r.qty_in);
-      if (r.qty_sent) node.rwOut += Number(r.qty_sent);
-    });
-
+    ledgers.rework.forEach(r => { if(r.qty_in) summaryMap[r.mo].rwIn += Number(r.qty_in); if(r.qty_sent) summaryMap[r.mo].rwOut += Number(r.qty_sent); });
     ledgers.dismantling.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.disIn += Number(r.qty_in);
-      if (r.qty_sent) node.disOut += Number(r.qty_sent);
-      
-      // Strict Number parsing to ensure scrap sums properly
-      node.irScrap += (Number(r.ir_scrap) || 0);
-      node.orScrap += (Number(r.or_scrap) || 0);
-      node.cageScrap += (Number(r.cage_scrap) || 0);
-      node.ballScrap += (Number(r.ball_scrap) || 0) + (Number(r.roller_scrap) || 0);
+      if(r.qty_in) summaryMap[r.mo].disIn += Number(r.qty_in);
+      if(r.qty_sent) summaryMap[r.mo].disOut += Number(r.qty_sent);
+      summaryMap[r.mo].irScrap += (Number(r.ir_scrap) || 0);
+      summaryMap[r.mo].orScrap += (Number(r.or_scrap) || 0);
+      summaryMap[r.mo].cageScrap += (Number(r.cage_scrap) || 0);
+      summaryMap[r.mo].ballScrap += (Number(r.ball_scrap) || 0) + (Number(r.roller_scrap) || 0);
     });
-
-    ledgers.autopackaging.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.apIn += Number(r.qty_in);
-      if (r.qty_sent) node.apOut += Number(r.qty_sent);
-    });
-
-    ledgers.fps.forEach(r => {
-      const node = summaryMap[r.mo];
-      if (!node) return;
-      if (r.qty_in) node.fpsIn += Number(r.qty_in);
-      if (r.qty_sent) node.fpsOut += Number(r.qty_sent);
-    });
+    ledgers.cps.forEach(r => { if(r.qty_in) summaryMap[r.mo].cpsIn += Number(r.qty_in); if(r.qty_sent) summaryMap[r.mo].cpsOut += Number(r.qty_sent); });
+    ledgers.accurate.forEach(r => { if(r.qty_in) summaryMap[r.mo].accIn += Number(r.qty_in); if(r.qty_sent) summaryMap[r.mo].accOut += Number(r.qty_sent); });
+    ledgers.autopackaging.forEach(r => { if(r.qty_in) summaryMap[r.mo].apIn += Number(r.qty_in); if(r.qty_sent) summaryMap[r.mo].apOut += Number(r.qty_sent); });
+    ledgers.fps.forEach(r => { if(r.qty_in) summaryMap[r.mo].fpsIn += Number(r.qty_in); if(r.qty_sent) summaryMap[r.mo].fpsOut += Number(r.qty_sent); });
 
     Object.keys(summaryMap).forEach(key => {
       const s = summaryMap[key];
@@ -315,6 +274,44 @@ const Afterchannel = () => {
     const list = ledgers[activeTab] || [];
     if (!ledgerSearchQuery.trim()) return list;
     return list.filter(item => (item.mo || '').toLowerCase().includes(ledgerSearchQuery.toLowerCase()));
+  };
+
+  const renderMoDispatchDetails = (mo) => {
+    const allRecords = [
+      ...ledgers.accurate.map(r => ({ ...r, sourceDept: 'Accurate' })),
+      ...ledgers.cps.map(r => ({ ...r, sourceDept: 'CPS' })),
+      ...ledgers.rework.map(r => ({ ...r, sourceDept: 'Rework' })),
+      ...ledgers.dismantling.map(r => ({ ...r, sourceDept: 'Dismantling' })),
+      ...ledgers.autopackaging.map(r => ({ ...r, sourceDept: 'Autopackaging' })),
+      ...ledgers.fps.map(r => ({ ...r, sourceDept: 'FPS' }))
+    ].filter(r => r.mo === mo && r.qty_sent > 0);
+
+    if (allRecords.length === 0) return <div style={{padding: '10px', color: '#64748b'}}>No dispatch events recorded for this MO yet.</div>;
+
+    const grouped = allRecords.reduce((acc, curr) => {
+      if(!acc[curr.sourceDept]) acc[curr.sourceDept] = [];
+      acc[curr.sourceDept].push(curr);
+      return acc;
+    }, {});
+
+    return (
+      <div style={{display: 'flex', gap: '20px', flexWrap: 'wrap', padding: '15px', background: '#f8fafc', borderBottom: '2px solid #cbd5e1', boxShadow: 'inset 0 2px 4px 0 rgb(0 0 0 / 0.05)'}}>
+        {Object.keys(grouped).map(dept => (
+          <div key={dept} style={{flex: '1 1 300px', background: '#fff', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '10px'}}>
+            <h4 style={{margin: '0 0 10px 0', color: '#0f172a', borderBottom: '1px solid #e2e8f0', paddingBottom: '5px'}}>{dept} Dispatches</h4>
+            <div style={{display: 'flex', flexDirection: 'column', gap: '8px'}}>
+              {grouped[dept].map((r, i) => (
+                <div key={i} style={{fontSize: '0.85em', background: '#f1f5f9', padding: '8px', borderRadius: '4px'}}>
+                  <strong style={{color: '#2563eb'}}>{r.qty_sent}</strong> sent to <strong>{r.next_station || 'N/A'}</strong> <br/>
+                  <span style={{color: '#64748b'}}>On: {r.out_date || r.outDate} | Shift: {r.shift_out}</span>
+                  {r.remark && <div style={{color: '#b45309', marginTop: '4px', fontStyle: 'italic'}}>{r.remark}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
   };
 
   const renderDepartmentLedger = (deptKey, deptName) => {
@@ -416,7 +413,7 @@ const Afterchannel = () => {
               {tab.toUpperCase()}
             </button>
           ))}
-          <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => {setActiveTab('summary'); setLedgerSearchQuery('');}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === 'summary' ? '#16a34a' : '#bbf7d0', color: activeTab === 'summary' ? '#fff' : '#14532d', border: 'none', borderRadius: '4px', fontWeight: 'bold'}}>
+          <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => {setActiveTab('summary'); setLedgerSearchQuery(''); setExpandedMoRow(null);}} style={{padding: '10px 15px', cursor: 'pointer', background: activeTab === 'summary' ? '#16a34a' : '#bbf7d0', color: activeTab === 'summary' ? '#fff' : '#14532d', border: 'none', borderRadius: '4px', fontWeight: 'bold'}}>
             📊 SUMMARY
           </button>
         </div>
@@ -703,25 +700,27 @@ const Afterchannel = () => {
         {activeTab === 'summary' && (
           <div className="summary-view" style={{background: '#fff', padding: '25px', borderRadius: '8px', boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)', border: '1px solid #e2e8f0'}}>
             <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '25px'}}>
-              <h2 style={{fontSize: '1.4em', margin: 0, color: '#0f172a', fontWeight: 'bold'}}>Summary Data</h2>
+              <h2 style={{fontSize: '1.4em', margin: 0, color: '#0f172a', fontWeight: 'bold'}}>Flow Distribution Summary</h2>
               <input type="text" placeholder="Search Master Order (MO)..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{padding: '10px 15px', width: '350px', border: '2px solid #cbd5e1', borderRadius: '6px', outline: 'none'}} />
             </div>
             
+            <p style={{fontStyle: 'italic', color: '#64748b', marginBottom: '15px'}}>💡 Click on any MO row to reveal the exact dispatch splits.</p>
+
             <div style={{overflowX: 'auto'}}>
-              <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.90em'}}>
+              <table style={{width: '100%', borderCollapse: 'collapse', textAlign: 'left', fontSize: '0.85em'}}>
                 <thead>
                   <tr style={{background: '#f1f5f9', borderBottom: '2px solid #cbd5e1'}}>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>MO Number</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Accurate IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Accurate OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS OUT</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1', color: '#0f172a'}}>MO Number</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Rework IN</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Rework OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Dismantling IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Dismantling OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Autopackaging IN</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Autopackaging OUT</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Dism. IN</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Dism. OUT</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS IN</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS OUT</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Acc. IN</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Acc. OUT</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Pkg. IN</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Pkg. OUT</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS IN</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS OUT</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>IR Scrap</th>
@@ -733,26 +732,42 @@ const Afterchannel = () => {
                 </thead>
                 <tbody>
                   {filteredLedgerData().map((row, index) => (
-                    <tr key={index}>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', fontWeight: 'bold', color: '#2563eb'}}>{row.mo}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.cpsIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.cpsOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.rwIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.rwOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.disIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.disOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.apIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.apOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsIn || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsOut || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.irScrap ? 'bold' : 'normal'}}>{row.irScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.orScrap ? 'bold' : 'normal'}}>{row.orScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.cageScrap ? 'bold' : 'normal'}}>{row.cageScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.ballScrap ? 'bold' : 'normal'}}>{row.ballScrap || '-'}</td>
-                      <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fee2e2', color: '#b91c1c', fontWeight:'bold'}}>{row.totalScrap || '-'}</td>
-                    </tr>
+                    <React.Fragment key={index}>
+                      <tr 
+                        onClick={() => setExpandedMoRow(expandedMoRow === row.mo ? null : row.mo)} 
+                        style={{cursor: 'pointer', background: expandedMoRow === row.mo ? '#eff6ff' : 'inherit', transition: 'background 0.2s'}}
+                        onMouseEnter={(e) => {if(expandedMoRow !== row.mo) e.currentTarget.style.background = '#f8fafc'}} 
+                        onMouseLeave={(e) => {if(expandedMoRow !== row.mo) e.currentTarget.style.background = 'inherit'}}
+                      >
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px', fontWeight: 'bold', color: '#2563eb'}}>
+                          {expandedMoRow === row.mo ? '▼ ' : '▶ '} {row.mo}
+                        </td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.rwIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.rwOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.disIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.disOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.cpsIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.cpsOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.accOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.apIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.apOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsIn || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{row.fpsOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.irScrap ? 'bold' : 'normal'}}>{row.irScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.orScrap ? 'bold' : 'normal'}}>{row.orScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.cageScrap ? 'bold' : 'normal'}}>{row.cageScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color: '#991b1b', fontWeight: row.ballScrap ? 'bold' : 'normal'}}>{row.ballScrap || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fee2e2', color: '#b91c1c', fontWeight:'bold'}}>{row.totalScrap || '-'}</td>
+                      </tr>
+                      {expandedMoRow === row.mo && (
+                        <tr>
+                          <td colSpan="18" style={{border: '1px solid #cbd5e1', padding: 0}}>
+                            {renderMoDispatchDetails(row.mo)}
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
                   ))}
                 </tbody>
               </table>

@@ -12,6 +12,20 @@ export default function MainDashboard() {
       path: "/tbe",
       icon: "T",
     },
+    
+    {
+      title: "MO Traceability",
+      desc: "End-to-end manufacturing order tracking",
+      path: "/traceability",
+      icon: "MO",
+    },
+    
+    {
+      title: "Afetr Channel Entries",
+      desc: "Dismantling, Rework, Accurate & CPS Entry",
+      path: "/afterchannel",
+      icon: "AC",
+    },
 
   ];
 

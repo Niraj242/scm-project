@@ -241,8 +241,9 @@ const Afterchannel = () => {
   // --- CORE SUMMARY HIERARCHY LOGIC ---
   const createEmptyFlowObject = () => ({
     accIn: 0, accOut: 0, cpsIn: 0, cpsOut: 0, rwIn: 0, rwOut: 0,
-    disIn: 0, disOut: 0, apIn: 0, apOut: 0, fpsIn: 0, fpsOut: 0,
-    irScrap: 0, orScrap: 0, cageScrap: 0, ballScrap: 0, totalScrap: 0, records: []
+    disIn: 0, disOut: 0, apIn: 0, apOut: 0, fpsIn: 0, 
+    irScrap: 0, orScrap: 0, cageScrap: 0, ballScrap: 0, totalScrap: 0, records: [],
+    irSentTot: 0, orSentTot: 0, disOutGeneral: 0
   });
 
   const addFlowCounts = (node, r) => {
@@ -252,17 +253,18 @@ const Afterchannel = () => {
     else if (dept === 'rework') { if (r.qty_in) node.rwIn += Number(r.qty_in); if (r.qty_sent) node.rwOut += Number(r.qty_sent); }
     else if (dept === 'dismantling') {
         if (r.qty_in) node.disIn += Number(r.qty_in);
-        if (r.qty_sent) node.disOut += Number(r.qty_sent);
-        if (r.ir_sent) node.disOut += Number(r.ir_sent);
-        if (r.or_sent) node.disOut += Number(r.or_sent);
-        if (r.cage_sent) node.disOut += Number(r.cage_sent);
-        if (r.roller_sent) node.disOut += Number(r.roller_sent);
+        
+        // Track the general overall amount, and individual IR/OR amounts separately for the "Lower Quantity" calculation
+        if (r.qty_sent) node.disOutGeneral += Number(r.qty_sent);
+        if (r.ir_sent) node.irSentTot += Number(r.ir_sent);
+        if (r.or_sent) node.orSentTot += Number(r.or_sent);
+
         node.irScrap += (Number(r.ir_scrap) || 0); node.orScrap += (Number(r.or_scrap) || 0);
         node.cageScrap += (Number(r.cage_scrap) || 0); node.ballScrap += (Number(r.ball_scrap) || 0) + (Number(r.roller_scrap) || 0);
         node.totalScrap = node.irScrap + node.orScrap + node.cageScrap + node.ballScrap;
     }
     else if (dept === 'autopackaging') { if (r.qty_in) node.apIn += Number(r.qty_in); if (r.qty_sent) node.apOut += Number(r.qty_sent); }
-    else if (dept === 'fps') { if (r.qty_in) node.fpsIn += Number(r.qty_in); if (r.qty_sent) node.fpsOut += Number(r.qty_sent); }
+    else if (dept === 'fps') { if (r.qty_in) node.fpsIn += Number(r.qty_in); } // FPS Out logic removed entirely
   };
 
   const generateSummaryData = () => {
@@ -286,6 +288,14 @@ const Afterchannel = () => {
       addFlowCounts(summaryMap[mo].variants[variant], item);
       addFlowCounts(summaryMap[mo].totals, item);
       summaryMap[mo].variants[variant].records.push(item);
+    });
+
+    // Post-calculation: Make Dismantling OUT purely equal to the lower count of (Total IR Sent+Scrap vs Total OR Sent+Scrap) + general OUT.
+    Object.values(summaryMap).forEach(moData => {
+      moData.totals.disOut = moData.totals.disOutGeneral + Math.min(moData.totals.irSentTot + moData.totals.irScrap, moData.totals.orSentTot + moData.totals.orScrap);
+      Object.values(moData.variants).forEach(vData => {
+        vData.disOut = vData.disOutGeneral + Math.min(vData.irSentTot + vData.irScrap, vData.orSentTot + vData.orScrap);
+      });
     });
 
     let result = Object.values(summaryMap).sort((a, b) => a.mo.localeCompare(b.mo));
@@ -399,7 +409,8 @@ const Afterchannel = () => {
 
   return (
     <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
-      <datalist id="depts-list"><option value="Accurate" /><option value="CPS" /><option value="Rework" /><option value="Dismantling" /><option value="Autopackaging" /><option value="FPS" /><option value="Scrap" /></datalist>
+      {/* Added "Channel" to the depts-list so it works across all Next Station inputs */}
+      <datalist id="depts-list"><option value="Channel" /><option value="Accurate" /><option value="CPS" /><option value="Rework" /><option value="Dismantling" /><option value="Autopackaging" /><option value="FPS" /><option value="Scrap" /></datalist>
       <datalist id="channels-list">
         {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
       </datalist>
@@ -445,7 +456,6 @@ const Afterchannel = () => {
       )}
 
       <div className="ac-content">
-        {/* OTHER TABS */}
         {['accurate', 'cps', 'rework', 'autopackaging', 'fps'].includes(activeTab) && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, activeTab)}>
@@ -571,7 +581,8 @@ const Afterchannel = () => {
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS IN</th><th style={{padding: '10px', border: '1px solid #cbd5e1'}}>CPS OUT</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Acc IN</th><th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Acc OUT</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Pkg IN</th><th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Pkg OUT</th>
-                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS IN</th><th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS OUT</th>
+                    <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS IN</th>
+                    {/* FPS OUT Removed as requested */}
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>IR Scrp</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>OR Scrp</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>Cg Scrp</th>
@@ -586,11 +597,11 @@ const Afterchannel = () => {
                       <tr onClick={() => setExpandedMOs(p => ({...p, [moData.mo]: !p[moData.mo]}))} style={{cursor: 'pointer', background: expandedMOs[moData.mo] ? '#e2e8f0' : '#f8fafc', fontWeight: 'bold', color: '#1e293b'}}>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{expandedMOs[moData.mo] ? '▼' : '▶'} {moData.mo}</td>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.rwIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.rwOut || '-'}</td>
-                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.disIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.disOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.disIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px', color: '#1d4ed8'}}>{moData.totals.disOut || '-'}</td>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.cpsIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.cpsOut || '-'}</td>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.accIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.accOut || '-'}</td>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.apIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.apOut || '-'}</td>
-                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.fpsIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.fpsOut || '-'}</td>
+                        <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{moData.totals.fpsIn || '-'}</td>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color:'#991b1b'}}>{moData.totals.irScrap || '-'}</td>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color:'#991b1b'}}>{moData.totals.orScrap || '-'}</td>
                         <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color:'#991b1b'}}>{moData.totals.cageScrap || '-'}</td>
@@ -606,11 +617,11 @@ const Afterchannel = () => {
                             <tr onClick={() => setExpandedVariants(p => ({...p, [vKey]: !p[vKey]}))} style={{cursor: 'pointer', background: '#ffffff', color: '#334155'}}>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px 10px 10px 25px', borderLeft: '4px solid #3b82f6', fontWeight: 'bold'}}>{expandedVariants[vKey] ? '▼' : '▶'} {variant}</td>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.rwIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.rwOut || '-'}</td>
-                              <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.disIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.disOut || '-'}</td>
+                              <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.disIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px', color: '#1d4ed8'}}>{vData.disOut || '-'}</td>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.cpsIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.cpsOut || '-'}</td>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.accIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.accOut || '-'}</td>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.apIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.apOut || '-'}</td>
-                              <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.fpsIn || '-'}</td><td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.fpsOut || '-'}</td>
+                              <td style={{border: '1px solid #cbd5e1', padding: '10px'}}>{vData.fpsIn || '-'}</td>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color:'#991b1b'}}>{vData.irScrap || '-'}</td>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color:'#991b1b'}}>{vData.orScrap || '-'}</td>
                               <td style={{border: '1px solid #cbd5e1', padding: '10px', background:'#fef2f2', color:'#991b1b'}}>{vData.cageScrap || '-'}</td>
@@ -620,7 +631,7 @@ const Afterchannel = () => {
                             
                             {/* LEVEL 2: COMPONENT DISPATCH DETAILS */}
                             {expandedVariants[vKey] && (
-                              <tr><td colSpan="18" style={{border: '1px solid #cbd5e1', padding: 0}}>{renderMoDispatchDetails(vData.records)}</td></tr>
+                              <tr><td colSpan="17" style={{border: '1px solid #cbd5e1', padding: 0}}>{renderMoDispatchDetails(vData.records)}</td></tr>
                             )}
                           </React.Fragment>
                         );
@@ -631,11 +642,11 @@ const Afterchannel = () => {
                         <tr style={{background: '#cbd5e1', fontWeight: 'bold', borderTop: '2px solid #64748b', color: '#0f172a'}}>
                           <td style={{border: '1px solid #94a3b8', padding: '10px', textAlign: 'right'}}>TOTAL FOR {moData.mo}:</td>
                           <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.rwIn || '-'}</td><td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.rwOut || '-'}</td>
-                          <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.disIn || '-'}</td><td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.disOut || '-'}</td>
+                          <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.disIn || '-'}</td><td style={{border: '1px solid #94a3b8', padding: '10px', color: '#1d4ed8'}}>{moData.totals.disOut || '-'}</td>
                           <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.cpsIn || '-'}</td><td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.cpsOut || '-'}</td>
                           <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.accIn || '-'}</td><td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.accOut || '-'}</td>
                           <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.apIn || '-'}</td><td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.apOut || '-'}</td>
-                          <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.fpsIn || '-'}</td><td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.fpsOut || '-'}</td>
+                          <td style={{border: '1px solid #94a3b8', padding: '10px'}}>{moData.totals.fpsIn || '-'}</td>
                           <td colSpan="5" style={{border: '1px solid #94a3b8', padding: '10px', textAlign: 'center', background: '#fca5a5'}}>Grand Total Scrap: {moData.totals.totalScrap}</td>
                         </tr>
                       )}

@@ -21,7 +21,7 @@ export default function MainDashboard() {
     },
     
     {
-      title: "Afetr Channel Entries",
+      title: "After Channel Entries",
       desc: "Dismantling, Rework, Accurate & CPS Entry",
       path: "/afterchannel",
       icon: "AC",

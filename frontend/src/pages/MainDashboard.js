@@ -26,6 +26,13 @@ export default function MainDashboard() {
       path: "/afterchannel",
       icon: "AC",
     },
+    
+    {
+      title: "SHO Scheduling",
+      desc: "HT and FOD Scheduling",
+      path: "/sho_scheduling",
+      icon: "SHO",
+    },
 
   ];
 

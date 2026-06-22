@@ -238,7 +238,7 @@ const Afterchannel = () => {
 
   const isScrapStation = (val) => String(val || '').trim().toLowerCase().includes('scrap');
 
-  // --- CORE SUMMARY HIERARCHY LOGIC ---
+  // --- CORE SUMMARY HIERARCHY LOGIC WITH DOUBLE-COUNT PREVENTION ---
   const createEmptyFlowObject = () => ({
     accIn: 0, accOut: 0, cpsIn: 0, cpsOut: 0, rwIn: 0, rwOut: 0,
     disIn: 0, disOut: 0, apIn: 0, apOut: 0, fpsIn: 0, 
@@ -246,25 +246,52 @@ const Afterchannel = () => {
     irSentTot: 0, orSentTot: 0, disOutGeneral: 0
   });
 
+  // Prevents counting internal loops (e.g. Accurate -> Rework -> Accurate) 
+  // from continuously inflating the main flow quantities.
+  const isLoopback = (dept, val) => {
+    if (!val) return false;
+    const s = String(val).toLowerCase();
+    // Exclude flows to/from rework, dismantling, or looping into its own department
+    return s.includes('rework') || s.includes('dismantling') || s.includes('vibration') || s.includes(dept);
+  };
+
   const addFlowCounts = (node, r) => {
     const dept = r._dept;
-    if (dept === 'accurate') { if (r.qty_in) node.accIn += Number(r.qty_in); if (r.qty_sent) node.accOut += Number(r.qty_sent); }
-    else if (dept === 'cps') { if (r.qty_in) node.cpsIn += Number(r.qty_in); if (r.qty_sent) node.cpsOut += Number(r.qty_sent); }
-    else if (dept === 'rework') { if (r.qty_in) node.rwIn += Number(r.qty_in); if (r.qty_sent) node.rwOut += Number(r.qty_sent); }
-    else if (dept === 'dismantling') {
-        if (r.qty_in) node.disIn += Number(r.qty_in);
-        
-        // Track the general overall amount, and individual IR/OR amounts separately for the "Lower Quantity" calculation
-        if (r.qty_sent) node.disOutGeneral += Number(r.qty_sent);
-        if (r.ir_sent) node.irSentTot += Number(r.ir_sent);
-        if (r.or_sent) node.orSentTot += Number(r.or_sent);
+    const mFrom = r.material_in_from || r.materialInFrom;
+    const nStat = r.next_station || r.nextStation;
 
-        node.irScrap += (Number(r.ir_scrap) || 0); node.orScrap += (Number(r.or_scrap) || 0);
-        node.cageScrap += (Number(r.cage_scrap) || 0); node.ballScrap += (Number(r.ball_scrap) || 0) + (Number(r.roller_scrap) || 0);
-        node.totalScrap = node.irScrap + node.orScrap + node.cageScrap + node.ballScrap;
+    if (dept === 'accurate') { 
+      if (r.qty_in && !isLoopback('accurate', mFrom)) node.accIn += Number(r.qty_in); 
+      if (r.qty_sent && !isLoopback('accurate', nStat)) node.accOut += Number(r.qty_sent); 
     }
-    else if (dept === 'autopackaging') { if (r.qty_in) node.apIn += Number(r.qty_in); if (r.qty_sent) node.apOut += Number(r.qty_sent); }
-    else if (dept === 'fps') { if (r.qty_in) node.fpsIn += Number(r.qty_in); } // FPS Out logic removed entirely
+    else if (dept === 'cps') { 
+      if (r.qty_in && !isLoopback('cps', mFrom)) node.cpsIn += Number(r.qty_in); 
+      if (r.qty_sent && !isLoopback('cps', nStat)) node.cpsOut += Number(r.qty_sent); 
+    }
+    else if (dept === 'autopackaging') { 
+      if (r.qty_in && !isLoopback('autopackaging', mFrom)) node.apIn += Number(r.qty_in); 
+      if (r.qty_sent && !isLoopback('autopackaging', nStat)) node.apOut += Number(r.qty_sent); 
+    }
+    else if (dept === 'fps') { 
+      if (r.qty_in && !isLoopback('fps', mFrom)) node.fpsIn += Number(r.qty_in); 
+    }
+    else if (dept === 'rework') { 
+      // Rework handles loops, so we record its raw traffic
+      if (r.qty_in) node.rwIn += Number(r.qty_in); 
+      if (r.qty_sent) node.rwOut += Number(r.qty_sent); 
+    }
+    else if (dept === 'dismantling') {
+      if (r.qty_in) node.disIn += Number(r.qty_in);
+      
+      // Track the general overall amount, and individual IR/OR amounts separately for the "Lower Quantity" calculation
+      if (r.qty_sent) node.disOutGeneral += Number(r.qty_sent);
+      if (r.ir_sent) node.irSentTot += Number(r.ir_sent);
+      if (r.or_sent) node.orSentTot += Number(r.or_sent);
+
+      node.irScrap += (Number(r.ir_scrap) || 0); node.orScrap += (Number(r.or_scrap) || 0);
+      node.cageScrap += (Number(r.cage_scrap) || 0); node.ballScrap += (Number(r.ball_scrap) || 0) + (Number(r.roller_scrap) || 0);
+      node.totalScrap = node.irScrap + node.orScrap + node.cageScrap + node.ballScrap;
+    }
   };
 
   const generateSummaryData = () => {
@@ -409,7 +436,6 @@ const Afterchannel = () => {
 
   return (
     <div className="afterchannel-container" style={{padding: '20px', fontFamily: 'sans-serif'}}>
-      {/* Added "Channel" to the depts-list so it works across all Next Station inputs */}
       <datalist id="depts-list"><option value="Channel" /><option value="Accurate" /><option value="CPS" /><option value="Rework" /><option value="Dismantling" /><option value="Autopackaging" /><option value="FPS" /><option value="Scrap" /></datalist>
       <datalist id="channels-list">
         {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
@@ -582,7 +608,6 @@ const Afterchannel = () => {
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Acc IN</th><th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Acc OUT</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Pkg IN</th><th style={{padding: '10px', border: '1px solid #cbd5e1'}}>Pkg OUT</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1'}}>FPS IN</th>
-                    {/* FPS OUT Removed as requested */}
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>IR Scrp</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>OR Scrp</th>
                     <th style={{padding: '10px', border: '1px solid #cbd5e1', background:'#fee2e2'}}>Cg Scrp</th>

@@ -34,12 +34,35 @@ class SchedulePayload(BaseModel):
 # --- GOOGLE SHEET PARSING UTILITIES ---
 def fetch_sheet_as_df(base_url: str, sheet_name: str) -> pd.DataFrame:
     if not base_url:
-        raise HTTPException(status_code=500, detail="Target Google Sheet URL environment variable is unset.")
-    csv_url = base_url.replace("/edit?usp=sharing", "").replace("/edit", "") + f"/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+        raise HTTPException(status_code=500, detail="Google Sheet URL environment variable is unset. Please configure Render .env")
+    
+    # NEW FIX: Extract the exact File ID securely, regardless of how the URL ends
+    match = re.search(r"/d/([a-zA-Z0-9-_]+)", base_url)
+    if not match:
+        raise HTTPException(status_code=400, detail=f"Invalid Google Sheet URL format: {base_url}")
+    
+    file_id = match.group(1)
+    
+    # Construct the perfect CSV download URL
+    # Note: We must safely encode the sheet name in case there are spaces
+    from urllib.parse import quote
+    safe_sheet_name = quote(sheet_name.strip())
+    csv_url = f"https://docs.google.com/spreadsheets/d/{file_id}/gviz/tq?tqx=out:csv&sheet={safe_sheet_name}"
+    
     response = requests.get(csv_url)
-    if response.status_code != 200:
-        raise HTTPException(status_code=400, detail=f"Failed to read data sheet: {sheet_name}")
-    return pd.read_csv(StringIO(response.text))
+    
+    if response.status_code != 200 or "<html" in response.text[:20].lower():
+        raise HTTPException(status_code=400, detail=f"Failed to read '{sheet_name}'. Google returned a login page or error. Ensure it's 'Anyone with the link can view'.")
+    
+    # Optional: Catch if Google sends an empty CSV (just columns, no data)
+    try:
+        df = pd.read_csv(StringIO(response.text))
+        if df.empty and len(df.columns) == 0:
+            raise ValueError("Empty dataframe")
+        return df
+    except Exception as e:
+         raise HTTPException(status_code=400, detail=f"Could not parse CSV for sheet '{sheet_name}'. The sheet might be completely blank or improperly formatted. Error: {str(e)}")
+
 
 def extract_family(raw_val) -> str:
     if pd.isna(raw_val):

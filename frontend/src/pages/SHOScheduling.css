@@ -1,164 +1,70 @@
 .sho-container {
-  padding: 20px;
-  background-color: #f8fafc;
-  font-family: 'Calibri', 'Arial', sans-serif;
+  padding: 24px;
+  background-color: #f1f5f9;
+  font-family: 'Segoe UI', 'Calibri', Arial, sans-serif;
+  min-height: 100vh;
 }
 
 .sho-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: white;
-  padding: 15px 24px;
-  border-bottom: 2px solid #cbd5e1;
-  margin-bottom: 20px;
+  display: flex; justify-content: space-between; align-items: center;
+  background: #ffffff; padding: 20px 30px; border-radius: 8px;
+  box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1); margin-bottom: 24px;
+  border-left: 5px solid #0f172a;
 }
 
-.title-block h1 {
-  margin: 0;
-  font-size: 22px;
-  color: #0f172a;
+.title-block h1 { margin: 0; font-size: 24px; color: #0f172a; font-weight: 700; }
+.subtitle { margin: 4px 0 0 0; color: #64748b; font-size: 14px; }
+
+.action-block { display: flex; align-items: center; gap: 14px; font-weight: 600; color: #334155; }
+.action-block input { padding: 8px 12px; border: 2px solid #cbd5e1; border-radius: 6px; text-align: center; font-weight: 700; font-size: 14px; width: 120px;}
+.compute-button { background-color: #0f172a; color: #ffffff; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 700; }
+.compute-button:hover { background-color: #1e293b; }
+.compute-button:disabled { background-color: #94a3b8; cursor: not-allowed; }
+
+.overrides-panel {
+  display: flex; gap: 24px; background: white; padding: 16px 24px; border-radius: 8px;
+  margin-bottom: 24px; box-shadow: 0 2px 4px rgb(0 0 0 / 0.05); border: 1px solid #e2e8f0;
 }
 
-.action-block {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  font-weight: bold;
-}
+.override-section h3 { margin: 0 0 10px 0; font-size: 14px; color: #475569; text-transform: uppercase; }
 
-.action-block input {
-  padding: 6px 10px;
-  border: 1px solid #94a3b8;
-  text-align: center;
+.furnace-toggles { display: flex; gap: 10px; flex-wrap: wrap; }
+.toggle-chip {
+  padding: 6px 12px; background: #f8fafc; border: 1px solid #cbd5e1;
+  border-radius: 20px; font-size: 12px; font-weight: 600; cursor: pointer;
 }
+.toggle-chip.active { background: #fee2e2; border-color: #ef4444; color: #991b1b; }
+.toggle-chip input { display: none; }
 
-.compute-button {
-  background-color: #1e293b;
-  color: white;
-  border: none;
-  padding: 8px 16px;
-  cursor: pointer;
-  font-weight: bold;
-}
+.form-row { display: flex; gap: 10px; }
+.form-row input, .form-row select { padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 4px; font-size: 13px; }
 
-.compute-button:disabled {
-  background-color: #94a3b8;
-  cursor: not-allowed;
-}
+.error-banner { background: #fef2f2; color: #991b1b; padding: 14px 20px; border: 1px solid #fca5a5; border-radius: 6px; margin-bottom: 24px; font-size: 14px; }
 
-.error-banner {
-  background: #fee2e2;
-  color: #991b1b;
-  padding: 12px;
-  border: 1px solid #f87171;
-  margin-bottom: 15px;
-}
+/* Three Column Layout */
+.shopfloor-layout-grid { display: grid; grid-template-columns: repeat(3, minmax(350px, 1fr)); gap: 24px; align-items: start; }
+.process-zone-column { background: #ffffff; padding: 16px; border-radius: 8px; box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.05); }
 
-.table-responsive {
-  width: 100%;
-  overflow-x: auto;
-  border: 2px solid #334155;
-  background: white;
-}
+.zone-header { margin: 0 0 16px 0; font-size: 18px; font-weight: 700; padding-bottom: 10px; border-bottom: 3px solid #cbd5e1; text-transform: uppercase; }
+.face-color { color: #0284c7; border-bottom-color: #0284c7; }
+.od-color { color: #b45309; border-bottom-color: #b45309; }
+.ht-color { color: #15803d; border-bottom-color: #15803d; }
 
-/* Master Grid mimicking Excel Borders */
-.master-floor-sheet {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-}
+.machine-card-block { margin-bottom: 20px; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; }
+.machine-title-strip { padding: 8px 12px; font-weight: 700; font-size: 14px; display: flex; justify-content: space-between; }
+.face-strip { background-color: #e0f2fe; color: #0369a1; }
+.od-strip { background-color: #fef3c7; color: #92400e; }
+.ht-strip { background-color: #dcfce7; color: #166534; }
 
-.master-floor-sheet th, 
-.master-floor-sheet td {
-  border: 1px solid #94a3b8;
-  padding: 4px;
-}
+.zone-data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.zone-data-table th { background: #f8fafc; color: #64748b; font-weight: 600; text-align: left; padding: 6px 12px; border-bottom: 1px solid #e2e8f0; }
+.zone-data-table td { padding: 8px 12px; border-bottom: 1px solid #f1f5f9; color: #334155; }
+.zone-data-table tr:last-child td { border-bottom: none; }
 
-.main-header-row th {
-  background-color: #1e293b;
-  color: white;
-  text-transform: uppercase;
-  font-weight: bold;
-  padding: 8px;
-  text-align: center;
-}
+.no-load-row { text-align: center; color: #94a3b8; font-style: italic; padding: 16px !important; background: #f8fafc; }
 
-.sub-header-row th {
-  background-color: #e2e8f0;
-  color: #0f172a;
-  text-align: center;
-}
-
-.mach-header {
-  text-align: left !important;
-  font-weight: bold;
-  font-size: 14px;
-}
-
-.bg-dark-blank { 
-  background-color: #cbd5e1 !important; 
-}
-
-/* Handling the dynamic blocks inside Excel Grid */
-.block-container {
-  padding: 0 !important;
-  vertical-align: top;
-}
-
-.inner-table {
-  width: 100%;
-  border-collapse: collapse;
-  height: 100%;
-}
-
-.inner-table td {
-  border: none;
-  border-bottom: 1px solid #cbd5e1;
-  padding: 5px;
-}
-
-.inner-table tr:last-child td {
-  border-bottom: none;
-}
-
-/* Specific Cell Layouts */
-.job-cell {
-  text-align: left;
-  font-weight: bold;
-  width: 60%;
-}
-
-.center-cell {
-  text-align: center;
-  width: 20%;
-}
-
-.empty-cell {
-  text-align: center;
-  color: #94a3b8;
-  font-style: italic;
-  padding: 10px !important;
-}
-
-.font-bold { 
-  font-weight: bold; 
-  color: #000; 
-}
-
-.text-muted { 
-  color: #475569; 
-}
-
-.alt-bg { 
-  background-color: #f8fafc; 
-}
-
-.ht-bg { 
-  background-color: #fefce8; 
-}
-
-.ht-cap { 
-  background-color: #fef08a; 
-  font-weight: bold; 
-}
+.center-txt { text-align: center !important; }
+.bold-txt { font-weight: bold; color: #0f172a; }
+.qty-txt { color: #111827; font-weight: 600; }
+.text-muted { color: #64748b; }
+.prio-tag { color: #16a34a; background: #f0fdf4; padding: 2px 6px; border-radius: 4px; font-weight: 700; font-size: 11px; }

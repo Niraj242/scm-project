@@ -257,3 +257,115 @@ body {
   color: #334155;
   border: 1px solid #cbd5e1;
 }
+
+/* Master Matrix Layout Styles */
+.sho-grid-top {
+  margin-bottom: 20px;
+}
+
+.control-panel-card.compact {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 15px 20px;
+  flex-wrap: wrap;
+}
+
+.inline-form {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.inline-form label {
+  margin: 0;
+  white-space: nowrap;
+  font-weight: bold;
+}
+
+.compact-grid {
+  display: flex;
+  gap: 10px;
+}
+
+.execute-btn.small-btn {
+  padding: 10px 20px;
+  margin-top: 0;
+  width: auto;
+}
+
+.error-box {
+  margin-top: 10px;
+  padding: 12px;
+  background-color: #fee2e2;
+  color: #991b1b;
+  border-radius: 6px;
+  border: 1px solid #f87171;
+}
+
+/* Excel Sheet Table Replication */
+.excel-matrix-wrapper {
+  overflow-x: auto;
+  border: 2px solid #1e293b;
+}
+
+.excel-matrix-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'Calibri', 'Arial', sans-serif; /* Excel standard fonts */
+  font-size: 13px;
+  min-width: 1200px;
+}
+
+.excel-matrix-table th, 
+.excel-matrix-table td {
+  border: 1px solid #94a3b8;
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+
+.main-header-row th {
+  background-color: #334155;
+  color: white;
+  text-transform: uppercase;
+  font-weight: 700;
+  text-align: center;
+  font-size: 14px;
+  padding: 10px;
+}
+
+.sub-header-row th {
+  background-color: #e2e8f0;
+  color: #0f172a;
+  text-align: center;
+  font-weight: 600;
+}
+
+.excel-matrix-table td {
+  text-align: center;
+}
+
+.job-cell {
+  text-align: left !important;
+  font-weight: 600;
+  width: 15%;
+}
+
+.shift-cell, .pri-cell {
+  width: 4%;
+}
+
+.qty-cell {
+  width: 5%;
+  font-weight: 600;
+}
+
+.ch-cell {
+  width: 5%;
+  color: #475569;
+}
+
+/* Background striping for clear vertical reading */
+.alt-bg { background-color: #f8fafc; }
+.ht-bg { background-color: #fefce8; } /* Light yellow tint for HT */
+.ht-bg-alt { background-color: #fffbeb; }

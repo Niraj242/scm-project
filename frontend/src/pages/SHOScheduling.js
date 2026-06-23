@@ -100,7 +100,7 @@ const SHOScheduling = () => {
             </thead>
             <tbody>
               
-              {/* --- SECTION 1: DDS 544 / CL-46 Cell 2 / Aichelin / Castlink --- */}
+              {/* --- SECTION 1 --- */}
               <tr className="sub-header-row">
                 <th className="mach-header">DDS (544)</th>
                 <th>Shift</th><th>Pri.</th>
@@ -126,7 +126,7 @@ const SHOScheduling = () => {
                 </td>
               </tr>
 
-              {/* --- SECTION 2: Gardner 1016 / CL-46 Cell 1 / Roller / Simplicity --- */}
+              {/* --- SECTION 2 --- */}
               <tr className="sub-header-row">
                 <th className="mach-header">Gardner ( 1016 + USA 1996 )</th>
                 <th>Shift</th><th>Pri.</th>
@@ -152,7 +152,7 @@ const SHOScheduling = () => {
                 </td>
               </tr>
 
-              {/* --- SECTION 3: DDS Cell 709 / CL-46 Cell 3 / Birlec / Shoei --- */}
+              {/* --- SECTION 3 --- */}
               <tr className="sub-header-row">
                 <th className="mach-header">DDS Cell ( 709 + 1186 )</th>
                 <th>Shift</th><th>Pri.</th>
@@ -178,7 +178,7 @@ const SHOScheduling = () => {
                 </td>
               </tr>
 
-              {/* --- SECTION 4: Gardner 1601 / CL-46 Cell 4 / Unitherm --- */}
+              {/* --- SECTION 4 --- */}
               <tr className="sub-header-row">
                 <th className="mach-header">Gardner (1601)</th>
                 <th>Shift</th><th>Pri.</th>

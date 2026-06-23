@@ -251,3 +251,9 @@ body {
   background: var(--badge-od);
   color: var(--badge-od-txt);
 }
+
+.badge.furnace-badge {
+  background: #f1f5f9;
+  color: #334155;
+  border: 1px solid #cbd5e1;
+}

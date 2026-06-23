@@ -4,35 +4,26 @@ import './SHOScheduling.css';
 const SHOScheduling = () => {
   const [targetDate, setTargetDate] = useState('01 APR 2026');
   const [loading, setLoading] = useState(false);
-  const [matrixRows, setMatrixRows] = useState([]);
+  const [scheduleData, setScheduleData] = useState(null);
   const [errorMessage, setErrorMessage] = useState(null);
 
   const computeMasterSchedule = async () => {
     setLoading(true);
     setErrorMessage(null);
-    setMatrixRows([]);
+    setScheduleData(null);
 
     try {
       const API = 'https://scm-backend-pshv.onrender.com';
       const res = await fetch(`${API}/api/v1/generate-schedule`, {
         method: 'POST',
-        headers: { 
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_date: targetDate })
       });
-
-      const contentType = res.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        throw new Error("Server did not return valid JSON data.");
-      }
 
       const json = await res.json();
       
       if (res.ok && json.status === "success") {
-        // Group the data directly into your shop floor's real machine columns
-        buildMasterMatrix(json.data.grinding, json.data.heat_treatment);
+        setScheduleData(json.data);
       } else {
         setErrorMessage(json.detail || "Failed to process data sheet rules.");
       }
@@ -43,145 +34,177 @@ const SHOScheduling = () => {
     }
   };
 
-  const buildMasterMatrix = (grindingData, htData) => {
-    // 1. Group Face Grinding by Machine
-    const face_dds544 = grindingData.filter(g => g.machine === "DDS (544)");
-    const face_gardner1016 = grindingData.filter(g => g.machine.includes("1016"));
-    const face_dds709 = grindingData.filter(g => g.machine.includes("709"));
-    const face_gardner1601 = grindingData.filter(g => g.machine.includes("1601"));
+  const renderFaceBlock = (machineName) => {
+    const jobs = scheduleData.face[machineName] || [];
+    if (jobs.length === 0) return <tr><td colSpan="3" className="empty-cell">-</td></tr>;
+    return jobs.map((job, idx) => (
+      <tr key={`${machineName}-${idx}`}>
+        <td className="job-cell">{job.job}</td>
+        <td className="center-cell">{job.shift}</td>
+        <td className="center-cell">{job.priority}</td>
+      </tr>
+    ));
+  };
 
-    // 2. Group OD Grinding by Machine
-    const od_cell2 = grindingData.filter(g => g.machine.includes("Cell 2"));
-    const od_cell1 = grindingData.filter(g => g.machine.includes("Cell 1"));
-    const od_cell3 = grindingData.filter(g => g.machine.includes("Cell 3"));
-    const od_cell4 = grindingData.filter(g => g.machine.includes("Cell 4"));
+  const renderODBlock = (machineName) => {
+    const jobs = scheduleData.od[machineName] || [];
+    if (jobs.length === 0) return <tr><td colSpan="3" className="empty-cell">-</td></tr>;
+    return jobs.map((job, idx) => (
+      <tr key={`${machineName}-${idx}`}>
+        <td className="job-cell alt-bg">{job.job}</td>
+        <td className="center-cell alt-bg">{job.shift}</td>
+        <td className="center-cell alt-bg">{job.priority}</td>
+      </tr>
+    ));
+  };
 
-    // 3. Group Heat Treatment by Furnace Groupings matching your sheet columns
-    const ht_aichelin = htData.filter(h => h.furnace.includes("AICHELIN"));
-    const ht_castlink = htData.filter(h => h.furnace.includes("CASTLINK"));
-    const ht_roller = htData.filter(h => h.furnace.includes("ROLLER"));
-    const ht_simplicity = htData.filter(h => h.furnace.includes("SIMPLICITY"));
-
-    // Determine total depth required to render all assets side by side
-    const maxLength = Math.max(
-      face_dds544.length, face_gardner1016.length, face_dds709.length, face_gardner1601.length,
-      od_cell2.length, od_cell1.length, od_cell3.length, od_cell4.length,
-      ht_aichelin.length, ht_castlink.length, ht_roller.length, ht_simplicity.length
-    );
-
-    const compiledRows = [];
-    for (let i = 0; i < maxLength; i++) {
-      compiledRows.push({
-        face1: face_dds544[i] || null,
-        face2: face_gardner1016[i] || null,
-        face3: face_dds709[i] || null,
-        face4: face_gardner1601[i] || null,
-        od1: od_cell2[i] || null,
-        od2: od_cell1[i] || null,
-        od3: od_cell3[i] || null,
-        od4: od_cell4[i] || null,
-        ht1: ht_aichelin[i] || null,
-        ht2: ht_castlink[i] || null,
-        ht3: ht_roller[i] || null,
-        ht4: ht_simplicity[i] || null,
-      });
-    }
-    setMatrixRows(compiledRows);
+  const renderHTBlock = (machineName, capacity) => {
+    const jobs = scheduleData.ht[machineName] || [];
+    if (jobs.length === 0) return <tr><td colSpan="4" className="empty-cell">-</td></tr>;
+    return jobs.map((job, idx) => (
+      <tr key={`${machineName}-${idx}`}>
+        <td className="job-cell ht-bg">{job.job}</td>
+        <td className="center-cell ht-bg font-bold">{job.qty}</td>
+        <td className="center-cell ht-bg text-muted">{job.channel}</td>
+        {idx === 0 ? <td className="center-cell ht-cap" rowSpan={Math.max(1, jobs.length)}>{capacity}</td> : null}
+      </tr>
+    ));
   };
 
   return (
     <div className="sho-container">
       <header className="sho-header">
         <div className="title-block">
-          <h1>Face & OD Grinding / Heat Treatment Master Schedule</h1>
-          <p>Live Compilation Matrix from Production & Buffer Worksheets</p>
+          <h1>SHO Face / OD Grinding & HT Schedule</h1>
         </div>
         <div className="action-block">
-          <div className="date-input">
-            <label>Date Plan:</label>
-            <input type="text" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
-          </div>
+          <label>Target Date:</label>
+          <input type="text" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
           <button className="compute-button" onClick={computeMasterSchedule} disabled={loading}>
-            {loading ? 'Running Engine...' : 'Generate Shop Floor Plan'}
+            {loading ? 'Compiling Matrices...' : 'Generate Plan'}
           </button>
         </div>
       </header>
 
-      {errorMessage && (
-        <div className="error-banner">
-          <strong>Execution Alert:</strong> {errorMessage}
+      {errorMessage && <div className="error-banner"><b>Backend Error:</b> {errorMessage}</div>}
+
+      {scheduleData && (
+        <div className="table-responsive">
+          <table className="master-floor-sheet">
+            <thead>
+              <tr className="main-header-row">
+                <th colSpan="3">Face Grinding</th>
+                <th colSpan="3">OD Grinding</th>
+                <th colSpan="8">HEAT TREATMENT (DATE: {targetDate})</th>
+              </tr>
+            </thead>
+            <tbody>
+              
+              {/* --- SECTION 1: DDS 544 / CL-46 Cell 2 / Aichelin / Castlink --- */}
+              <tr className="sub-header-row">
+                <th className="mach-header">DDS (544)</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">CL -46 Cell 2 ( 0945 + 0839 )</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">AICHELIN.(896)</th>
+                <th>QTY</th><th>CH</th><th>350</th>
+                <th className="mach-header">CASTLINK FURNACE( 1018 )</th>
+                <th>QTY</th><th>CH</th><th>250</th>
+              </tr>
+              <tr>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderFaceBlock("DDS (544)")}</tbody></table>
+                </td>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderODBlock("CL-46 Cell 2 ( 0945 + 0839 )")}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container">
+                  <table className="inner-table"><tbody>{renderHTBlock("AICHELIN.(896)", 350)}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container">
+                  <table className="inner-table"><tbody>{renderHTBlock("CASTLINK FURNACE( 1018 )", 250)}</tbody></table>
+                </td>
+              </tr>
+
+              {/* --- SECTION 2: Gardner 1016 / CL-46 Cell 1 / Roller / Simplicity --- */}
+              <tr className="sub-header-row">
+                <th className="mach-header">Gardner ( 1016 + USA 1996 )</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">CL-46 Cell 1 ( 0661 + 1125 )</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">ROLLER FURNACE ( 148 )</th>
+                <th>QTY</th><th>CH</th><th>250</th>
+                <th className="mach-header">SIMPLICITY FURNACE(1238)</th>
+                <th>QTY</th><th>CH</th><th>180</th>
+              </tr>
+              <tr>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderFaceBlock("Gardner ( 1016 + USA 1996 )")}</tbody></table>
+                </td>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderODBlock("CL-46 Cell 1 ( 0661 + 1125 )")}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container">
+                  <table className="inner-table"><tbody>{renderHTBlock("ROLLER FURNACE ( 148 )", 250)}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container">
+                  <table className="inner-table"><tbody>{renderHTBlock("SIMPLICITY FURNACE(1238)", 180)}</tbody></table>
+                </td>
+              </tr>
+
+              {/* --- SECTION 3: DDS Cell 709 / CL-46 Cell 3 / Birlec / Shoei --- */}
+              <tr className="sub-header-row">
+                <th className="mach-header">DDS Cell ( 709 + 1186 )</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">CL-46 Cell 3 ( 1600 + 1903 )</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">BIRLEC FURNACE ( 1158 )</th>
+                <th>QTY</th><th>CH</th><th>170</th>
+                <th className="mach-header">SHOEI FURNACE ( 1062 )</th>
+                <th>QTY</th><th>CH</th><th>350</th>
+              </tr>
+              <tr>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderFaceBlock("DDS Cell ( 709 + 1186 )")}</tbody></table>
+                </td>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderODBlock("CL-46 Cell 3 ( 1600 + 1903 )")}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container">
+                  <table className="inner-table"><tbody>{renderHTBlock("BIRLEC FURNACE ( 1158 )", 170)}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container">
+                  <table className="inner-table"><tbody>{renderHTBlock("SHOEI FURNACE ( 1062 )", 350)}</tbody></table>
+                </td>
+              </tr>
+
+              {/* --- SECTION 4: Gardner 1601 / CL-46 Cell 4 / Unitherm --- */}
+              <tr className="sub-header-row">
+                <th className="mach-header">Gardner (1601)</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">CL-46 Cell 4 ( 170 + 1904 )</th>
+                <th>Shift</th><th>Pri.</th>
+                <th className="mach-header">AICHELIN UNITHERM ( 2033 )</th>
+                <th>QTY</th><th>CH</th><th>250</th>
+                <th colSpan="4" className="mach-header bg-dark-blank"></th>
+              </tr>
+              <tr>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderFaceBlock("Gardner (1601)")}</tbody></table>
+                </td>
+                <td colSpan="3" className="block-container">
+                  <table className="inner-table"><tbody>{renderODBlock("CL-46 Cell 4 ( 170 + 1904 )")}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container">
+                  <table className="inner-table"><tbody>{renderHTBlock("AICHELIN UNITHERM ( 2033 )", 250)}</tbody></table>
+                </td>
+                <td colSpan="4" className="block-container bg-dark-blank"></td>
+              </tr>
+
+            </tbody>
+          </table>
         </div>
       )}
-
-      <div className="matrix-view">
-        {matrixRows.length === 0 ? (
-          <div className="panel-placeholder">Awaiting execution. Click 'Generate Shop Floor Plan' above to display matrix.</div>
-        ) : (
-          <div className="table-responsive">
-            <table className="master-floor-sheet">
-              <thead>
-                {/* Level 1 Headers */}
-                <tr className="level-1-header">
-                  <th colSpan="4">Face Grinding</th>
-                  <th colSpan="4">OD Grinding</th>
-                  <th colSpan="8">Heat Treatment Section</th>
-                </tr>
-                {/* Level 2 Headers: Real Assets */}
-                <tr className="level-2-header">
-                  <th>DDS (544)</th>
-                  <th>Gardner (1016)</th>
-                  <th>DDS Cell (709)</th>
-                  <th>Gardner (1601)</th>
-                  <th>CL-46 Cell 2</th>
-                  <th>CL-46 Cell 1</th>
-                  <th>CL-46 Cell 3</th>
-                  <th>CL-46 Cell 4</th>
-                  <th colSpan="2">AICHELIN (896)</th>
-                  <th colSpan="2">CASTLINK (1018)</th>
-                  <th colSpan="2">ROLLER (148)</th>
-                  <th colSpan="2">SIMPLICITY (1238)</th>
-                </tr>
-                <tr className="level-3-header">
-                  <th>Item Run</th><th>Item Run</th><th>Item Run</th><th>Item Run</th>
-                  <th>Item Run</th><th>Item Run</th><th>Item Run</th><th>Item Run</th>
-                  <th>Type</th><th>Qty</th><th>Type</th><th>Qty</th>
-                  <th>Type</th><th>Qty</th><th>Type</th><th>Qty</th>
-                </tr>
-              </thead>
-              <tbody>
-                {matrixRows.map((row, index) => (
-                  <tr key={index}>
-                    {/* Face Columns */}
-                    <td className="cell-face">{row.face1 ? `${row.face1.family}---${row.face1.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-face">{row.face2 ? `${row.face2.family}---${row.face2.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-face">{row.face3 ? `${row.face3.family}---${row.face3.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-face">{row.face4 ? `${row.face4.family}---${row.face4.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-
-                    {/* OD Columns */}
-                    <td className="cell-od">{row.od1 ? `${row.od1.family}---${row.od1.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-od">{row.od2 ? `${row.od2.family}---${row.od2.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-od">{row.od3 ? `${row.od3.family}---${row.od3.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-od">{row.od4 ? `${row.od4.family}---${row.od4.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-
-                    {/* HT Columns (Item & Quantity paired side-by-side) */}
-                    <td className="cell-ht">{row.ht1 ? `${row.ht1.family}---${row.ht1.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-ht font-weight-bold">{row.ht1 ? row.ht1.quantity.toLocaleString() : ''}</td>
-                    
-                    <td className="cell-ht-alt">{row.ht2 ? `${row.ht2.family}---${row.ht2.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-ht-alt font-weight-bold">{row.ht2 ? row.ht2.quantity.toLocaleString() : ''}</td>
-
-                    <td className="cell-ht">{row.ht3 ? `${row.ht3.family}---${row.ht3.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-ht font-weight-bold">{row.ht3 ? row.ht3.quantity.toLocaleString() : ''}</td>
-
-                    <td className="cell-ht-alt">{row.ht4 ? `${row.ht4.family}---${row.ht4.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
-                    <td className="cell-ht-alt font-weight-bold">{row.ht4 ? row.ht4.quantity.toLocaleString() : ''}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
     </div>
   );
 };

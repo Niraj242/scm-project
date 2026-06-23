@@ -18,6 +18,7 @@ import Traceability from "./pages/Traceability";
 import TBE from "./pages/TBE"; 
 import Scrap from "./pages/Scrap"; 
 import Afterchannel from "./pages/Afterchannel"; 
+import SHOScheduling from "./pages/SHOScheduling";
 
 
 
@@ -47,6 +48,7 @@ function App() {
         <Route path="/tbe" element={<ProtectedRoute><TBE /></ProtectedRoute>} /> 
         <Route path="/scrap" element={<ProtectedRoute><Scrap /></ProtectedRoute>} /> 
         <Route path="/afterchannel" element={<ProtectedRoute><Afterchannel /></ProtectedRoute>} /> 
+        <Route path="/sho_scheduling" element={<ProtectedRoute><SHOScheduling /></ProtectedRoute>} />   
           
 
         <Route path="/inventory" element={<ProtectedRoute><Inventory /></ProtectedRoute>} />

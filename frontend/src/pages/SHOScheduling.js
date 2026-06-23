@@ -47,7 +47,6 @@ const SHOScheduling = () => {
     };
 
     try {
-      // ⚠️ USING YOUR EXACT RENDER URL TO PREVENT VERCEL 405 ERRORS
       const API = 'https://scm-backend-pshv.onrender.com';
       
       const res = await fetch(`${API}/api/v1/generate-schedule`, {
@@ -59,17 +58,17 @@ const SHOScheduling = () => {
         body: JSON.stringify(constraintPayload)
       });
       
-      // Safeguard: Check if the backend sent an HTML error page instead of JSON
       const contentType = res.headers.get("content-type");
       if (!contentType || !contentType.includes("application/json")) {
         const textError = await res.text();
-        throw new Error(`Server returned non-JSON response. This usually means the endpoint doesn't exist on the live server yet. Status: ${res.status}`);
+        throw new Error(`Server returned non-JSON response. Status: ${res.status}`);
       }
 
       const json = await res.json();
       
       if (res.ok && json.status === "success") {
-        setScheduleData(json.data);
+        // Zip the data into a matrix format suitable for the Excel layout
+        setScheduleData(buildMatrix(json.data));
       } else {
         setErrorMessage(json.detail || "Unknown error occurred on the backend during processing.");
       }
@@ -81,135 +80,137 @@ const SHOScheduling = () => {
     }
   };
 
+  // This function structures the flat lists into a side-by-side row matrix
+  const buildMatrix = (data) => {
+    const faceJobs = data.grinding.filter(g => g.process === 'Face Grinding');
+    const odJobs = data.grinding.filter(g => g.process === 'OD Grinding');
+    
+    const aichelinJobs = data.heat_treatment.filter(h => h.furnace.includes('AICHELIN'));
+    const castlinkJobs = data.heat_treatment.filter(h => h.furnace.includes('CASTLINK'));
+    const rollerJobs = data.heat_treatment.filter(h => h.furnace.includes('ROLLER'));
+
+    // Find the longest column to know how many rows the master table needs
+    const maxRows = Math.max(faceJobs.length, odJobs.length, aichelinJobs.length, castlinkJobs.length, rollerJobs.length);
+    
+    const rows = [];
+    for (let i = 0; i < maxRows; i++) {
+      rows.push({
+        face: faceJobs[i] || null,
+        od: odJobs[i] || null,
+        aichelin: aichelinJobs[i] || null,
+        castlink: castlinkJobs[i] || null,
+        roller: rollerJobs[i] || null
+      });
+    }
+    return rows;
+  };
+
   return (
     <div className="sho-dashboard">
       <header className="sho-main-header">
         <div>
           <h1>SHO Shopfloor Scheduling Console</h1>
-          <p className="subtitle">Full Logic Engine (HT, Face, OD & Batching Constraints)</p>
-        </div>
-        <div className="date-picker-box">
-          <label>Target Production Window:</label>
-          <input type="text" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
+          <p className="subtitle">Master Matrix Layout</p>
         </div>
       </header>
 
-      <div className="sho-grid">
-        {/* Input Parameters panel */}
-        <div className="control-panel-card">
-          <h2>1. Process Changeover Factors</h2>
-          <p className="section-desc">Toggle furnaces requiring Quenching Temp change (+1.5 Hrs Setup Adjustment):</p>
-          
-          <div className="furnace-selection-grid">
-            {Object.keys(tempChangeFurnaces).map(f => (
-              <label key={f} className={`furnace-chip ${tempChangeFurnaces[f] ? 'active' : ''}`}>
-                <input type="checkbox" checked={tempChangeFurnaces[f]} onChange={() => handleFurnaceToggle(f)} />
-                {f}
-              </label>
-            ))}
+      <div className="sho-grid-top">
+        <div className="control-panel-card compact">
+          <div className="date-picker-box inline-form">
+            <label>Date:</label>
+            <input type="text" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
           </div>
 
-          <hr className="divider" />
-
-          <h2>2. Manual Overrides & Priorities</h2>
-          <div className="form-group">
-            <label>Target Equipment:</label>
-            <select name="machine_id" value={overrides.machine_id} onChange={handleInputChange}>
-              <option value="DDS (544)">Face Grinding - DDS (544)</option>
-              <option value="CL-46 (1125+661)">OD Grinding - CL-46 (1125+661)</option>
-            </select>
-          </div>
-
-          <div className="form-group">
-            <label>Force Priority Type:</label>
-            <input type="text" name="priority_type" placeholder="e.g. 6310" value={overrides.priority_type} onChange={handleInputChange} />
-          </div>
-
-          <div className="form-dual-row">
-            <div className="form-group">
-              <label>Run Job A:</label>
-              <input type="text" name="before_job" placeholder="e.g. 32212" value={overrides.before_job} onChange={handleInputChange} />
-            </div>
-            <div className="form-group">
-              <label>Before Job B:</label>
-              <input type="text" name="after_job" placeholder="e.g. 32215" value={overrides.after_job} onChange={handleInputChange} />
+          <div className="inline-form">
+            <label>Temp Change (+1.5h):</label>
+            <div className="furnace-selection-grid compact-grid">
+              {Object.keys(tempChangeFurnaces).map(f => (
+                <label key={f} className={`furnace-chip ${tempChangeFurnaces[f] ? 'active' : ''}`}>
+                  <input type="checkbox" checked={tempChangeFurnaces[f]} onChange={() => handleFurnaceToggle(f)} />
+                  {f}
+                </label>
+              ))}
             </div>
           </div>
 
-          <button className="execute-btn" onClick={triggerScheduleGeneration} disabled={loading}>
-            {loading ? 'Executing Scheduling Engine...' : 'Compute Production Sequences'}
+          <button className="execute-btn small-btn" onClick={triggerScheduleGeneration} disabled={loading}>
+            {loading ? 'Computing...' : 'Generate Matrix'}
           </button>
-
-          {/* Error Display Box */}
-          {errorMessage && (
-            <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fee2e2', color: '#991b1b', borderRadius: '8px', border: '1px solid #f87171', fontSize: '13px', lineHeight: '1.5' }}>
-              <strong>Error:</strong> {errorMessage}
-            </div>
-          )}
         </div>
+        
+        {errorMessage && (
+          <div className="error-box">
+            <strong>Error:</strong> {errorMessage}
+          </div>
+        )}
+      </div>
 
-        {/* Outputs Grid Visualization View */}
-        <div className="results-display-panel">
-          <h2>Active Compiled Floor Run-Sheet Output</h2>
-          
-          {!scheduleData && !errorMessage && <div className="empty-state">Ready to compute. Awaiting input...</div>}
+      <div className="results-display-panel">
+        {!scheduleData && !errorMessage && <div className="empty-state">Matrix ready to compute...</div>}
 
-          {scheduleData && (
-            <div className="schedule-tables-wrapper">
-              <h3>Heat Treatment Department (Furnace Allocation)</h3>
-              <table className="output-data-table">
-                <thead>
-                  <tr>
-                    <th>Channel</th>
-                    <th>Family</th>
-                    <th>Target Qty</th>
-                    <th>Assigned Furnace</th>
-                    <th>Load Entry (Hr)</th>
-                    <th>Unload Exit (Hr)</th>
+        {scheduleData && (
+          <div className="excel-matrix-wrapper">
+            <table className="excel-matrix-table">
+              <thead>
+                {/* Header Row 1: Main Categories */}
+                <tr className="main-header-row">
+                  <th colSpan="3">Face Grinding</th>
+                  <th colSpan="3">OD Grinding</th>
+                  <th colSpan="9">HEAT TREATMENT (DATE: {targetDate})</th>
+                </tr>
+                
+                {/* Header Row 2: Equipment / Priority */}
+                <tr className="sub-header-row">
+                  <th>DDS (544)</th>
+                  <th>Shift</th>
+                  <th>Pri.</th>
+                  <th>CL-46 Cell</th>
+                  <th>Shift</th>
+                  <th>Pri.</th>
+                  <th>AICHELIN (896)</th>
+                  <th>QTY</th>
+                  <th>CH</th>
+                  <th>CASTLINK (1018)</th>
+                  <th>QTY</th>
+                  <th>CH</th>
+                  <th>ROLLER</th>
+                  <th>QTY</th>
+                  <th>CH</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scheduleData.map((row, index) => (
+                  <tr key={index}>
+                    {/* Face Grinding */}
+                    <td className="job-cell">{row.face ? `${row.face.family}---${row.face.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
+                    <td className="shift-cell"></td>
+                    <td className="pri-cell"></td>
+
+                    {/* OD Grinding */}
+                    <td className="job-cell alt-bg">{row.od ? `${row.od.family}---${row.od.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
+                    <td className="shift-cell alt-bg"></td>
+                    <td className="pri-cell alt-bg"></td>
+
+                    {/* Aichelin Furnace */}
+                    <td className="job-cell ht-bg">{row.aichelin ? `${row.aichelin.family}---${row.aichelin.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
+                    <td className="qty-cell ht-bg">{row.aichelin ? row.aichelin.quantity : ''}</td>
+                    <td className="ch-cell ht-bg">{row.aichelin ? row.aichelin.channel : ''}</td>
+
+                    {/* Castlink Furnace */}
+                    <td className="job-cell ht-bg-alt">{row.castlink ? `${row.castlink.family}---${row.castlink.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
+                    <td className="qty-cell ht-bg-alt">{row.castlink ? row.castlink.quantity : ''}</td>
+                    <td className="ch-cell ht-bg-alt">{row.castlink ? row.castlink.channel : ''}</td>
+
+                    {/* Roller Furnace */}
+                    <td className="job-cell ht-bg">{row.roller ? `${row.roller.family}---${row.roller.channel.includes('CH') ? 'OR' : 'IR'}` : ''}</td>
+                    <td className="qty-cell ht-bg">{row.roller ? row.roller.quantity : ''}</td>
+                    <td className="ch-cell ht-bg">{row.roller ? row.roller.channel : ''}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {scheduleData.heat_treatment.map((r, i) => (
-                    <tr key={i}>
-                      <td>{r.channel}</td>
-                      <td><b>{r.family}</b></td>
-                      <td>{r.quantity.toLocaleString()} pcs</td>
-                      <td><span className="badge furnace-badge">{r.furnace}</span></td>
-                      <td>{r.start.toFixed(2)}</td>
-                      <td>{r.end.toFixed(2)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-
-              <h3>FOD Grinding Department (Dynamic Routing)</h3>
-              <table className="output-data-table grinding-table">
-                <thead>
-                  <tr>
-                    <th>Assigned Station</th>
-                    <th>Operation Stage</th>
-                    <th>Channel Origin</th>
-                    <th>Component</th>
-                    <th>Start Timestamp</th>
-                    <th>Completion Timeout</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {scheduleData.grinding.map((r, i) => (
-                    <tr key={i}>
-                      <td>{r.machine}</td>
-                      <td><span className={`badge ${r.process.toLowerCase().replace(' ', '-')}`}>{r.process}</span></td>
-                      <td>{r.channel}</td>
-                      <td><b>{r.family}</b></td>
-                      <td>{r.start.toFixed(2)} Hr</td>
-                      <td>{r.end.toFixed(2)} Hr</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

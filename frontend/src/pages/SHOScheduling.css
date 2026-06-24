@@ -99,3 +99,24 @@
 .debug-panel li {
   margin-bottom: 4px;
 }
+
+.calendar-picker {
+  padding: 8px 12px;
+  border: 2px solid #cbd5e1;
+  border-radius: 6px;
+  font-family: inherit;
+  font-weight: 700;
+  color: #0f172a;
+  background-color: #f8fafc;
+  cursor: pointer;
+}
+.calendar-picker:focus {
+  outline: none;
+  border-color: #0284c7;
+}
+.toggle-chip {
+  transition: all 0.2s ease-in-out;
+}
+.toggle-chip:hover {
+  background: #e2e8f0;
+}

@@ -1,28 +1,30 @@
 .sho-wrapper { padding: 10px; background-color: #f3f2f1; font-family: 'Calibri', 'Segoe UI', Arial, sans-serif; min-height: 100vh; }
-.top-nav { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 12px 20px; border-bottom: 1px solid #d2d0ce; margin-bottom: 15px; }
+.top-nav { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 12px 20px; border-bottom: 1px solid #d2d0ce; margin-bottom: 15px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
 .tabs button { background: none; border: none; padding: 10px 20px; font-size: 15px; cursor: pointer; border-bottom: 3px solid transparent; color: #605e5c; }
 .tabs button.active { font-weight: bold; color: #0078d4; border-bottom: 3px solid #0078d4; }
 .actions { display: flex; gap: 15px; align-items: center; font-size: 13px; }
-.actions select { padding: 4px; border: 1px solid #8a8886; }
-.btn-save { background: #fff; border: 1px solid #8a8886; padding: 5px 15px; cursor: pointer; }
-.btn-run { background: #107c41; color: white; border: none; padding: 6px 20px; font-weight: bold; cursor: pointer; border-radius: 2px; }
+.actions select { padding: 4px; border: 1px solid #8a8886; border-radius: 2px;}
+.btn-save { background: #fff; border: 1px solid #8a8886; padding: 6px 15px; cursor: pointer; border-radius: 2px;}
+.btn-run { background: #107c41; color: white; border: none; padding: 7px 20px; font-weight: bold; cursor: pointer; border-radius: 2px; }
+.btn-run:disabled { background: #71b992; cursor: not-allowed; }
 
 .excel-container { background: white; border: 1px solid #c8c6c4; display: flex; flex-direction: column; overflow: hidden; }
 .toolbar { background: #f3f2f1; padding: 5px 10px; border-bottom: 1px solid #c8c6c4; }
-.toolbar button { background: none; border: none; cursor: pointer; font-size: 13px; color: #323130; }
-.table-scroll { overflow-x: auto; overflow-y: auto; max-height: calc(100vh - 120px); }
+.toolbar button { background: none; border: none; cursor: pointer; font-size: 13px; color: #323130; font-weight: 600;}
+.table-scroll { overflow-x: auto; overflow-y: auto; max-height: calc(100vh - 140px); }
 
 /* Core Excel Table Styles */
 .excel-table { border-collapse: collapse; white-space: nowrap; font-size: 13px; min-width: 100%; }
-.excel-table th, .excel-table td { border: 1px solid #d2d0ce; padding: 3px 6px; text-align: left; }
+.excel-table th, .excel-table td { border: 1px solid #d2d0ce; padding: 4px 6px; text-align: left; }
 .excel-table th { background-color: #f3f2f1; font-weight: normal; color: #323130; text-align: center; }
 .excel-table input { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 13px; text-align: center; }
-.excel-table input:focus { box-shadow: inset 0 0 0 2px #107c41; }
+.excel-table input:focus { box-shadow: inset 0 0 0 2px #107c41; background: #fff;}
 .date-cell { background: #f3f2f1; text-align: center; font-weight: bold; width: 90px; }
 .center { text-align: center !important; }
 .bold-cell { font-weight: bold; background: #f9f9f9; }
 .blank-cell { border: none !important; background: white !important; }
-.divider-col { width: 20px; background: white !important; border-top: none !important; border-bottom: none !important; }
+.divider-col { width: 25px; background: white !important; border-top: none !important; border-bottom: none !important; }
+.job-cell { font-weight: 500; min-width: 180px; }
 
 /* Buffer Sheet specific */
 .section-head { font-weight: bold; font-size: 14px; padding: 8px !important; }
@@ -32,14 +34,14 @@
 
 /* Schedule Sheet specific */
 .schedule-container { padding: 15px; }
-.schedule-header-row { display: flex; gap: 50px; align-items: baseline; margin-bottom: 10px; }
-.schedule-header-row h2 { margin: 0; font-size: 18px; font-weight: normal; }
-.schedule-header-row h3 { margin: 0; font-size: 14px; font-weight: normal; }
+.schedule-header-row { display: flex; gap: 50px; align-items: baseline; margin-bottom: 15px; }
+.schedule-header-row h2 { margin: 0; font-size: 20px; font-weight: normal; }
+.schedule-header-row h3 { margin: 0; font-size: 15px; font-weight: normal; }
 
-.face-head { background: #e0f2fe; color: #0369a1; font-weight: bold; }
-.od-head { background: #fef3c7; color: #92400e; font-weight: bold; }
-.ht-head { background: #dcfce7; color: #166534; font-weight: bold; }
-.sub-head-row th { background: #f3f2f1; font-weight: bold; }
-.col-def-row th { background: #f9f9f9; font-size: 11px; color: #605e5c; }
+.face-head { background: #e0f2fe; color: #0369a1; font-weight: bold; font-size: 14px;}
+.od-head { background: #fef3c7; color: #92400e; font-weight: bold; font-size: 14px;}
+.ht-head { background: #dcfce7; color: #166534; font-weight: bold; font-size: 14px; text-align: left !important; padding-left: 20px !important;}
+.sub-head-row th { background: #f3f2f1; font-weight: bold; border-bottom: 2px solid #8a8886; }
+.col-def-row th { background: #f9f9f9; font-size: 12px; color: #605e5c; }
 .machine-title-row td { background: #fff; border-bottom: 2px solid #8a8886; }
 .ht-type { background: #f8fafc; font-weight: bold; }

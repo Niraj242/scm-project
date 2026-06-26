@@ -3,48 +3,45 @@ import './SHOScheduling.css';
 
 const SHOScheduling = () => {
   const [targetDate, setTargetDate] = useState('2026-06-25'); 
+  const [bufferUnit, setBufferUnit] = useState('Days'); 
   const [loading, setLoading] = useState(false);
+  
   const [scheduleData, setScheduleData] = useState(null);
   const [shortageMatrix, setShortageMatrix] = useState([]);
-  
-  // New: Flexible Buffer Input State
-  const [bufferUnit, setBufferUnit] = useState('Boxes'); 
   const [directArrivals, setDirectArrivals] = useState({});
-
-  const handleDirectArrivalChange = (itemKey, value) => {
-    setDirectArrivals(prev => ({ ...prev, [itemKey]: parseFloat(value) || 0 }));
-  };
+  
+  // Overrides State
+  const [jobBefore, setJobBefore] = useState('');
+  const [jobAfter, setJobAfter] = useState('');
 
   const computeMasterSchedule = async () => {
     setLoading(true);
     
     const formattedArrivals = Object.entries(directArrivals).map(([key, val]) => ({
-      item_code: key,
-      direct_qty: val
+      item_code: key, direct_qty: val
     })).filter(x => x.direct_qty > 0);
 
     const payload = {
       target_date: targetDate,
       buffer_unit: bufferUnit,
       temp_change_furnaces: [],
-      overrides: [],
+      overrides: [{ machine_id: "ALL", priority_type: "P1", job_before: jobBefore, job_after: jobAfter }],
       direct_arrivals: formattedArrivals
     };
 
     try {
-      const res = await fetch(`https://scm-backend-pshv.onrender.com/api/v1/generate-schedule`, {
+      const res = await fetch(`https://your-backend-url.onrender.com/api/v1/generate-schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
       const json = await res.json();
-      
       if (res.ok && json.status === "success") {
         setScheduleData(json.data);
         setShortageMatrix(json.shortage_matrix);
       }
     } catch (err) {
-      console.error("Network Error: ", err);
+      console.error(err);
     } finally {
       setLoading(false);
     }
@@ -54,42 +51,42 @@ const SHOScheduling = () => {
     <div className="sho-container">
       <header className="sho-header">
         <div className="title-block">
-          <h1>SHO Shop Floor Matrix Engine</h1>
-          <p className="subtitle">AI-Driven Multi-Channel Sync & Box Consumption Priority</p>
+          <h1>SHO APS Matrix Engine</h1>
+          <p className="subtitle">Stock-Capped Scheduling & Box Consumption Logic</p>
         </div>
         <div className="action-block">
-          <input 
-            type="date" 
-            value={targetDate} 
-            onChange={(e) => setTargetDate(e.target.value)} 
-            className="calendar-picker"
-          />
-          <div className="buffer-selector">
-            <label>Input Buffer As: </label>
-            <select value={bufferUnit} onChange={(e) => setBufferUnit(e.target.value)}>
-              <option value="Boxes">Boxes</option>
-              <option value="Rings">Ring Count (Pcs)</option>
-              <option value="Days">Days of Buffer</option>
-            </select>
-          </div>
+          <input type="date" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} className="calendar-picker"/>
+          <select value={bufferUnit} onChange={(e) => setBufferUnit(e.target.value)} className="calendar-picker">
+            <option value="Days">Buffer in Days</option>
+            <option value="Boxes">Buffer in Boxes</option>
+            <option value="Rings">Buffer in Rings</option>
+          </select>
           <button className="compute-button" onClick={computeMasterSchedule} disabled={loading}>
-            {loading ? 'Analyzing Consumption...' : 'Compile Master Matrix'}
+            {loading ? 'Processing Sheets...' : 'Generate Plan'}
           </button>
         </div>
       </header>
 
-      {/* MATERIAL SHORTAGE & ORDERING MATRIX */}
+      <div className="overrides-panel">
+        <h3>Planner Sequence Override</h3>
+        <div className="form-row">
+          <input type="text" placeholder="Job A (e.g. 6310 OR)" value={jobBefore} onChange={e => setJobBefore(e.target.value)} />
+          <span> BEFORE </span>
+          <input type="text" placeholder="Job B (e.g. 32211 IR)" value={jobAfter} onChange={e => setJobAfter(e.target.value)} />
+        </div>
+      </div>
+
       {shortageMatrix.length > 0 && (
         <div className="shortage-panel">
-          <h2 className="zone-header">Daily Replenishment & Buffer Priority Matrix</h2>
+          <h2 className="zone-header">Material Shortage & Planner Override Matrix</h2>
           <table className="zone-data-table full-width">
             <thead>
               <tr>
-                <th>Bearing Ring Type</th>
-                <th>Daily Zeroset Req</th>
-                <th>Consumption Rate</th>
-                <th>Current Avail Store</th>
-                <th>Direct to Channel [{bufferUnit}]</th>
+                <th>Item Description</th>
+                <th>Daily Req (Rings)</th>
+                <th>Daily Burn (Boxes)</th>
+                <th>Physical Stk Store</th>
+                <th>Direct to Channel</th>
                 <th>SHO Require-TODAY</th>
                 <th>SHO Require-TOMORROW</th>
               </tr>
@@ -98,21 +95,17 @@ const SHOScheduling = () => {
               {shortageMatrix.map((row, idx) => (
                 <tr key={idx}>
                   <td className="bold-txt">{row.item}</td>
-                  <td className="center-txt">{row.req_qty} Rings</td>
-                  <td className="center-txt text-muted">{row.daily_box_burn} Boxes/Day</td>
+                  <td className="center-txt">{row.req_qty}</td>
+                  <td className="center-txt text-muted">{row.daily_burn}</td>
                   <td className="center-txt qty-txt">{row.store_avail}</td>
                   <td className="center-txt">
-                    <input 
-                      type="number" 
-                      placeholder={`Add ${bufferUnit}`} 
-                      className="override-input"
-                      onChange={(e) => handleDirectArrivalChange(row.item, e.target.value)}
-                    />
+                    <input type="number" placeholder="Enter Qty" className="override-input"
+                           onChange={(e) => setDirectArrivals({...directArrivals, [row.item]: parseFloat(e.target.value) || 0})}/>
                   </td>
                   <td className={`center-txt ${row.req_today === 'no material required' ? 'text-muted' : 'prio-tag'}`}>
                     {row.req_today}
                   </td>
-                  <td className="center-txt text-muted">{row.req_tomorrow}</td>
+                  <td className="center-txt text-muted">0</td>
                 </tr>
               ))}
             </tbody>
@@ -120,82 +113,61 @@ const SHOScheduling = () => {
         </div>
       )}
 
-      {/* PRODUCTION SCHEDULE GRID */}
       {scheduleData && (
          <div className="shopfloor-layout-grid">
-          
-          <div className="process-zone-column">
+           {/* FACE GRINDING */}
+           <div className="process-zone-column">
             <h2 className="zone-header face-color">Face Grinding Matrix</h2>
-            {Object.keys(scheduleData.face).map((machine) => (
-              <div key={machine} className="machine-card-block">
-                <div className="machine-title-strip face-strip">{machine}</div>
+            {Object.keys(scheduleData.face).map((m) => (
+              <div key={m} className="machine-card-block">
+                <div className="machine-title-strip face-strip">{m}</div>
                 <table className="zone-data-table">
-                  <thead><tr><th>Component</th><th>Window</th><th>Priority</th></tr></thead>
+                  <thead><tr><th>Component</th><th>Shift Window</th><th>Priority</th></tr></thead>
                   <tbody>
-                    {scheduleData.face[machine].length === 0 ? (
-                      <tr><td colSpan="3" className="no-load-row">Spindle Idle</td></tr>
-                    ) : (
-                      scheduleData.face[machine].map((j, i) => (
-                        <tr key={i}><td>{j.job}</td><td className="center-txt bold-txt">{j.shift}</td><td className="center-txt prio-tag">{j.priority}</td></tr>
-                      ))
-                    )}
+                    {scheduleData.face[m].length === 0 ? <tr><td colSpan="3" className="no-load-row">Idle</td></tr> : 
+                     scheduleData.face[m].map((j, i) => <tr key={i}><td>{j.job}</td><td>{j.shift}</td><td>{j.priority}</td></tr>)}
                   </tbody>
                 </table>
               </div>
             ))}
           </div>
 
-          <div className="process-zone-column">
+           {/* OD GRINDING */}
+           <div className="process-zone-column">
             <h2 className="zone-header od-color">OD Grinding Matrix</h2>
-            {Object.keys(scheduleData.od).map((machine) => (
-              <div key={machine} className="machine-card-block">
-                <div className="machine-title-strip od-strip">{machine}</div>
+            {Object.keys(scheduleData.od).map((m) => (
+              <div key={m} className="machine-card-block">
+                <div className="machine-title-strip od-strip">{m}</div>
                 <table className="zone-data-table">
-                  <thead><tr><th>Component</th><th>Window</th><th>Priority</th></tr></thead>
+                  <thead><tr><th>Component</th><th>Shift Window</th><th>Priority</th></tr></thead>
                   <tbody>
-                    {scheduleData.od[machine].length === 0 ? (
-                      <tr><td colSpan="3" className="no-load-row">Line Idle</td></tr>
-                    ) : (
-                      scheduleData.od[machine].map((j, i) => (
-                        <tr key={i}><td>{j.job}</td><td className="center-txt bold-txt">{j.shift}</td><td className="center-txt prio-tag">{j.priority}</td></tr>
-                      ))
-                    )}
+                    {scheduleData.od[m].length === 0 ? <tr><td colSpan="3" className="no-load-row">Idle</td></tr> : 
+                     scheduleData.od[m].map((j, i) => <tr key={i}><td>{j.job}</td><td>{j.shift}</td><td>{j.priority}</td></tr>)}
                   </tbody>
                 </table>
               </div>
             ))}
           </div>
 
-          <div className="process-zone-column">
-            <h2 className="zone-header ht-color">Thermal Furnaces</h2>
-            {Object.keys(scheduleData.ht).map((machine) => (
-              <div key={machine} className="machine-card-block">
-                <div className="machine-title-strip ht-strip"><span>{machine}</span></div>
+           {/* HEAT TREATMENT */}
+           <div className="process-zone-column">
+            <h2 className="zone-header ht-color">Heat Treatment (Furnace)</h2>
+            {Object.keys(scheduleData.ht).map((m) => (
+              <div key={m} className="machine-card-block">
+                <div className="machine-title-strip ht-strip">{m}</div>
                 <table className="zone-data-table">
-                  <thead><tr><th>Target Code</th><th>Net Qty</th><th>Load</th><th>Exit</th></tr></thead>
+                  <thead><tr><th>Target Type</th><th>Net Qty</th><th>Start</th><th>Exit</th></tr></thead>
                   <tbody>
-                    {scheduleData.ht[machine].length === 0 ? (
-                      <tr><td colSpan="4" className="no-load-row">Furnace Cooled / Empty</td></tr>
-                    ) : (
-                      scheduleData.ht[machine].map((j, i) => (
-                        <tr key={i}>
-                          <td className="bold-txt">{j.job}</td>
-                          <td className="center-txt qty-txt">{j.qty.toLocaleString()}</td>
-                          <td className="center-txt text-muted">{j.start}h</td>
-                          <td className="center-txt bold-txt">{j.end}h</td>
-                        </tr>
-                      ))
-                    )}
+                    {scheduleData.ht[m].length === 0 ? <tr><td colSpan="4" className="no-load-row">Furnace Cool</td></tr> : 
+                     scheduleData.ht[m].map((j, i) => <tr key={i}><td>{j.job}</td><td>{j.qty}</td><td>{j.start}h</td><td>{j.end}h</td></tr>)}
                   </tbody>
                 </table>
               </div>
             ))}
           </div>
-
-        </div>
+         </div>
       )}
     </div>
   );
 };
-
 export default SHOScheduling;

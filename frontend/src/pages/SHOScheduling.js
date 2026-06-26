@@ -1,6 +1,9 @@
 import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
+// Fix for 405 error: Uses env var in production or falls back to standard local FastAPI port
+const API_BASE = process.env.REACT_APP_API_URL || 'https://scm-backend-pshv.onrender.com';
+
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer');
   const [targetDate, setTargetDate] = useState('2026-04-01');
@@ -9,14 +12,14 @@ const SHOScheduling = () => {
   const [loading, setLoading] = useState(false);
   const [scheduleData, setScheduleData] = useState(null);
 
-  // Exact channels from the master configuration sheets
   const dgbbChannels = ['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','CH11','SABB CH 5'];
   const trbChannels = ['T01','T02','T03','T04','T05','T06','T07','T08','T09','T10'];
+  const parts = ['IR', 'OR'];
 
-  // All rows for buffer categories exactly as requested
+  // All rows strictly requested by your image setup
   const bufferFields = [
-    { key: 'part', label: 'Part (IR/OR)' },
     { key: 'line_buf', label: 'Line Buffer' },
+    { key: 'line_type', label: 'Line Type' },
     { key: 'face_buf', label: 'Face Buffer' },
     { key: 'face_type', label: 'Face Type' },
     { key: 'od_buf', label: 'OD Buffer' },
@@ -30,68 +33,64 @@ const SHOScheduling = () => {
 
   useEffect(() => {
     let dData = {}; let tData = {};
-    dgbbChannels.forEach(ch => { dData[ch] = {}; bufferFields.forEach(f => dData[ch][f.key] = ''); });
-    trbChannels.forEach(ch => { tData[ch] = {}; bufferFields.forEach(f => tData[ch][f.key] = ''); });
+    dgbbChannels.forEach(ch => {
+      dData[ch] = { IR: {}, OR: {} };
+      bufferFields.forEach(f => { dData[ch].IR[f.key] = ''; dData[ch].OR[f.key] = ''; });
+    });
+    trbChannels.forEach(ch => {
+      tData[ch] = { IR: {}, OR: {} };
+      bufferFields.forEach(f => { tData[ch].IR[f.key] = ''; tData[ch].OR[f.key] = ''; });
+    });
     setDgbbData(dData); setTrbData(tData);
   }, []);
 
-  const handleCellChange = (category, channel, field, value) => {
+  const handleCellChange = (category, channel, part, field, value) => {
     if (category === 'dgbb') {
-      setDgbbData(prev => ({ ...prev, [channel]: { ...prev[channel], [field]: value } }));
+      setDgbbData(prev => ({ ...prev, [channel]: { ...prev[channel], [part]: { ...prev[channel][part], [field]: value } } }));
     } else {
-      setTrbData(prev => ({ ...prev, [channel]: { ...prev[channel], [field]: value } }));
+      setTrbData(prev => ({ ...prev, [channel]: { ...prev[channel], [part]: { ...prev[channel][part], [field]: value } } }));
     }
   };
 
-  const calculateTotal = (data, channel) => {
-    const f = parseFloat(data[channel]?.face_buf) || 0;
-    const o = parseFloat(data[channel]?.od_buf) || 0;
-    const h = parseFloat(data[channel]?.ht_buf) || 0;
-    const l = parseFloat(data[channel]?.line_buf) || 0;
+  const calculateTotal = (data, channel, part) => {
+    if (!data[channel] || !data[channel][part]) return '';
+    const f = parseFloat(data[channel][part].face_buf) || 0;
+    const o = parseFloat(data[channel][part].od_buf) || 0;
+    const h = parseFloat(data[channel][part].ht_buf) || 0;
+    const l = parseFloat(data[channel][part].line_buf) || 0;
     const total = f + o + h + l;
     return total > 0 ? total.toFixed(1) : '';
   };
 
   const saveBufferData = async () => {
     try {
-      const response = await fetch(`https://${window.location.hostname}/api/v1/save-buffer`, {
+      const response = await fetch(`${API_BASE}/api/v1/save-buffer`, {
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' }, 
-        body: JSON.stringify({ 
-          date: targetDate, 
-          dgbb_unit: dgbbUnit,
-          trb_unit: trbUnit,
-          dgbb: dgbbData, 
-          trb: trbData 
-        })
+        body: JSON.stringify({ date: targetDate, dgbb_unit: dgbbUnit, trb_unit: trbUnit, dgbb: dgbbData, trb: trbData })
       });
       const result = await response.json();
-      if (result.status === "success") {
-        alert(`Successfully saved grid matrices for ${targetDate}`);
-      }
+      if (result.status === "success") alert(`Successfully saved grid matrices for ${targetDate}`);
     } catch (err) { 
-      alert("Error logging dataset to the orchestration server."); 
+      alert("Network Error: Could not connect to Backend."); 
     }
   };
 
   const generateSchedule = async () => {
     setLoading(true);
     try {
-      const res = await fetch(`https://${window.location.hostname}/api/v1/generate-schedule`, {
+      const res = await fetch(`${API_BASE}/api/v1/generate-schedule`, {
         method: 'POST', 
         headers: { 'Content-Type': 'application/json' }, 
         body: JSON.stringify({ target_date: targetDate })
       });
       const json = await res.json();
-      if (json.status === "success") {
-        setScheduleData(json.data);
-        setActiveTab('schedule');
-      } else { 
-        alert("Pipeline error: " + json.message); 
-      }
-    } catch (err) { 
-      alert("Network processing timeout."); 
-    }
+      if (json.status === "success") { 
+        setScheduleData(json.data); 
+        setActiveTab('schedule'); 
+      } 
+      else { alert("Pipeline error: " + json.message); }
+    } catch (err) { alert("Network processing timeout."); }
     setLoading(false);
   };
 
@@ -105,7 +104,6 @@ const SHOScheduling = () => {
         <div className="actions">
           <label className="bold-label">Target Sync Date: </label>
           <input type="date" className="date-picker" value={targetDate} onChange={(e) => setTargetDate(e.target.value)} />
-          
           <div className="unit-controls">
             <label>DGBB Unit: 
               <select value={dgbbUnit} onChange={e => setDgbbUnit(e.target.value)}>
@@ -118,9 +116,8 @@ const SHOScheduling = () => {
               </select>
             </label>
           </div>
-
-          <button className="btn-save" onClick={saveBufferData}>Save Sheet Configurations</button>
-          <button className="btn-run" onClick={generateSchedule} disabled={loading}>{loading ? 'Re-Routing...' : 'Run Pipeline Engine'}</button>
+          <button className="btn-save" onClick={saveBufferData}>Save Grid Configurations</button>
+          <button className="btn-run" onClick={generateSchedule} disabled={loading}>{loading ? 'Routing...' : 'Run Scheduling Engine'}</button>
         </div>
       </div>
 
@@ -131,39 +128,47 @@ const SHOScheduling = () => {
               <thead>
                 <tr>
                   <th className="blank-cell"></th>
-                  <th colSpan={dgbbChannels.length} className="section-head dgbb-head">DGBB Table Configuration</th>
+                  <th colSpan={dgbbChannels.length * 2} className="section-head dgbb-head">DGBB Table Configuration</th>
                   <th className="divider-col"></th>
-                  <th colSpan={trbChannels.length} className="section-head trb-head">TRB Table Configuration</th>
+                  <th colSpan={trbChannels.length * 2} className="section-head trb-head">TRB Table Configuration</th>
                 </tr>
-                <tr>
+                {/* Channel Names (Spanning 2 columns for IR and OR) */}
+                <tr className="channel-row">
                   <th className="row-head-title-main">Line Channels</th>
-                  {dgbbChannels.map(ch => <th key={ch} className="col-head">{ch}</th>)}
+                  {dgbbChannels.map(ch => <th key={ch} colSpan="2" className="col-head">{ch}</th>)}
                   <th className="divider-col"></th>
-                  {trbChannels.map(ch => <th key={ch} className="col-head">{ch}</th>)}
+                  {trbChannels.map(ch => <th key={ch} colSpan="2" className="col-head">{ch}</th>)}
+                </tr>
+                {/* IR / OR Sub Headers */}
+                <tr className="part-row">
+                  <th className="row-head-title-main">Part Type</th>
+                  {dgbbChannels.map(ch => parts.map(p => <th key={`${ch}_${p}`} className="sub-col-head">{p}</th>))}
+                  <th className="divider-col"></th>
+                  {trbChannels.map(ch => parts.map(p => <th key={`${ch}_${p}`} className="sub-col-head">{p}</th>))}
                 </tr>
               </thead>
               <tbody>
                 {bufferFields.map((field) => (
                   <tr key={field.key}>
                     <td className="row-head-title">{field.label}</td>
-                    {dgbbChannels.map(ch => (
-                      <td key={'d_'+ch} className={field.key.includes('type') ? 'type-cell' : 'val-cell'}>
-                        <input type="text" value={dgbbData[ch]?.[field.key] || ''} onChange={e => handleCellChange('dgbb', ch, field.key, e.target.value)} />
+                    {dgbbChannels.map(ch => parts.map(p => (
+                      <td key={`d_${ch}_${p}`} className={field.key.includes('type') ? 'type-cell' : 'val-cell'}>
+                        <input type="text" value={dgbbData[ch]?.[p]?.[field.key] || ''} onChange={e => handleCellChange('dgbb', ch, p, field.key, e.target.value)} />
                       </td>
-                    ))}
+                    )))}
                     <td className="divider-col"></td>
-                    {trbChannels.map(ch => (
-                      <td key={'t_'+ch} className={field.key.includes('type') ? 'type-cell' : 'val-cell'}>
-                        <input type="text" value={trbData[ch]?.[field.key] || ''} onChange={e => handleCellChange('trb', ch, field.key, e.target.value)} />
+                    {trbChannels.map(ch => parts.map(p => (
+                      <td key={`t_${ch}_${p}`} className={field.key.includes('type') ? 'type-cell' : 'val-cell'}>
+                        <input type="text" value={trbData[ch]?.[p]?.[field.key] || ''} onChange={e => handleCellChange('trb', ch, p, field.key, e.target.value)} />
                       </td>
-                    ))}
+                    )))}
                   </tr>
                 ))}
                 <tr className="total-row">
-                  <td className="row-head-title">Accumulated Buffer</td>
-                  {dgbbChannels.map(ch => <td key={'dt_'+ch} className="center bold">{calculateTotal(dgbbData, ch)}</td>)}
+                  <td className="row-head-title">Total Compiled Buffer</td>
+                  {dgbbChannels.map(ch => parts.map(p => <td key={`dt_${ch}_${p}`} className="center bold">{calculateTotal(dgbbData, ch, p)}</td>))}
                   <td className="divider-col"></td>
-                  {trbChannels.map(ch => <td key={'tt_'+ch} className="center bold">{calculateTotal(trbData, ch)}</td>)}
+                  {trbChannels.map(ch => parts.map(p => <td key={`tt_${ch}_${p}`} className="center bold">{calculateTotal(trbData, ch, p)}</td>))}
                 </tr>
               </tbody>
             </table>
@@ -171,6 +176,7 @@ const SHOScheduling = () => {
         </div>
       )}
 
+      {/* SCHEDULE TAB - Matches exact layout requirements */}
       {activeTab === 'schedule' && scheduleData && (
         <div className="excel-container schedule-container">
           <div className="schedule-header-row">
@@ -204,8 +210,8 @@ const SHOScheduling = () => {
                   <td className="divider-col"></td>
                   <td colSpan="6" className="blank-cell"></td>
                 </tr>
-                {scheduleData.face["DDS (544)"].map((faceJob, idx) => {
-                   const odJob = scheduleData.od["CL -46 Cell 2 ( 0945 + 0839 )"]?.[idx] || {};
+                {scheduleData.face["DDS (544)"]?.map((faceJob, idx) => {
+                   const odJob = scheduleData.od["CL-46 Cell 2 ( 0945 + 0839 )"]?.[idx] || {};
                    const ht1 = scheduleData.ht["AICHELIN.(896)"]?.[idx] || {};
                    const ht2 = scheduleData.ht["CASTLINK FURNACE( 1018 )"]?.[idx] || {};
                    return (

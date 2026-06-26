@@ -1,47 +1,49 @@
-.sho-wrapper { padding: 10px; background-color: #f3f2f1; font-family: 'Calibri', 'Segoe UI', sans-serif; min-height: 100vh; }
-.top-nav { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 12px 20px; border-bottom: 1px solid #d2d0ce; margin-bottom: 15px; }
-.tabs button { background: none; border: none; padding: 10px 20px; font-size: 15px; cursor: pointer; color: #605e5c; }
-.tabs button.active { font-weight: bold; color: #0078d4; border-bottom: 3px solid #0078d4; }
-.actions { display: flex; gap: 15px; align-items: center; font-size: 13px; }
-.bold-label { font-weight: bold; font-size: 14px; }
-.date-picker { padding: 5px 10px; border: 1px solid #8a8886; font-family: inherit; font-weight: bold; font-size: 14px; }
-.btn-save { background: #fff; border: 1px solid #8a8886; padding: 6px 15px; cursor: pointer; }
-.btn-run { background: #107c41; color: white; border: none; padding: 7px 20px; font-weight: bold; cursor: pointer; }
+.sho-wrapper { padding: 12px; background-color: #f3f2f1; font-family: 'Calibri', 'Segoe UI', Arial, sans-serif; min-height: 100vh; }
+.top-nav { display: flex; justify-content: space-between; align-items: center; background: #fff; padding: 10px 16px; border: 1px solid #d2d0ce; margin-bottom: 12px; }
+.tabs button { background: none; border: none; padding: 8px 16px; font-size: 14px; cursor: pointer; color: #605e5c; border-bottom: 3px solid transparent; }
+.tabs button.active { font-weight: bold; color: #107c41; border-bottom: 3px solid #107c41; }
+.actions { display: flex; gap: 12px; align-items: center; font-size: 13px; }
+.unit-controls { display: flex; gap: 10px; background: #f3f2f1; padding: 4px 8px; border-radius: 2px; border: 1px solid #d2d0ce; }
+.unit-controls label { font-weight: 600; color: #323130; }
+.unit-controls select { margin-left: 4px; padding: 2px; border: 1px solid #a19f9d; background: #fff; font-size: 12px; }
+.date-picker { padding: 4px 8px; border: 1px solid #a19f9d; font-family: inherit; font-weight: bold; }
+.btn-save { background: #fff; border: 1px solid #8a8886; padding: 5px 12px; cursor: pointer; font-weight: 500; }
+.btn-save:hover { background: #f3f2f1; }
+.btn-run { background: #107c41; color: white; border: none; padding: 6px 16px; font-weight: bold; cursor: pointer; }
+.btn-run:hover { background: #0b592e; }
 
-.excel-container { background: white; border: 1px solid #c8c6c4; display: flex; flex-direction: column; overflow: hidden; }
-.table-scroll { overflow-x: auto; overflow-y: auto; max-height: calc(100vh - 100px); }
+.excel-container { background: white; border: 1px solid #d2d0ce; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.table-scroll { overflow-x: auto; overflow-y: auto; max-height: calc(100vh - 150px); }
 
-.excel-table { border-collapse: collapse; white-space: nowrap; font-size: 13px; min-width: 100%; }
-.excel-table th, .excel-table td { border: 1px solid #d2d0ce; padding: 4px 6px; }
-.excel-table th { background-color: #f3f2f1; color: #323130; text-align: center; font-weight: normal; }
+.excel-table { border-collapse: collapse; white-space: nowrap; font-size: 13px; width: 100%; }
+.excel-table th, .excel-table td { border: 1px solid #d2d0ce; padding: 4px 8px; }
+.excel-table th { background-color: #f3f2f1; color: #323130; text-align: center; font-weight: 600; }
 .excel-table input { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 13px; text-align: center; }
-.excel-table input:focus { box-shadow: inset 0 0 0 2px #107c41; background: #fff;}
+.excel-table input:focus { background: #fff; box-shadow: inset 0 0 0 2px #107c41; }
 
 .center { text-align: center !important; }
 .bold { font-weight: bold !important; }
-.bold-cell { font-weight: bold; background: #f9f9f9; }
+.bold-cell { font-weight: bold; background: #faf9f8; color: #323130; }
 .blank-cell { border: none !important; background: white !important; }
-.divider-col { width: 25px; background: white !important; border-top: none !important; border-bottom: none !important; }
-.job-cell { font-weight: 500; min-width: 180px; }
+.divider-col { width: 20px; background: #f3f2f1 !important; border-top: none !important; border-bottom: none !important; }
+.job-cell { font-weight: 500; min-width: 170px; text-align: left; }
 
-/* Buffer Sheet specific */
-.section-head { font-weight: bold; font-size: 14px; padding: 8px !important; }
-.dgbb-head { background-color: #cce8ff; }
-.trb-head { background-color: #ffe8cc; }
-.row-head-title { font-weight: bold; background: #f3f2f1; text-align: left; padding-left: 10px !important; width: 120px; }
-.col-head { font-weight: bold; width: 80px; }
-.val-cell { background: #fff; }
-.type-cell { background: #faf9f8; }
-.total-row td { background: #e1dfdd; padding: 6px !important; }
+.section-head { font-weight: bold; font-size: 13px; padding: 6px !important; text-align: center; color: #fff; }
+.dgbb-head { background-color: #005a9e; }
+.trb-head { background-color: #b83b1d; }
+.row-head-title-main { background: #eaeaea; font-weight: bold; text-align: left; }
+.row-head-title { font-weight: bold; background: #f3f2f1; text-align: left; width: 140px; color: #323130; }
+.col-head { font-weight: bold; min-width: 75px; background: #eaeaea; }
+.total-row td { background: #d2d0ce; font-weight: bold; }
 
-/* Schedule Sheet specific */
-.schedule-container { padding: 15px; }
-.schedule-header-row { display: flex; gap: 50px; align-items: baseline; margin-bottom: 15px; }
-.schedule-header-row h2 { margin: 0; font-size: 20px; }
-.schedule-header-row h3 { margin: 0; font-size: 15px; }
-.face-head { background: #e0f2fe; color: #0369a1; font-weight: bold; }
-.od-head { background: #fef3c7; color: #92400e; font-weight: bold; }
-.ht-head { background: #dcfce7; color: #166534; font-weight: bold; text-align: left !important; padding-left: 10px !important;}
-.sub-head-row th { background: #f3f2f1; font-weight: bold; border-bottom: 2px solid #8a8886; }
-.machine-title-row td { background: #fff; border-bottom: 2px solid #8a8886; }
-.ht-type { background: #f8fafc; font-weight: bold; }
+.schedule-container { padding: 12px; }
+.schedule-header-row { display: flex; gap: 40px; align-items: baseline; margin-bottom: 8px; border-bottom: 1px solid #eaeaea; padding-bottom: 4px; }
+.schedule-header-row h2 { margin: 0; font-size: 16px; color: #323130; }
+.schedule-header-row h3 { margin: 0; font-size: 13px; color: #605e5c; font-weight: normal; }
+
+.face-head { background: #c7e0f4; color: #001858; text-align: center !important; }
+.od-head { background: #fff1cc; color: #5c3e00; text-align: center !important; }
+.ht-head { background: #dff6dd; color: #107c41; text-align: left !important; padding-left: 12px !important; }
+.sub-head-row th { background: #f3f2f1; font-weight: bold; border-bottom: 2px solid #a19f9d; }
+.machine-title-row td { background: #fff; border-bottom: 2px solid #323130; font-size: 13px; }
+.ht-type { background: #faf9f8; font-weight: 500; text-align: left; }

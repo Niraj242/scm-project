@@ -4,262 +4,246 @@ import pandas as pd
 import requests
 from io import StringIO
 from urllib.parse import quote
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List
 
 router = APIRouter()
 
-# ---------------------------------------------------------
-# ENVIRONMENT CONFIGURATION (Your Google Sheet Links)
-# ---------------------------------------------------------
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 MASTER_URL = os.getenv("MASTER_URL", "")
 
-# In-memory storage for buffer data coming from the React frontend
+# Central memory state tracking the buffer configs submitted per date
 SAVED_BUFFERS = {}
 
-# ---------------------------------------------------------
-# PYDANTIC MODELS (Matching your React Frontend exact payload)
-# ---------------------------------------------------------
 class BufferPayload(BaseModel):
     date: str
+    dgbb_unit: str
+    trb_unit: str
     dgbb: Dict[str, Any]
     trb: Dict[str, Any]
 
 class ScheduleRequest(BaseModel):
     target_date: str
 
-# ---------------------------------------------------------
-# HELPER: FETCH GOOGLE SHEETS
-# ---------------------------------------------------------
-def fetch_sheet(base_url: str, sheet_name: str) -> pd.DataFrame:
-    """Fetches Google Sheets as CSV into a Pandas DataFrame."""
-    if not base_url: return pd.DataFrame()
+def fetch_sheet_raw(base_url: str, sheet_name: str) -> pd.DataFrame:
+    """Downloads Google Sheets directly into clean positional row matrices."""
+    if not base_url: 
+        return pd.DataFrame()
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", base_url)
-    if not match: return pd.DataFrame()
+    if not match: 
+        return pd.DataFrame()
     csv_url = f"https://docs.google.com/spreadsheets/d/{match.group(1)}/gviz/tq?tqx=out:csv&sheet={quote(sheet_name.strip())}"
     try:
         res = requests.get(csv_url, timeout=15)
         if res.status_code == 200 and "<html" not in res.text[:20].lower():
             return pd.read_csv(StringIO(res.text), header=None, dtype=str)
     except Exception as e:
-        print(f"Error fetching {sheet_name}: {e}")
+        print(f"Error reading tab {sheet_name}: {str(e)}")
     return pd.DataFrame()
 
-# ---------------------------------------------------------
-# API ROUTES
-# ---------------------------------------------------------
 @router.post("/api/v1/save-buffer")
 def save_buffer(payload: BufferPayload):
-    # Save the exact DGBB and TRB buffer matrix submitted from the UI
+    # Overwrites or establishes state for the targeted date index
     SAVED_BUFFERS[payload.date] = {
+        "dgbb_unit": payload.dgbb_unit,
+        "trb_unit": payload.trb_unit,
         "dgbb": payload.dgbb,
         "trb": payload.trb
     }
-    return {"status": "success", "message": "Buffer state saved"}
+    return {"status": "success", "message": f"Persisted specifications for {payload.date}"}
 
 @router.post("/api/v1/generate-schedule")
 def generate_schedule(payload: ScheduleRequest):
     target_date = payload.target_date
-    day_num = str(int(target_date.split('-')[2])) # '2026-04-01' -> '1'
-    
-    # Get the buffer data saved for this date
-    # If none saved, default to empty dicts so logic still runs
-    day_buffer = SAVED_BUFFERS.get(target_date, {"dgbb": {}, "trb": {}})
-    
+    # '2026-04-01' -> extract day integer component '1'
     try:
-        # 1. LOAD ALL MASTER DATA
-        # ---------------------------------------------------------
+        day_num = str(int(target_date.split('-')[2]))
+    except:
+        return {"status": "error", "message": "Malformed Date Stamp format."}
+
+    user_matrix = SAVED_BUFFERS.get(target_date, {"dgbb_unit": "Days", "trb_unit": "Days", "dgbb": {}, "trb": {}})
+
+    try:
+        # 1. POSITIONAL SHEET PARSING TO AVOID NON-UNIQUE KEY ERROR
+        # ---------------------------------------------------------------------
         weights = {}
-        df_w = fetch_sheet(MASTER_URL, "WEIGHTS")
+        df_w = fetch_sheet_raw(MASTER_URL, "WEIGHTS")
         if not df_w.empty:
-            for _, r in df_w.iterrows():
-                try: weights[f"{str(r[0]).strip()}_{str(r[1]).strip()}"] = float(r[2])
+            for idx in range(len(df_w)):
+                try:
+                    pname = str(df_w.iloc[idx, 0]).strip()
+                    pcode = str(df_w.iloc[idx, 1]).strip()
+                    w_val = float(df_w.iloc[idx, 2])
+                    weights[f"{pname}_{pcode}"] = w_val
+                except: pass
+
+        rings_per_box = {}
+        df_box = fetch_sheet_raw(BOX_RING_DATA_URL, "RING PER BOX.")
+        if not df_box.empty:
+            for idx in range(len(df_box)):
+                try:
+                    fam = str(df_box.iloc[idx, 0]).strip().replace("MF", "")
+                    pcode = "100" if "O" in str(df_box.iloc[idx, 1]).upper() else "120"
+                    rings_per_box[f"{fam}_{pcode}"] = float(df_box.iloc[idx, 3])
                 except: pass
 
         grind_rates = {"544": {}, "1125+661": {}}
-        for machine_tab in ["544", "1125+661"]:
-            df_m = fetch_sheet(SHO_PRODUCTION_URL, machine_tab)
+        for tab, m_id in [("544", "544"), ("1125+661", "1125+661")]:
+            df_m = fetch_sheet_raw(SHO_PRODUCTION_URL, tab)
             if not df_m.empty:
-                for i in range(len(df_m)):
+                for idx in range(len(df_m)):
                     try:
-                        part = str(df_m.iloc[i, 0]).strip()
-                        pcode = str(df_m.iloc[i, 1]).strip()
-                        grind_rates[machine_tab][f"{part}_{pcode}"] = float(df_m.iloc[i, 4])
+                        pname = str(df_m.iloc[idx, 0]).strip()
+                        pcode = str(df_m.iloc[idx, 1]).strip()
+                        rate = float(df_m.iloc[idx, 4])
+                        grind_rates[m_id][f"{pname}_{pcode}"] = rate
                     except: pass
 
         furnace_map = {}
-        df_f = fetch_sheet(MASTER_URL, "Furnace Type Flexibility")
+        df_f = fetch_sheet_raw(MASTER_URL, "Furnace Type Flexibility")
         if not df_f.empty:
-            for i in range(len(df_f)):
+            for idx in range(len(df_f)):
                 try:
-                    comp = str(df_f.iloc[i, 1]).strip()
-                    primary = str(df_f.iloc[i, 2]).strip().upper()
-                    if comp and primary: furnace_map[comp] = primary
+                    comp = str(df_f.iloc[idx, 1]).strip()
+                    furnace = str(df_f.iloc[idx, 2]).strip().upper()
+                    if comp: furnace_map[comp] = furnace
                 except: pass
 
-        # 2. PARSE ZEROSET AND APPLY BUFFER LOGIC
-        # ---------------------------------------------------------
+        # 2. RUN EXTRACTION ACROSS CHANNELS WITH SCALE CONVERSIONS
+        # ---------------------------------------------------------------------
         demands = []
-        channels_to_check = ["CH01", "CH02", "CH03", "CH04", "CH05", "T01", "T02", "T03"] 
-        
-        for ch in channels_to_check:
-            df_z = fetch_sheet(ZEROSET_URL, ch)
+        all_channels = ['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','CH11','SABB CH 5',
+                        'T01','T02','T03','T04','T05','T06','T07','T08','T09','T10']
+
+        for ch in all_channels:
+            df_z = fetch_sheet_raw(ZEROSET_URL, ch)
             if df_z.empty: continue
-            
-            # Find the PKWIP row for the specific day
-            header_idx, col_idx = None, None
-            for idx, row in df_z.iterrows():
-                vals = [str(x).strip().upper().split('.')[0] for x in row.values if pd.notna(x)]
-                if "PKWIP" in vals and day_num in vals:
-                    header_idx = idx
-                    if day_num in list(row.values): col_idx = list(row.values).index(day_num)
+
+            # Track down row containing PKWIP header string positionally
+            h_row, c_idx = None, None
+            for idx in range(min(20, len(df_z))):
+                row_list = [str(x).strip().upper().split('.')[0] for x in df_z.iloc[idx].values if pd.notna(x)]
+                if "PKWIP" in row_list and day_num in row_list:
+                    h_row = idx
+                    # Direct match coordinate tracking
+                    for col_pos in range(len(df_z.iloc[idx])):
+                        if str(df_z.iloc[idx, col_pos]).strip().split('.')[0] == day_num:
+                            c_idx = col_pos
+                            break
                     break
-            
-            if header_idx is not None and col_idx is not None:
-                # Get the buffer data for this specific channel from the UI payload
-                # E.g., check if it's a DGBB or TRB channel
-                ch_buffer = day_buffer["dgbb"].get(ch) or day_buffer["trb"].get(ch) or {}
-                
-                # Buffer Thresholds (Days) - Adjust these based on your actual business rules
-                face_buffer_days = float(ch_buffer.get("face_buf") or 0)
-                od_buffer_days = float(ch_buffer.get("od_buf") or 0)
-                ht_buffer_days = float(ch_buffer.get("ht_buf") or 0)
 
-                for i in range(header_idx + 1, len(df_z)):
-                    row_vals = [str(x).strip() for x in df_z.iloc[i].values]
-                    if row_vals[0] and row_vals[0].startswith(("MF", "FV")):
-                        part_name = row_vals[0].replace("MF", "").replace("FV", "")
-                        qty_val = str(row_vals[col_idx]).replace(',', '')
+            if h_row is not None and c_idx is not None:
+                # Map configuration input references
+                ch_grid = user_matrix["dgbb"].get(ch) or user_matrix["trb"].get(ch) or {}
+                unit_type = user_matrix["dgbb_unit"] if ch.startswith("CH") or "SABB" in ch else user_matrix["trb_unit"]
+
+                for r_pos in range(h_row + 1, len(df_z)):
+                    p_cell = str(df_z.iloc[r_pos, 0]).strip()
+                    if p_cell and p_cell.startswith(("MF", "FV")):
+                        part_family = p_cell.replace("MF", "").replace("FV", "")
                         
-                        if qty_val and qty_val.lower() != 'nan':
-                            qty = float(qty_val) * 1000  # 5 in sheet = 5000 rings
-                            
-                            if qty > 0:
-                                for pcode, ptext in [("100", "OR"), ("120", "IR")]:
-                                    
-                                    # --- THE ROUTING LOGIC BASED ON BUFFER ---
-                                    # If buffer is high enough, we skip that machine operation for the day.
-                                    needs_face = face_buffer_days < 2.0  # e.g., if we have less than 2 days buffer, schedule Face
-                                    needs_od = od_buffer_days < 2.0
-                                    needs_ht = ht_buffer_days < 3.0
-                                    
-                                    route = []
-                                    if needs_face: route.append("FACE")
-                                    if needs_od: route.append("OD")
-                                    if needs_ht: route.append("HT")
+                        try:
+                            val_raw = str(df_z.iloc[r_pos, c_idx]).replace(',', '')
+                            if val_raw and val_raw.lower() != 'nan':
+                                # Core standard scaling conversion rule (5 values = 5000 units)
+                                net_requirement = float(val_raw) * 1000
+                                if net_requirement <= 0: continue
 
-                                    if route:
-                                        demands.append({
-                                            "channel": ch,
-                                            "part": part_name,
-                                            "part_code": pcode,
-                                            "part_text": ptext,
-                                            "qty": qty,
-                                            "route": route
-                                        })
+                                for pc, pt in [("100", "OR"), ("120", "IR")]:
+                                    # Establish conversion standard divisors
+                                    box_capacity = rings_per_box.get(f"{part_family}_{pc}", 1000)
+                                    
+                                    # 3. CONVERT USER INPUTS DYNAMICALLY TO STANDARD SCALE (DAYS)
+                                    # ---------------------------------------------------------
+                                    raw_face_buf = float(ch_grid.get("face_buf") or 0)
+                                    raw_od_buf = float(ch_grid.get("od_buf") or 0)
 
-        # 3. SCHEDULE TO MACHINES & CALCULATE SHIFTS
-        # ---------------------------------------------------------
-        ht_caps = {"AICHELIN.(896)": 350, "CASTLINK FURNACE( 1018 )": 250}
-        
+                                    face_days = raw_face_buf
+                                    od_days = raw_od_buf
+
+                                    if unit_type == "No. of Rings":
+                                        face_days = raw_face_buf / net_requirement if net_requirement > 0 else 5.0
+                                        od_days = raw_od_buf / net_requirement if net_requirement > 0 else 5.0
+                                    elif unit_type == "Boxes":
+                                        face_days = (raw_face_buf * box_capacity) / net_requirement if net_requirement > 0 else 5.0
+                                        od_days = (raw_od_buf * box_capacity) / net_requirement if net_requirement > 0 else 5.0
+
+                                    # Routing trigger evaluation based on scale thresholds
+                                    route = ["HT"] # Heat treatment is mandatory
+                                    if face_days < 1.5: route.append("FACE")
+                                    if od_days < 1.5:  route.append("OD")
+
+                                    demands.append({
+                                        "channel": ch, "part": part_family, "part_code": pc,
+                                        "part_text": pt, "qty": net_requirement, "route": route,
+                                        "box_cap": box_capacity
+                                    })
+                        except: pass
+
+        # 4. MASTER MACHINE DISPATCH SCHEDULER
+        # ---------------------------------------------------------------------
         schedule = {
             "face": {"DDS (544)": []},
             "od": {"CL-46 Cell 2 ( 0945 + 0839 )": []},
             "ht": {"AICHELIN.(896)": [], "CASTLINK FURNACE( 1018 )": []}
         }
         
-        # Track accumulated hours per machine
-        time_state = {
+        hours_logged = {
             "face": {"DDS (544)": 0.0},
             "od": {"CL-46 Cell 2 ( 0945 + 0839 )": 0.0},
             "ht": {"AICHELIN.(896)": 0.0, "CASTLINK FURNACE( 1018 )": 0.0}
         }
 
-        # Dynamic Shift Logic
-        def get_shift(accumulated_hours):
-            if accumulated_hours <= 8: return "1"
-            if accumulated_hours <= 16: return "2"
-            return "3"
+        for j in demands:
+            label = f"{j['part']}---{j['part_text']}"
+            p_key = f"{j['part']}_{j['part_code']}"
+            priority = "P1" if j['channel'].startswith("CH") else "P2"
+            boxes_needed = max(1, int(j['qty'] / j['box_cap']))
 
-        for job in demands:
-            fam = job["part"]
-            pcode = job["part_code"]
-            qty = job["qty"]
-            lbl = f"{fam}---{job['part_text']}"
-            priority = "P1" if "CH" in job["channel"] else "P2"
+            if "FACE" in j["route"]:
+                m = "DDS (544)"
+                rate = grind_rates["544"].get(p_key, 1300)
+                h_req = j['qty'] / rate
+                if hours_logged["face"][m] + h_req <= 24.0:
+                    shift = "1" if hours_logged["face"][m] <= 8 else ("2" if hours_logged["face"][m] <= 16 else "3")
+                    schedule["face"][m].append({"job": label, "qty": boxes_needed, "shift": shift, "priority": priority})
+                    hours_logged["face"][m] += h_req
 
-            # -----------------
-            # FACE GRINDING
-            # -----------------
-            if "FACE" in job["route"]:
-                mach = "DDS (544)"
-                rate = grind_rates["544"].get(f"{fam}_{pcode}", 1300) 
-                hrs_needed = qty / rate
+            if "OD" in j["route"]:
+                m = "CL-46 Cell 2 ( 0945 + 0839 )"
+                rate = grind_rates["1125+661"].get(p_key, 850)
+                h_req = j['qty'] / rate
+                if hours_logged["od"][m] + h_req <= 24.0:
+                    shift = "1" if hours_logged["od"][m] <= 8 else ("2" if hours_logged["od"][m] <= 16 else "3")
+                    schedule["od"][m].append({"job": label, "qty": boxes_needed, "shift": shift, "priority": priority})
+                    hours_logged["od"][m] += h_req
+
+            if "HT" in j["route"]:
+                f_pref = "OM" if j['part_code'] == "100" else "IM"
+                f_target = furnace_map.get(f"{f_pref}{j['part']}", "AICHELIN")
+                m = "CASTLINK FURNACE( 1018 )" if "CASTLINK" in f_target else "AICHELIN.(896)"
                 
-                # Check if machine has time left in the 24h day
-                if time_state["face"][mach] + hrs_needed <= 24.0:
-                    shift = get_shift(time_state["face"][mach])
-                    schedule["face"][mach].append({
-                        "job": lbl, 
-                        "qty": str(int(qty/1300)) + " (BOX)", # Assuming ~1300 rings per box for visual
-                        "shift": shift, 
-                        "priority": priority
-                    })
-                    time_state["face"][mach] += hrs_needed
+                weight_factor = weights.get(p_key, 0.32)
+                tot_weight = j['qty'] * weight_factor
+                cap_hr = 250 if "CASTLINK" in m else 350
+                h_req = tot_weight / cap_hr
 
-            # -----------------
-            # OD GRINDING
-            # -----------------
-            if "OD" in job["route"]:
-                mach = "CL-46 Cell 2 ( 0945 + 0839 )"
-                rate = grind_rates["1125+661"].get(f"{fam}_{pcode}", 850)
-                hrs_needed = qty / rate
-                
-                if time_state["od"][mach] + hrs_needed <= 24.0:
-                    shift = get_shift(time_state["od"][mach])
-                    schedule["od"][mach].append({
-                        "job": lbl, 
-                        "qty": str(int(qty/80)) + " (BOX)",
-                        "shift": shift, 
-                        "priority": priority
-                    })
-                    time_state["od"][mach] += hrs_needed
+                if hours_logged["ht"][m] + h_req <= 24.0:
+                    schedule["ht"][m].append({"job": label, "qty": f"{int(tot_weight)} kg", "channel": j['channel']})
+                    hours_logged["ht"][m] += h_req
 
-            # -----------------
-            # HEAT TREATMENT
-            # -----------------
-            if "HT" in job["route"]:
-                prefix = "OM" if pcode == "100" else "IM"
-                mapped_furnace_raw = furnace_map.get(f"{prefix}{fam}", "AICHELIN")
-                mach = "CASTLINK FURNACE( 1018 )" if "CASTLINK" in mapped_furnace_raw else "AICHELIN.(896)"
-                
-                wt_per_ring = weights.get(f"{fam}_{pcode}", 0.25)
-                total_kg = qty * wt_per_ring
-                hrs_needed = total_kg / ht_caps[mach]
-                
-                if time_state["ht"][mach] + hrs_needed <= 24.0:
-                    schedule["ht"][mach].append({
-                        "job": lbl,
-                        "qty": f"{total_kg:.1f} kg", # Passing formatted weight to UI
-                        "channel": job["channel"]
-                    })
-                    time_state["ht"][mach] += hrs_needed
-
-        # 4. PAD OUTPUT FOR UI CONSISTENCY
-        # Ensure there are at least 5 rows so the UI table looks solid and matches your screenshot
-        for cat in schedule:
-            for m in schedule[cat]:
-                while len(schedule[cat][m]) < 5:
-                    if cat == "ht":
-                        schedule[cat][m].append({"job": "", "qty": "", "channel": ""})
-                    else:
-                        schedule[cat][m].append({"job": "", "qty": "", "shift": "", "priority": ""})
+        # Standardizing output sizes to 8 rows to preserve empty tracking lines
+        for sect in schedule:
+            for mach in schedule[sect]:
+                while len(schedule[sect][mach]) < 8:
+                    if sect == "ht": 
+                        schedule[sect][mach].append({"job": "", "qty": "", "channel": ""})
+                    else: 
+                        schedule[sect][mach].append({"job": "", "qty": "", "shift": "", "priority": ""})
 
         return {"status": "success", "data": schedule}
-
     except Exception as e:
-        return {"status": "error", "message": f"Server Logic Error: {str(e)}"}
+        return {"status": "error", "message": f"Pipeline failure exception: {str(e)}"}

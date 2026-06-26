@@ -3,54 +3,55 @@
 .tabs button { background: none; border: none; padding: 8px 16px; font-size: 14px; cursor: pointer; color: #605e5c; border-bottom: 3px solid transparent; }
 .tabs button.active { font-weight: bold; color: #107c41; border-bottom: 3px solid #107c41; }
 .actions { display: flex; gap: 12px; align-items: center; font-size: 13px; }
+
+.date-group { display: flex; gap: 8px; align-items: center; font-weight: 600; color: #323130; }
+.date-group input { padding: 4px; border: 1px solid #a19f9d; font-family: inherit; font-weight: bold; }
+.copy-group { padding-left: 12px; border-left: 1px solid #c8c6c4; }
+.btn-sm { background: #f3f2f1; border: 1px solid #8a8886; padding: 4px 8px; cursor: pointer; font-size: 12px; }
 .unit-controls { display: flex; gap: 10px; background: #f3f2f1; padding: 4px 8px; border-radius: 2px; border: 1px solid #d2d0ce; }
 .unit-controls label { font-weight: 600; color: #323130; }
 .unit-controls select { margin-left: 4px; padding: 2px; border: 1px solid #a19f9d; background: #fff; font-size: 12px; }
-.date-picker { padding: 4px 8px; border: 1px solid #a19f9d; font-family: inherit; font-weight: bold; }
 .btn-save { background: #fff; border: 1px solid #8a8886; padding: 5px 12px; cursor: pointer; font-weight: 500; }
 .btn-run { background: #107c41; color: white; border: none; padding: 6px 16px; font-weight: bold; cursor: pointer; }
 
 .excel-container { background: white; border: 1px solid #d2d0ce; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
 .table-scroll { overflow-x: auto; overflow-y: auto; max-height: calc(100vh - 150px); }
-
 .excel-table { border-collapse: collapse; white-space: nowrap; font-size: 13px; width: 100%; }
 .excel-table th, .excel-table td { border: 1px solid #d2d0ce; padding: 4px 8px; }
-.excel-table th { background-color: #f3f2f1; color: #323130; text-align: center; font-weight: 600; }
 .excel-table input { width: 100%; border: none; outline: none; background: transparent; font-family: inherit; font-size: 13px; text-align: center; }
 .excel-table input:focus { background: #fff; box-shadow: inset 0 0 0 2px #107c41; }
 
 .center { text-align: center !important; }
 .bold { font-weight: bold !important; }
-.bold-cell { font-weight: bold; background: #faf9f8; color: #323130; }
 .blank-cell { border: none !important; background: white !important; }
 .divider-col { width: 20px; background: #f3f2f1 !important; border-top: none !important; border-bottom: none !important; }
-.job-cell { font-weight: 500; min-width: 170px; text-align: left; }
 
-.section-head { font-weight: bold; font-size: 13px; padding: 6px !important; text-align: center; color: #fff; }
+/* BUFFER MATRIX - IMAGE MATCH */
+.avail-title { font-weight: bold; background: white; text-align: left; border-top: 1px solid white; border-left: 1px solid white; border-right: 1px solid white; font-size: 16px;}
+.section-head { font-weight: bold; font-size: 14px; padding: 8px !important; text-align: center; color: #fff; }
 .dgbb-head { background-color: #005a9e; }
-.trb-head { background-color: #b83b1d; }
+.trb-head { background-color: #7a1515; }
 .row-head-title-main { background: #eaeaea; font-weight: bold; text-align: left; border-bottom: 2px solid #a19f9d !important;}
 .row-head-title { font-weight: bold; background: #f3f2f1; text-align: left; width: 140px; color: #323130; }
 .col-head { font-weight: bold; background: #eaeaea; border-bottom: 1px solid #a19f9d !important;}
-
-/* IR / OR Column formatting */
 .channel-row th { border-bottom: 1px solid #d2d0ce; }
 .part-row th { background: #f9f9f9; font-size: 12px; padding: 4px; border-bottom: 2px solid #a19f9d; }
 .sub-col-head { min-width: 45px; width: 45px; text-align: center; }
-.val-cell input, .type-cell input { width: 40px; }
-
 .val-cell { background: #fff; }
 .type-cell { background: #faf9f8; }
+.val-cell input, .type-cell input { width: 40px; }
 .total-row td { background: #d2d0ce; font-weight: bold; }
 
-.schedule-container { padding: 12px; }
-.schedule-header-row { display: flex; gap: 40px; align-items: baseline; margin-bottom: 8px; border-bottom: 1px solid #eaeaea; padding-bottom: 4px; }
-.schedule-header-row h2 { margin: 0; font-size: 16px; color: #323130; }
-.schedule-header-row h3 { margin: 0; font-size: 13px; color: #605e5c; font-weight: normal; }
-
-.face-head { background: #c7e0f4; color: #001858; text-align: center !important; }
-.od-head { background: #fff1cc; color: #5c3e00; text-align: center !important; }
-.ht-head { background: #dff6dd; color: #107c41; text-align: left !important; padding-left: 12px !important; }
-.sub-head-row th { background: #f3f2f1; font-weight: bold; border-bottom: 2px solid #a19f9d; }
-.machine-title-row td { background: #fff; border-bottom: 2px solid #323130; font-size: 13px; }
-.ht-type { background: #faf9f8; font-weight: 500; text-align: left; }
+/* SCHEDULE MATRIX - IMAGE MATCH */
+.main-header th { font-weight: bold; color: #323130; padding: 8px; text-align: center; border-bottom: 2px solid #a19f9d; background: #eaeaea;}
+.shift-head { font-size: 12px; }
+.s1 { background-color: #dff6dd !important; color: #107c41 !important;} /* Greenish */
+.s2 { background-color: #fff4ce !important; color: #795700 !important;} /* Yellowish */
+.s3 { background-color: #c7e0f4 !important; color: #001858 !important;} /* Blueish */
+.s1-cell { background-color: #f7fdf7; }
+.s2-cell { background-color: #fffdf5; }
+.s3-cell { background-color: #f3f8fd; }
+.mach-col { min-width: 150px; background: #faf9f8; }
+.type-col { min-width: 120px; background: #faf9f8; }
+.std-col { min-width: 80px; background: #faf9f8; }
+.job-txt { text-align: left !important; min-width: 160px; font-weight: 500; }

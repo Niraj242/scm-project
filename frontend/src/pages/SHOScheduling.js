@@ -2,62 +2,49 @@ import React, { useState } from 'react';
 import './SHOScheduling.css';
 
 const SHOScheduling = () => {
-  const [targetDate, setTargetDate] = useState('2026-04-01'); // Standard Calendar Format
+  const [targetDate, setTargetDate] = useState('2026-06-25'); 
   const [loading, setLoading] = useState(false);
   const [scheduleData, setScheduleData] = useState(null);
-  const [debugLogs, setDebugLogs] = useState([]);
-  const [errorMessage, setErrorMessage] = useState(null);
-
-  // Core Industrial State Vectors
-  const [tempChangeFurnaces, setTempChangeFurnaces] = useState({
-    "AICHELIN.(896)": false,
-    "CASTLINK FURNACE( 1018 )": false,
-    "ROLLER FURNACE ( 148 )": false,
-    "SIMPLICITY FURNACE(1238)": false
-  });
+  const [shortageMatrix, setShortageMatrix] = useState([]);
   
-  const [overrideForm, setOverrideForm] = useState({
-    machine_id: 'DDS (544)',
-    priority_type: 'P1'
-  });
+  // New: Flexible Buffer Input State
+  const [bufferUnit, setBufferUnit] = useState('Boxes'); 
+  const [directArrivals, setDirectArrivals] = useState({});
 
-  const handleFurnaceToggle = (furnaceKey) => {
-    setTempChangeFurnaces(prev => ({ ...prev, [furnaceKey]: !prev[furnaceKey] }));
+  const handleDirectArrivalChange = (itemKey, value) => {
+    setDirectArrivals(prev => ({ ...prev, [itemKey]: parseFloat(value) || 0 }));
   };
 
   const computeMasterSchedule = async () => {
-    setLoading(true); 
-    setErrorMessage(null); 
-    setScheduleData(null); 
-    setDebugLogs([]);
+    setLoading(true);
+    
+    const formattedArrivals = Object.entries(directArrivals).map(([key, val]) => ({
+      item_code: key,
+      direct_qty: val
+    })).filter(x => x.direct_qty > 0);
 
-    const constraintPayload = {
+    const payload = {
       target_date: targetDate,
-      temp_change_furnaces: Object.keys(tempChangeFurnaces).filter(k => tempChangeFurnaces[k]),
-      overrides: [
-        {
-          machine_id: overrideForm.machine_id,
-          priority_type: overrideForm.priority_type
-        }
-      ]
+      buffer_unit: bufferUnit,
+      temp_change_furnaces: [],
+      overrides: [],
+      direct_arrivals: formattedArrivals
     };
 
     try {
       const res = await fetch(`https://scm-backend-pshv.onrender.com/api/v1/generate-schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(constraintPayload)
+        body: JSON.stringify(payload)
       });
       const json = await res.json();
       
       if (res.ok && json.status === "success") {
         setScheduleData(json.data);
-        setDebugLogs(json.logs || []);
-      } else {
-        setErrorMessage(json.detail || "Error connecting to execution engine.");
+        setShortageMatrix(json.shortage_matrix);
       }
     } catch (err) {
-      setErrorMessage(`Network connection failure: ${err.message}`);
+      console.error("Network Error: ", err);
     } finally {
       setLoading(false);
     }
@@ -68,89 +55,88 @@ const SHOScheduling = () => {
       <header className="sho-header">
         <div className="title-block">
           <h1>SHO Shop Floor Matrix Engine</h1>
-          <p className="subtitle">Dynamic STD/HR Rate Calibration & Multi-Channel Sync</p>
+          <p className="subtitle">AI-Driven Multi-Channel Sync & Box Consumption Priority</p>
         </div>
         <div className="action-block">
-          <label>Plan Production Date:</label>
           <input 
             type="date" 
             value={targetDate} 
             onChange={(e) => setTargetDate(e.target.value)} 
             className="calendar-picker"
           />
+          <div className="buffer-selector">
+            <label>Input Buffer As: </label>
+            <select value={bufferUnit} onChange={(e) => setBufferUnit(e.target.value)}>
+              <option value="Boxes">Boxes</option>
+              <option value="Rings">Ring Count (Pcs)</option>
+              <option value="Days">Days of Buffer</option>
+            </select>
+          </div>
           <button className="compute-button" onClick={computeMasterSchedule} disabled={loading}>
-            {loading ? 'Analyzing Sheet Matrices...' : 'Compile Master Matrix'}
+            {loading ? 'Analyzing Consumption...' : 'Compile Master Matrix'}
           </button>
         </div>
       </header>
 
-      {/* OPERATIONS OVERRIDE CONTROL BOX */}
-      <div className="overrides-panel">
-        <div className="override-section">
-          <h3>Furnace Heat Modification Triggers</h3>
-          <div className="furnace-toggles">
-            {Object.keys(tempChangeFurnaces).map((fName) => (
-              <button 
-                key={fName}
-                type="button"
-                className={`toggle-chip ${tempChangeFurnaces[fName] ? 'active' : ''}`}
-                onClick={() => handleFurnaceToggle(fName)}
-              >
-                {fName.split('(')[0]} {tempChangeFurnaces[fName] ? '🔥 Temp Drop' : '🌤️ Stable'}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="override-section">
-          <h3>Line Priority Override Bypass</h3>
-          <div className="form-row">
-            <select 
-              value={overrideForm.machine_id} 
-              onChange={(e) => setOverrideForm(prev => ({ ...prev, machine_id: e.target.value }))}
-            >
-              <option value="DDS (544)">DDS (544)</option>
-              <option value="CL-46 Cell 1 ( 0661 + 1125 )">CL-46 Cell 1</option>
-              <option value="CASTLINK FURNACE( 1018 )">Castlink Furnace</option>
-            </select>
-            <select 
-              value={overrideForm.priority_type} 
-              onChange={(e) => setOverrideForm(prev => ({ ...prev, priority_type: e.target.value }))}
-            >
-              <option value="P1">P1 (Immediate Run)</option>
-              <option value="P2">P2 (Sequence After)</option>
-              <option value="HOLD">HOLD Asset</option>
-            </select>
-          </div>
-        </div>
-      </div>
-
-      {errorMessage && <div className="error-banner"><b>Pipeline Alert:</b> {errorMessage}</div>}
-
-      {/* RE-ENGINEERED COMPILER LOG */}
-      {debugLogs.length > 0 && (
-        <div className="debug-panel">
-          <h3>Data Sourcing Verification Log</h3>
-          <ul>{debugLogs.map((log, i) => <li key={i}>⚙️ {log}</li>)}</ul>
+      {/* MATERIAL SHORTAGE & ORDERING MATRIX */}
+      {shortageMatrix.length > 0 && (
+        <div className="shortage-panel">
+          <h2 className="zone-header">Daily Replenishment & Buffer Priority Matrix</h2>
+          <table className="zone-data-table full-width">
+            <thead>
+              <tr>
+                <th>Bearing Ring Type</th>
+                <th>Daily Zeroset Req</th>
+                <th>Consumption Rate</th>
+                <th>Current Avail Store</th>
+                <th>Direct to Channel [{bufferUnit}]</th>
+                <th>SHO Require-TODAY</th>
+                <th>SHO Require-TOMORROW</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shortageMatrix.map((row, idx) => (
+                <tr key={idx}>
+                  <td className="bold-txt">{row.item}</td>
+                  <td className="center-txt">{row.req_qty} Rings</td>
+                  <td className="center-txt text-muted">{row.daily_box_burn} Boxes/Day</td>
+                  <td className="center-txt qty-txt">{row.store_avail}</td>
+                  <td className="center-txt">
+                    <input 
+                      type="number" 
+                      placeholder={`Add ${bufferUnit}`} 
+                      className="override-input"
+                      onChange={(e) => handleDirectArrivalChange(row.item, e.target.value)}
+                    />
+                  </td>
+                  <td className={`center-txt ${row.req_today === 'no material required' ? 'text-muted' : 'prio-tag'}`}>
+                    {row.req_today}
+                  </td>
+                  <td className="center-txt text-muted">{row.req_tomorrow}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
+      {/* PRODUCTION SCHEDULE GRID */}
       {scheduleData && (
-        <div className="shopfloor-layout-grid">
-          {/* ZONE 1: FACE GRINDING */}
+         <div className="shopfloor-layout-grid">
+          
           <div className="process-zone-column">
             <h2 className="zone-header face-color">Face Grinding Matrix</h2>
             {Object.keys(scheduleData.face).map((machine) => (
               <div key={machine} className="machine-card-block">
                 <div className="machine-title-strip face-strip">{machine}</div>
                 <table className="zone-data-table">
-                  <thead><tr><th>Bearing Component</th><th>Target Window</th><th>Priority</th></tr></thead>
+                  <thead><tr><th>Component</th><th>Window</th><th>Priority</th></tr></thead>
                   <tbody>
                     {scheduleData.face[machine].length === 0 ? (
-                      <tr><td colSpan="3" className="no-load-row">Spindle Idle (No Demand)</td></tr>
+                      <tr><td colSpan="3" className="no-load-row">Spindle Idle</td></tr>
                     ) : (
-                      scheduleData.face[machine].map((j, idx) => (
-                        <tr key={idx}><td>{j.job}</td><td className="center-txt bold-txt">{j.shift}</td><td className="center-txt prio-tag">{j.priority}</td></tr>
+                      scheduleData.face[machine].map((j, i) => (
+                        <tr key={i}><td>{j.job}</td><td className="center-txt bold-txt">{j.shift}</td><td className="center-txt prio-tag">{j.priority}</td></tr>
                       ))
                     )}
                   </tbody>
@@ -159,20 +145,19 @@ const SHOScheduling = () => {
             ))}
           </div>
 
-          {/* ZONE 2: OD GRINDING */}
           <div className="process-zone-column">
             <h2 className="zone-header od-color">OD Grinding Matrix</h2>
             {Object.keys(scheduleData.od).map((machine) => (
               <div key={machine} className="machine-card-block">
                 <div className="machine-title-strip od-strip">{machine}</div>
                 <table className="zone-data-table">
-                  <thead><tr><th>Bearing Component</th><th>Target Window</th><th>Priority</th></tr></thead>
+                  <thead><tr><th>Component</th><th>Window</th><th>Priority</th></tr></thead>
                   <tbody>
                     {scheduleData.od[machine].length === 0 ? (
-                      <tr><td colSpan="3" className="no-load-row">Line Idle (No Demand)</td></tr>
+                      <tr><td colSpan="3" className="no-load-row">Line Idle</td></tr>
                     ) : (
-                      scheduleData.od[machine].map((j, idx) => (
-                        <tr key={idx}><td>{j.job}</td><td className="center-txt bold-txt">{j.shift}</td><td className="center-txt prio-tag">{j.priority}</td></tr>
+                      scheduleData.od[machine].map((j, i) => (
+                        <tr key={i}><td>{j.job}</td><td className="center-txt bold-txt">{j.shift}</td><td className="center-txt prio-tag">{j.priority}</td></tr>
                       ))
                     )}
                   </tbody>
@@ -181,7 +166,6 @@ const SHOScheduling = () => {
             ))}
           </div>
 
-          {/* ZONE 3: HEAT TREATMENT FURNACES */}
           <div className="process-zone-column">
             <h2 className="zone-header ht-color">Thermal Furnaces</h2>
             {Object.keys(scheduleData.ht).map((machine) => (
@@ -193,8 +177,8 @@ const SHOScheduling = () => {
                     {scheduleData.ht[machine].length === 0 ? (
                       <tr><td colSpan="4" className="no-load-row">Furnace Cooled / Empty</td></tr>
                     ) : (
-                      scheduleData.ht[machine].map((j, idx) => (
-                        <tr key={idx}>
+                      scheduleData.ht[machine].map((j, i) => (
+                        <tr key={i}>
                           <td className="bold-txt">{j.job}</td>
                           <td className="center-txt qty-txt">{j.qty.toLocaleString()}</td>
                           <td className="center-txt text-muted">{j.start}h</td>
@@ -207,6 +191,7 @@ const SHOScheduling = () => {
               </div>
             ))}
           </div>
+
         </div>
       )}
     </div>

@@ -2,7 +2,7 @@ import os
 import re
 import math
 import traceback
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import pandas as pd
@@ -12,32 +12,24 @@ from urllib.parse import quote
 
 router = APIRouter()
 
-# Environment Variables
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL")
 ZEROSET_URL = os.getenv("ZEROSET_URL")
-AVAILABLE_BUFFER_URL = os.getenv("AVAILABLE_BUFFER_URL")
-DAILY_STORE_STOCK_URL = os.getenv("DAILY_STORE_STOCK_URL")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL")
 
-class Override(BaseModel):
-    machine_id: str
-    priority_type: str
-    job_before: Optional[str] = None # "Job A before Job B" logic
-    job_after: Optional[str] = None
+# --- MOCK DATABASE FOR SAVED BUFFERS ---
+# In production, this connects to your Neon PostgreSQL DB
+SAVED_BUFFERS = {} 
 
-class DirectArrival(BaseModel):
-    item_code: str
-    direct_qty: float
+class BufferData(BaseModel):
+    date: str
+    grinding_unit: str  # 'Boxes', 'Days', 'Rings'
+    ht_unit: str        # 'Boxes', 'Days', 'Rings'
+    entries: List[Dict[str, Any]]
 
-class SchedulePayload(BaseModel):
-    target_date: str  # YYYY-MM-DD format from Calendar
-    buffer_unit: str  # Boxes, Rings, Days
-    temp_change_furnaces: List[str] = []
-    overrides: List[Override] = []
-    direct_arrivals: List[DirectArrival] = []
+class ScheduleRequest(BaseModel):
+    target_date: str
 
 def fetch_sheet(base_url: str, sheet_name: str) -> pd.DataFrame:
-    """Fetches Google Sheet tab exactly as CSV to bypass merged cell issues."""
     if not base_url: return pd.DataFrame()
     match = re.search(r"/d/([a-zA-Z0-9-_]+)", base_url)
     if not match: return pd.DataFrame()
@@ -49,233 +41,129 @@ def fetch_sheet(base_url: str, sheet_name: str) -> pd.DataFrame:
     except: pass
     return pd.DataFrame()
 
-class SHOScheduler:
-    def __init__(self, payload: SchedulePayload):
-        self.payload = payload
-        
-        # Date Parsing
-        date_parts = payload.target_date.split('-')
-        self.day_num = str(int(date_parts[2])) 
-        self.next_day_num = str(int(self.day_num) + 1)
-        
-        months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]
-        self.sheet_date_format = f"{self.day_num.zfill(2)} {months[int(date_parts[1])-1]} {date_parts[0]}"
-        
-        # Master Data Dictionaries
-        self.weights = {}           # {"6310_100": 0.54}  (100=OR, 120=IR)
-        self.furnace_flex = {}      # {"6310": "CASTLINK"}
-        self.machine_rates = {}     # {"DDS (544)": {"6310_100": 7471}}
-        self.physical_stock = {}    # {"6310 OR": 8000}
-        self.rings_per_box = {}     # {"6310_OR": 80}
-        
-        self.demands = []
-        self.shortage_matrix = []
+# --- ENDPOINTS ---
 
-        # Standard Machine Lists
-        self.face_machines = ["DDS (544)", "Gardner ( 1016 + USA 1996 )", "DDS Cell ( 709 + 1186 )", "Gardner (1601)"]
-        self.od_machines = ["CL-46 Cell 2 ( 0945 + 0839 )", "CL-46 Cell 1 ( 0661 + 1125 )", "CL-46 Cell 3 ( 1600 + 1903 )", "CL-46 Cell 4 ( 170 + 1904 )", "AMHD OD ( 2021 )"]
-        self.ht_machines = ["AICHELIN.(896)", "CASTLINK FURNACE( 1018 )", "ROLLER FURNACE ( 148 )", "SIMPLICITY FURNACE(1238)", "BIRLEC FURNACE ( 1158 )", "SHOEI FURNACE ( 1062 )", "AICHELIN UNITHERM ( 2033 )"]
-        
-        # State tracking (Hours out of 24)
-        self.machine_state = {
-            "face": {m: {"hours": 0.0, "last_fam": None} for m in self.face_machines},
-            "od": {m: {"hours": 0.0, "last_fam": None} for m in self.od_machines},
-            "ht": {m: {"hours": 0.0, "last_fam": None} for m in self.ht_machines}
-        }
+@router.post("/api/v1/save-buffer")
+def save_buffer(payload: BufferData):
+    """Saves the Daily Buffer inputted from the frontend UI."""
+    # Prevent double entries by overwriting the date key
+    SAVED_BUFFERS[payload.date] = payload.dict()
+    return {"status": "success", "message": f"Buffer for {payload.date} saved successfully."}
 
-    def load_all_sheets(self):
-        # 1. Weights (100=OR, 120=IR)
+@router.post("/api/v1/generate-schedule")
+def generate_schedule(payload: ScheduleRequest):
+    try:
+        target_date = payload.target_date
+        day_num = str(int(target_date.split('-')[2]))
+        
+        buffer_state = SAVED_BUFFERS.get(target_date)
+        if not buffer_state:
+            raise Exception(f"No Buffer data saved for {target_date}. Please fill and save the Buffer UI first.")
+
+        # 1. LOAD MASTER DATA
+        weights = {}
+        rings_per_box = {}
+        machine_rates = {}
+        
+        # Load Weights
         df_w = fetch_sheet(SHO_PRODUCTION_URL, "WEIGHTS")
-        for _, row in df_w.iterrows():
-            try:
-                fam = str(row[0]).strip().replace("MF", "")
-                part_code = str(row[1]).strip() # 100 or 120
-                self.weights[f"{fam}_{part_code}"] = float(row[2])
+        for _, r in df_w.iterrows():
+            try: weights[f"{str(r[0]).strip().replace('MF', '')}_{str(r[1]).strip()}"] = float(r[2])
             except: pass
-
-        # 2. Dynamic Machine STD/HR Extraction (Cell after 'MACHINE')
-        tabs = ["544", "1125+661", "1016", "709+1186", "1601", "0945+0839", "1600+1903"]
-        for tab in tabs:
-            df = fetch_sheet(SHO_PRODUCTION_URL, tab)
-            machine_name = None
-            for idx, row in df.head(10).iterrows():
-                vals = [str(x).strip().upper() for x in row.values if pd.notna(x)]
-                if "MACHINE" in vals:
-                    raw_list = [str(x).strip() for x in row.values]
-                    m_idx = raw_list.index("MACHINE") + 1
-                    machine_name = raw_list[m_idx] if m_idx < len(raw_list) else None
-                    break
             
-            if machine_name:
-                self.machine_rates[machine_name] = {}
-                for i in range(len(df)):
-                    try:
-                        fam = str(df.iloc[i, 0]).strip()
-                        pcode = str(df.iloc[i, 1]).strip()
-                        rate = float(str(df.iloc[i, 4]).strip()) # STD/HR Column
-                        self.machine_rates[machine_name][f"{fam}_{pcode}"] = rate
-                    except: pass
-
-        # 3. Store Physical Stock
-        df_stock = fetch_sheet(DAILY_STORE_STOCK_URL, self.sheet_date_format)
-        for col in df_stock.columns:
-            if any("PHYSICAL" in str(x).upper() for x in df_stock[col].dropna()):
-                for idx, row in df_stock.iterrows():
-                    try:
-                        item = str(row[col-1]).strip() # Type is left of stock
-                        stk = float(str(row[col]).replace(',', ''))
-                        self.physical_stock[item] = stk
-                    except: pass
-
-        # 4. Box/Ring Consumption Math
+        # Load Rings Per Box
         df_box = fetch_sheet(BOX_RING_DATA_URL, "RING PER BOX.")
-        for _, row in df_box.iterrows():
+        for _, r in df_box.iterrows():
             try:
-                fam = str(row[0]).strip().replace("MF", "")
-                part = "OR" if str(row[1]).strip() == "100" else "IR"
-                self.rings_per_box[f"{fam}_{part}"] = float(row[3])
+                fam = str(r[0]).strip().replace("MF", "")
+                pcode = "100" if "O" in str(r[1]).upper() else "120"
+                rings_per_box[f"{fam}_{pcode}"] = float(r[3])
             except: pass
 
-    def extract_zeroset_demand(self):
-        # Scan Zeroset for 2-day grouping
-        channels = ["5", "T4", "CH01", "CH05"]
-        for ch in channels:
+        # Load Machine Rates (Grinding)
+        for tab in ["544", "1125+661"]:
+            df = fetch_sheet(SHO_PRODUCTION_URL, tab)
+            m_name = "DDS (544)" if tab == "544" else "CL-46 Cell 1 ( 0661 + 1125 )"
+            machine_rates[m_name] = {}
+            for i in range(len(df)):
+                try: machine_rates[m_name][f"{str(df.iloc[i,0]).strip()}_{str(df.iloc[i,1]).strip()}"] = float(df.iloc[i,4])
+                except: pass
+
+        # 2. EXTRACT ZEROSET DEMAND & APPLY BUFFER
+        demands = []
+        for ch in ["5", "T4", "CH01"]:
             df_z = fetch_sheet(ZEROSET_URL, ch)
-            header_idx, col1, col2 = None, None, None
+            if df_z.empty: continue
             
+            header_idx, col_idx = None, None
             for idx, row in df_z.iterrows():
                 vals = [str(x).strip().upper().split('.')[0] for x in row.values if pd.notna(x)]
-                if "PKWIP" in vals or "MTD" in vals:
-                    if self.day_num in vals and self.next_day_num in vals:
-                        header_idx = idx
-                        col1 = vals.index(self.day_num)
-                        col2 = vals.index(self.next_day_num)
-                        break
+                if "PKWIP" in vals and day_num in vals:
+                    header_idx, col_idx = idx, vals.index(day_num)
+                    break
             
             if not header_idx: continue
 
             for i in range(header_idx + 1, len(df_z)):
                 row_vals = [str(x).strip() for x in df_z.iloc[i].values]
-                fam = ""
-                for val in row_vals[:5]:
-                    if m := re.search(r'(?:MF|FV)?(\d{4,5})', val):
-                        fam = m.group(1)
-                        break
-                
-                if fam:
+                if m := re.search(r'(?:MF|FV)?(\d{4,5})', row_vals[0]):
+                    fam = m.group(1)
                     try:
-                        # Group Day 1 + Day 2
-                        qty1 = float(row_vals[col1].replace(',','')) * 1000 if row_vals[col1] else 0
-                        qty2 = float(row_vals[col2].replace(',','')) * 1000 if row_vals[col2] else 0
-                        tot_qty = qty1 + qty2 
-                        
-                        if tot_qty > 0:
-                            self.demands.append({"family": fam, "part": "OR", "part_code": "100", "qty": tot_qty})
-                            self.demands.append({"family": fam, "part": "IR", "part_code": "120", "qty": tot_qty})
+                        qty = float(row_vals[col_idx].replace(',','')) * 1000 # 5 means 5000
+                        if qty > 0:
+                            for p_code, p_name in [("100", "OR"), ("120", "IR")]:
+                                # Check UI Buffer for Skipping Logic
+                                route = ["HT", "FACE", "OD"]
+                                # If buffer for this channel/part was completely blank in UI, skip Face/OD
+                                channel_buffer = [b for b in buffer_state["entries"] if b["channel"] == ch and b["part"] == p_name]
+                                if channel_buffer:
+                                    cb = channel_buffer[0]
+                                    if not cb.get("face_val") and not cb.get("od_val"):
+                                        route = ["HT"] # Route directly to channel
+                                
+                                demands.append({
+                                    "family": fam, "part": p_name, "part_code": p_code,
+                                    "req_qty": qty, "route": route
+                                })
                     except: pass
 
-        # Fallback if empty so app doesn't crash on test run
-        if not self.demands:
-            self.demands = [
-                {"family": "6310", "part": "OR", "part_code": "100", "qty": 15000},
-                {"family": "32211", "part": "IR", "part_code": "120", "qty": 12000}
-            ]
-
-    def check_buffer_and_stock(self):
-        direct_arrivals = {d.item_code: d.direct_qty for d in self.payload.direct_arrivals}
-        processed_demands = []
-
-        for job in self.demands:
-            item_key = f"{job['family']} {job['part']}"
-            dict_key = f"{job['family']}_{job['part']}"
-            
-            req_qty = job["qty"]
-            store_avail = self.physical_stock.get(item_key, 0.0)
-            direct_avail = direct_arrivals.get(item_key, 0.0)
-            total_avail = store_avail + direct_avail
-
-            # Calculate Shortage Matrix (Require TODAY/TOMORROW)
-            shortage = req_qty - total_avail
-            req_today = str(int(shortage)) if shortage > 0 else "no material required"
-            
-            # Cap the production run to physical stock available
-            actual_run_qty = min(req_qty, total_avail)
-
-            # Box Consumption Math
-            box_size = self.rings_per_box.get(dict_key, 100)
-            daily_burn = req_qty / box_size
-
-            self.shortage_matrix.append({
-                "item": item_key,
-                "req_qty": f"{int(req_qty)}",
-                "daily_burn": round(daily_burn, 1),
-                "store_avail": int(store_avail),
-                "req_today": req_today,
-                "req_tomorrow": "0"
-            })
-
-            if actual_run_qty > 0:
-                job["qty"] = actual_run_qty
-                job["cover_days"] = actual_run_qty / req_qty if req_qty > 0 else 999
-                processed_demands.append(job)
-
-        # Sort by lowest buffer days (prioritize items starving the line)
-        processed_demands.sort(key=lambda x: x["cover_days"])
-        self.demands = processed_demands
-
-    def build_schedule(self):
-        schedule = {
-            "face": {m: [] for m in self.face_machines},
-            "od": {m: [] for m in self.od_machines},
-            "ht": {m: [] for m in self.ht_machines}
-        }
-
-        # Sequence Override Check (Job A before Job B)
-        job_seq_overrides = {o.job_before: o.job_after for o in self.payload.overrides if o.job_before}
-
-        for job in self.demands:
-            fam = job["family"]
-            part = job["part"]
-            lbl = f"{fam} ({part})"
-            qty = job["qty"]
-
-            # Heat Treatment (3.5h cycle + 30m changeover)
-            best_ht = min(self.ht_machines, key=lambda m: self.machine_state["ht"][m]["hours"])
-            st_ht = self.machine_state["ht"][best_ht]
-            
-            setup = 0.5 if st_ht["last_fam"] and st_ht["last_fam"] != fam else 0.0
-            if best_ht in self.payload.temp_change_furnaces:
-                setup += 1.5 # Furnace temp change penalty
-                
-            start = st_ht["hours"] + setup
-            end = min(start + (qty / 1500) + 3.5, 24.0) # 3.5 cycle added
-            st_ht["hours"] = end
-            st_ht["last_fam"] = fam
-            schedule["ht"][best_ht].append({"job": lbl, "qty": int(qty), "start": round(start,1), "end": round(end,1)})
-
-            # Grinding (Face ALWAYS first, then OD)
-            for zone, macs in [("face", self.face_machines), ("od", self.od_machines)]:
-                best_m = min(macs, key=lambda m: self.machine_state[zone][m]["hours"])
-                st_m = self.machine_state[zone][best_m]
-                
-                # Fetch exact machine STD/HR
-                rate = self.machine_rates.get(best_m, {}).get(f"{fam}_{job['part_code']}", 1000)
-                
-                st_m["hours"] = min(st_m["hours"] + (qty / rate), 24.0)
-                shift = "Shift 1" if st_m["hours"] <= 8 else "Shift 2" if st_m["hours"] <= 16 else "Shift 3"
-                schedule[zone][best_m].append({"job": lbl, "shift": shift, "priority": "P1"})
-
-        return schedule
-
-@router.post("/api/v1/generate-schedule")
-def process_production_schedule(payload: SchedulePayload):
-    try:
-        engine = SHOScheduler(payload=payload)
-        engine.load_all_sheets()
-        engine.extract_zeroset_demand()
-        engine.check_buffer_and_stock()
+        # 3. GENERATE SIMPLE SCHEDULE
+        face_macs = ["DDS (544)", "Gardner ( 1016 + USA 1996 )"]
+        od_macs = ["CL-46 Cell 1 ( 0661 + 1125 )", "CL-46 Cell 2 ( 0945 + 0839 )"]
+        ht_macs = ["AICHELIN.(896)", "CASTLINK FURNACE( 1018 )", "SHOEI FURNACE ( 1062 )"]
+        ht_caps = {"AICHELIN.(896)": 350, "CASTLINK FURNACE( 1018 )": 250, "SHOEI FURNACE ( 1062 )": 350}
         
-        sched = engine.build_schedule()
-        return {"status": "success", "data": sched, "shortage_matrix": engine.shortage_matrix}
+        state = {"face": {m: 0.0 for m in face_macs}, "od": {m: 0.0 for m in od_macs}, "ht": {m: 0.0 for m in ht_macs}}
+        sched = {"face": {m: [] for m in face_macs}, "od": {m: [] for m in od_macs}, "ht": {m: [] for m in ht_macs}}
+
+        for job in demands:
+            fam, pcode, qty = job["family"], job["part_code"], job["req_qty"]
+            lbl = f"{fam} ({job['part']})"
+
+            # HT Assignment
+            if "HT" in job["route"]:
+                best_ht = min(ht_macs, key=lambda x: state["ht"][x])
+                wt = weights.get(f"{fam}_{pcode}", 0.25)
+                rate = ht_caps[best_ht] / wt if wt > 0 else 1000
+                start = state["ht"][best_ht] + 0.5 # 30m reset
+                end = min(start + (qty / rate) + 3.5, 24.0) # 3.5h cycle
+                state["ht"][best_ht] = end
+                sched["ht"][best_ht].append({"job": lbl, "qty": int(qty), "start": round(start,1), "end": round(end,1)})
+
+            # Face Grinding
+            if "FACE" in job["route"]:
+                best_f = min(face_macs, key=lambda x: state["face"][x])
+                rate = machine_rates.get(best_f, {}).get(f"{fam}_{pcode}", 1200)
+                state["face"][best_f] = min(state["face"][best_f] + (qty / rate), 24.0)
+                sched["face"][best_f].append({"job": lbl, "qty": int(qty)})
+
+            # OD Grinding
+            if "OD" in job["route"]:
+                best_o = min(od_macs, key=lambda x: state["od"][x])
+                rate = machine_rates.get(best_o, {}).get(f"{fam}_{pcode}", 850)
+                state["od"][best_o] = min(state["od"][best_o] + (qty / rate), 24.0)
+                sched["od"][best_o].append({"job": lbl, "qty": int(qty)})
+
+        return {"status": "success", "data": sched}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"status": "error", "message": str(e)}

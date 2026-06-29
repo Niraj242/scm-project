@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import './SHOSchedule.css';
+import './SHOScheduling.css';
 
 const SHOSchedule = () => {
   const [activeTab, setActiveTab] = useState('buffer');

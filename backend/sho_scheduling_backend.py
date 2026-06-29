@@ -2,23 +2,14 @@ import os
 import re
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List
 
-app = FastAPI()
+# Initialize as a router instead of a standalone app
+router = APIRouter()
 
-# Enable CORS for React frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- ENVIRONMENT VARIABLES (Mocked for example, set these in your OS) ---
+# --- ENVIRONMENT VARIABLES ---
 ZEROSET_URL = os.getenv("ZEROSET_URL", "zeroset_path.xlsx")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "sho_production_path.xlsx")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "box_ring_path.xlsx")
@@ -59,7 +50,6 @@ def get_zeroset_demand(url, target_date):
 
         demand_data = []
         for idx in range(date_row_idx + 1, len(df)):
-            # Assuming Family/Type is in column 0, 1, or 2. We scan early columns.
             raw_family = df.iloc[idx, 0] 
             demand_val = df.iloc[idx, target_col_idx]
             
@@ -78,8 +68,6 @@ def get_weights(url):
     """Maps Family & Part (100/120) to kg per ring."""
     try:
         df = pd.read_excel(url, sheet_name='WEIGHTS')
-        # Expecting cols: types, ir/or, weight per ring, Type
-        # Mapping 100 -> OR, 120 -> IR
         df['PartCode'] = df['ir/or'].map({100: 'OR', 120: 'IR'})
         return df
     except:
@@ -131,12 +119,12 @@ def get_box_rings(url):
         return pd.DataFrame()
 
 # --- MAIN ENDPOINT ---
-@app.post("/api/schedule")
+# Use @router instead of @app
+@router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     print(f"Received request for {payload.sector} on {payload.date}. Unit: {payload.unit_mode}")
     
     # 1. Fetch live data
-    # (In production, replace these with actual file reads or Google Drive API calls)
     # df_demand = get_zeroset_demand(ZEROSET_URL, payload.date)
     # df_weights = get_weights(SHO_PRODUCTION_URL)
     # df_furnace = get_furnace_flexibility(SHO_PRODUCTION_URL)
@@ -146,24 +134,20 @@ def generate_schedule(payload: ScheduleRequest):
     # 2. Parse UI Buffer Entries (Normalization)
     net_requirements = []
     
-    # Example logic to parse the generic UI dictionary 
-    # Entries format: 'ch_buffer_1_CH01_IR': '500'
     for key, value in payload.entries.items():
         if not value: continue
         parts = key.split('_')
         if len(parts) >= 4:
-            row_type = parts[0] + '_' + parts[1] # e.g., ch_buffer
+            row_type = parts[0] + '_' + parts[1] 
             channel = parts[2]
             part_ir_or = parts[3]
             
-            # Example Normalization Logic (pseudo-implementation)
             buffer_val = float(value)
             buffer_in_rings = buffer_val
+            
             if payload.unit_mode == 'Boxes':
-                # buffer_in_rings = buffer_val * get_rings_from_box_db(channel, part_ir_or)
                 pass
             elif payload.unit_mode == 'Days':
-                # buffer_in_rings = buffer_val * get_daily_demand(channel)
                 pass
                 
             net_requirements.append({
@@ -172,23 +156,14 @@ def generate_schedule(payload: ScheduleRequest):
                 "BufferRings": buffer_in_rings
             })
 
-    # 3. Apply Heuristic Scheduling Logic
     schedule_results = {
         "Furnace_Schedule": [],
         "Grinding_Schedule": []
     }
-    
-    # Mock applying the 30min and 2hr changeover constraints
-    # for req in sorted_requirements:
-    #    time_needed = req['Rings'] / machine['STD/HR']
-    #    if previous_type != current_type: time_needed += 2.0 # 2hr changeover
     
     return {
         "status": "success",
         "message": "Schedule calculated based on Buffer inputs, machine capacities, and Zeroset demand.",
         "data": schedule_results
     }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    

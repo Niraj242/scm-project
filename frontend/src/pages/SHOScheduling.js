@@ -78,9 +78,12 @@ const SHOScheduling = () => {
     const payload = { entries: tableData, unlocked: unlockedBlocks };
     localStorage.setItem(`sho_db_${sector}_${selectedDate}`, JSON.stringify(payload));
     
-    // 2. Send to Backend
+    // 2. Define your Render Backend URL
+    const API = 'https://scm-backend-pshv.onrender.com';
+    
+    // 3. Send to Backend
     try {
-      const response = await fetch('http://localhost:8000/api/schedule', {
+      const response = await fetch(`${API}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -101,11 +104,13 @@ const SHOScheduling = () => {
       }
     } catch (error) {
       console.error("Failed to connect to backend:", error);
-      alert("Saved locally, but failed to reach backend API. Is it running on port 8000?");
+      alert(`Failed to reach the backend at ${API}. Make sure your Render service is live and not sleeping.`);
     } finally {
       setIsSaving(false);
     }
   };
+
+  
 
   const unlockBlock = (section, col, subCol) => {
     const blockKey = `${sector}_${section}_${col}_${subCol}`;

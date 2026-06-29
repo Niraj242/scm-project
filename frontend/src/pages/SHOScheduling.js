@@ -13,78 +13,64 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
-  // Defines which columns should be blocked/merged for specific sections
+  // Defines which channels are blocked for which sections. 
   const DISABLED_BLOCKS = {
-    DGBB: {
-      OD: ['CH01', 'CH03', 'SABB', 'CH07', 'CH11'],
-      FACE: ['CH02', 'CH04', 'SABB', 'CH07', 'CH11']
-    },
-    TRB: {
-      OD: ['T 3', 'T 5', 'T 6', 'T 9', 'T10'],
-      FACE: ['T 8', 'T 9', 'T10']
-    },
-    HUB: {
-      OD: ['HUB 1.1', 'T HUB 1.1'],
-      FACE: []
-    }
+    DGBB: { OD: ['CH01', 'CH03', 'SABB', 'CH07', 'CH11'], FACE: ['CH02', 'CH04', 'SABB', 'CH07', 'CH11'] },
+    TRB: { OD: ['T 3', 'T 5', 'T 6', 'T 9', 'T10'], FACE: ['T 8', 'T 9', 'T10'] },
+    HUB: { OD: ['HUB 1.1', 'T HUB 1.1'], FACE: [] }
   };
 
+  // sectionIndex allows us to handle the vertical rowspan correctly
   const ROWS = [
-    { label: 'CH. BUFFER', key: 'ch_buffer_1', section: 'CH' },
-    { label: 'TYPE', key: 'type_1', section: 'CH' },
-    { label: 'CH. BUFFER', key: 'ch_buffer_2', section: 'CH' },
-    { label: 'NEXT TYPE', key: 'next_type_1', section: 'CH' },
-    { label: 'OD BUFFER', key: 'od_buffer_1', section: 'OD' },
-    { label: 'TYPE', key: 'type_2', section: 'OD' },
-    { label: 'OD BUFFER', key: 'od_buffer_2', section: 'OD' },
-    { label: 'NEXT TYPE', key: 'next_type_2', section: 'OD' },
-    { label: 'FACE BUFFER', key: 'face_buffer_1', section: 'FACE' },
-    { label: 'TYPE', key: 'type_3', section: 'FACE' },
-    { label: 'FACE BUFFER', key: 'face_buffer_2', section: 'FACE' },
-    { label: 'TYPE', key: 'type_4', section: 'FACE' },
-    { label: 'HT. BUFFER', key: 'ht_buffer_1', section: 'HT' },
-    { label: 'TYPE', key: 'type_5', section: 'HT' },
-    { label: 'HT. BUFFER', key: 'ht_buffer_2', section: 'HT' },
-    { label: 'TYPE', key: 'type_6', section: 'HT' },
-    { label: '', key: 'spacer', section: 'NONE' },
-    { label: 'RUNNING', key: 'running', section: 'RUN' },
-    { label: 'NEXT TYPE', key: 'next_type_3', section: 'RUN' },
-    { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN' }
+    { label: 'CH. BUFFER', key: 'ch_buffer_1', section: 'CH', sectionIndex: 0 },
+    { label: 'TYPE', key: 'type_1', section: 'CH', sectionIndex: 1 },
+    { label: 'CH. BUFFER', key: 'ch_buffer_2', section: 'CH', sectionIndex: 2 },
+    { label: 'NEXT TYPE', key: 'next_type_1', section: 'CH', sectionIndex: 3 },
+    
+    { label: 'OD BUFFER', key: 'od_buffer_1', section: 'OD', sectionIndex: 0 },
+    { label: 'TYPE', key: 'type_2', section: 'OD', sectionIndex: 1 },
+    { label: 'OD BUFFER', key: 'od_buffer_2', section: 'OD', sectionIndex: 2 },
+    { label: 'NEXT TYPE', key: 'next_type_2', section: 'OD', sectionIndex: 3 },
+    
+    { label: 'FACE BUFFER', key: 'face_buffer_1', section: 'FACE', sectionIndex: 0 },
+    { label: 'TYPE', key: 'type_3', section: 'FACE', sectionIndex: 1 },
+    { label: 'FACE BUFFER', key: 'face_buffer_2', section: 'FACE', sectionIndex: 2 },
+    { label: 'TYPE', key: 'type_4', section: 'FACE', sectionIndex: 3 },
+    
+    { label: 'HT. BUFFER', key: 'ht_buffer_1', section: 'HT', sectionIndex: 0 },
+    { label: 'TYPE', key: 'type_5', section: 'HT', sectionIndex: 1 },
+    { label: 'HT. BUFFER', key: 'ht_buffer_2', section: 'HT', sectionIndex: 2 },
+    { label: 'TYPE', key: 'type_6', section: 'HT', sectionIndex: 3 },
+    
+    { label: '', key: 'spacer', section: 'NONE', sectionIndex: 0 },
+    
+    { label: 'RUNNING', key: 'running', section: 'RUN', sectionIndex: 0 },
+    { label: 'NEXT TYPE', key: 'next_type_3', section: 'RUN', sectionIndex: 1 },
+    { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
   ];
 
-  // FETCH DATA from LocalStorage when Date or Sector changes
   useEffect(() => {
     const storageKey = `sho_db_${sector}_${selectedDate}`;
     const savedData = localStorage.getItem(storageKey);
-    if (savedData) {
-      setTableData(JSON.parse(savedData));
-    } else {
-      setTableData({}); // Clear if no data exists for this date
-    }
+    if (savedData) setTableData(JSON.parse(savedData));
+    else setTableData({});
   }, [sector, selectedDate]);
 
-  // Handle Input
   const handleInputChange = (rowKey, col, subCol, value) => {
-    setTableData(prev => ({
-      ...prev,
-      [`${rowKey}_${col}_${subCol}`]: value
-    }));
+    setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
   };
 
-  // SAVE DATA to LocalStorage
   const handleSave = () => {
     const storageKey = `sho_db_${sector}_${selectedDate}`;
     localStorage.setItem(storageKey, JSON.stringify(tableData));
-    
-    console.log("Data ready for Backend:", { sector, date: selectedDate, unit: unitMode, entries: tableData });
-    alert(`Saved successfully! Entries for ${sector} on ${selectedDate} are now stored.`);
+    alert(`Saved successfully! Plan will update based on ${sector} data for ${selectedDate}.`);
   };
 
   const columns = SECTOR_COLUMNS[sector];
+  const totalCols = (columns.length * 2) + 1;
 
   return (
     <div className="sho-container">
-      {/* CONTROLS */}
       <div className="controls-panel">
         <div className="control-group">
           <label>Sector:</label>
@@ -106,81 +92,91 @@ const SHOScheduling = () => {
             <option value="Rings">No. of Rings</option>
           </select>
         </div>
-        <button className="btn-save" onClick={handleSave}>Save Entries</button>
+        <button className="btn-save" onClick={handleSave}>Save Entries & Update Plan</button>
       </div>
 
-      {/* TABLE WRAPPER (Handles Scrolling) */}
       <div className="table-scroll-container">
         <table className="excel-table">
           <thead>
-            {/* 1st Header Row */}
+            {/* ROW 1: Exact Colspan Math */}
             <tr>
-              <th colSpan="2" className="text-blue text-left pl-2">SKF INDIA LTD.</th>
-              <th colSpan={columns.length * 2 - 4} className="text-blue">
+              <th colSpan="3" className="text-blue text-left pl-2">SKF INDIA LTD.</th>
+              <th colSpan={totalCols - 6} className="text-blue">
                 CHANNEL BUFFER STATUS (VERSION - 6)<br/>
                 {sector === 'DGBB' ? 'DBBB' : sector}
               </th>
-              <th colSpan="2" className="text-blue text-right pr-2">
+              <th colSpan="3" className="text-blue text-right pr-2">
                 DATE :- {selectedDate.split('-').reverse().join('/')}
               </th>
             </tr>
             
-            {/* 2nd Header Row (Dynamic based on Sector) */}
+            {/* ROW 2: Specific Sub-Headers */}
+            {sector === 'DGBB' && (
+              <tr>
+                <th colSpan="3" className="text-blue border-thick-bottom">BUFFER IN DAYS FOR 100% EFF.</th>
+                <th colSpan={14} className="text-blue font-xl border-thick-bottom">DBBB</th>
+                <th colSpan="2" className="text-blue border-thick-bottom border-thick-right">SHARED OPERATION</th>
+              </tr>
+            )}
             {sector === 'TRB' && (
               <tr>
-                <th colSpan="2" className="text-blue">BUFFER IN DAYS FOR 100% EFF.</th>
-                <th colSpan={(columns.length - 1) * 2} className="text-blue font-xl">TRB</th>
-                <th colSpan="2" className="text-blue font-xl">SPLIT THU<br/>T10</th>
+                <th colSpan="3" className="text-blue border-thick-bottom">BUFFER IN DAYS FOR 100% EFF.</th>
+                <th colSpan={16} className="text-blue font-xl border-thick-bottom">TRB</th>
+                <th colSpan="2" className="text-blue font-xl border-thick-bottom border-thick-right">SPLIT THU T10</th>
               </tr>
             )}
             {sector === 'HUB' && (
               <tr>
-                <th colSpan="2"></th>
-                <th colSpan="8" className="text-blue font-xl border-right-thick">HUB</th>
-                <th colSpan="6" className="text-blue font-xl">THUB</th>
-              </tr>
-            )}
-            {sector === 'DGBB' && (
-              <tr>
-                <th colSpan="2" className="text-blue">BUFFER IN DAYS FOR 100% EFF.</th>
-                <th colSpan={columns.length * 2 - 4} className="text-blue font-xl">DBBB</th>
-                <th colSpan="2" className="text-blue">SHARED OPERATION</th>
+                <th colSpan="1" className="border-thick-bottom border-thick-right"></th>
+                <th colSpan="8" className="text-blue font-xl border-thick-bottom border-thick-right">HUB</th>
+                <th colSpan="6" className="text-blue font-xl border-thick-bottom border-thick-right">THUB</th>
               </tr>
             )}
 
-            {/* 3rd Header Row (Channels) */}
+            {/* ROW 3: Channel Names */}
             <tr className="header-row">
-              <th className="text-blue" style={{minWidth: '100px'}}>CHANNEL</th>
+              <th className="text-blue border-thick-right border-thick-bottom" style={{minWidth: '110px'}}>CHANNEL</th>
               {columns.map(col => (
-                <th key={col} colSpan="2" className="text-blue column-title">{col}</th>
+                <th key={col} colSpan="2" className="text-blue column-title border-thick-right border-thick-bottom">{col}</th>
               ))}
             </tr>
             
-            {/* 4th Header Row (IR / OR) */}
+            {/* ROW 4: IR/OR Split */}
             <tr className="subheader-row">
-              <th className="font-bold">PART</th>
+              <th className="font-bold border-thick-right border-thick-bottom">PART</th>
               {columns.map(col => (
                 <React.Fragment key={`${col}-sub`}>
-                  <th className="font-bold">IR</th>
-                  <th className="font-bold">OR</th>
+                  <th className="font-bold border-thick-bottom">IR</th>
+                  <th className="font-bold border-thick-right border-thick-bottom">OR</th>
                 </React.Fragment>
               ))}
             </tr>
           </thead>
           
           <tbody>
-            {ROWS.map((row, index) => (
-              <tr key={index} className={row.key === 'spacer' ? 'spacer-row' : ''}>
-                <td className="row-label font-bold">{row.label}</td>
+            {ROWS.map((row) => (
+              <tr key={row.key} className={row.key === 'spacer' ? 'spacer-row border-thick-bottom' : ''}>
+                <td className="row-label font-bold border-thick-right">{row.label}</td>
                 
                 {row.key !== 'spacer' ? columns.map(col => {
-                  // Check if this cell block should be disabled/merged
                   const isDisabled = DISABLED_BLOCKS[sector][row.section]?.includes(col);
 
                   if (isDisabled) {
-                    return <td key={`${row.key}-${col}-disabled`} colSpan="2" className="disabled-block"></td>;
+                    if (row.sectionIndex === 0) {
+                      // Render the vertical merge ONLY on the first row of the block. Span 4 rows.
+                      return (
+                        <React.Fragment key={`disabled-${col}`}>
+                          <td rowSpan={4} className="disabled-block"></td>
+                          <td rowSpan={4} className="disabled-block border-thick-right"></td>
+                        </React.Fragment>
+                      );
+                    } else {
+                      // Skip rendering td entirely for the next 3 rows to allow rowspan to work
+                      return null;
+                    }
                   }
 
+                  // Standard Input Render
                   return (
                     <React.Fragment key={`${row.key}-${col}`}>
                       <td className="input-cell">
@@ -190,7 +186,7 @@ const SHOScheduling = () => {
                           onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}
                         />
                       </td>
-                      <td className="input-cell">
+                      <td className="input-cell border-thick-right">
                         <input 
                           type="text"
                           value={tableData[`${row.key}_${col}_OR`] || ''}
@@ -201,8 +197,8 @@ const SHOScheduling = () => {
                   );
                 }) : columns.map(col => (
                   <React.Fragment key={`spacer-${col}`}>
-                    <td className="spacer-cell"></td>
-                    <td className="spacer-cell"></td>
+                    <td className="spacer-cell border-thick-bottom"></td>
+                    <td className="spacer-cell border-thick-right border-thick-bottom"></td>
                   </React.Fragment>
                 ))}
               </tr>

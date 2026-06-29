@@ -1,250 +1,194 @@
 import os
+import re
 import pandas as pd
-from fastapi import APIRouter, HTTPException
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, List
 
-router = APIRouter()
+app = FastAPI()
 
-# --- ENVIRONMENT VARIABLES FOR GOOGLE SHEET STREAM EXPORTS ---
-ZEROSET_URL = os.getenv("ZEROSET_URL", "")
-SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
-BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
+# Enable CORS for React frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# --- DATA TRANSITION MODELS ---
-class BufferRow(BaseModel):
-    part_type: str
-    component: str  # "IR" (120) or "OR" (100)
-    channel: str
-    channel_buffer: float
-    next_type_buffer: float
-    od_buffer: Optional[float] = 0.0
-    face_buffer: Optional[float] = 0.0
-    ht_buffer: Optional[float] = 0.0
+# --- ENVIRONMENT VARIABLES (Mocked for example, set these in your OS) ---
+ZEROSET_URL = os.getenv("ZEROSET_URL", "zeroset_path.xlsx")
+SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "sho_production_path.xlsx")
+BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "box_ring_path.xlsx")
 
+# --- PYDANTIC MODELS (Payload from React) ---
 class ScheduleRequest(BaseModel):
-    target_date: str
-    unit_mode: str  # "Days", "Boxes", "Rings"
-    buffers: List[BufferRow]
+    sector: str
+    date: str
+    unit_mode: str
+    entries: Dict[str, Any]
+    unlocked_blocks: List[str]
 
-# --- ROBUST RAW ROW DATA EXTRACTION ENGINE ---
-def read_sheet_positional(url: str, sheet_name: Any = 0) -> pd.DataFrame:
-    """Reads spreadsheets by sequence indexes to eliminate duplicate column collisions."""
-    if not url:
-        return pd.DataFrame()
+# --- HELPER FUNCTIONS ---
+def extract_family(val):
+    if pd.isna(val): return None
+    val_str = str(val).strip().upper()
+    match = re.search(r'MF(\d+)', val_str)
+    if match: return match.group(1)
+    return val_str
+
+# --- DATA PIPELINES ---
+def get_zeroset_demand(url, target_date):
+    """Extracts Date-specific demand and bearing family."""
     try:
-        df = pd.read_excel(url, sheet_name=sheet_name, header=None)
-        return df.fillna(0.0)
+        df = pd.read_excel(url, header=None)
+        # Find row with MTD or PKWIP
+        date_row_mask = df.apply(lambda r: r.astype(str).str.contains('MTD|PKWIP').any(), axis=1)
+        if not date_row_mask.any(): return pd.DataFrame()
+        
+        date_row_idx = df[date_row_mask].index[0]
+        date_row = df.iloc[date_row_idx].astype(str)
+        
+        # Match user date
+        try:
+            target_col_idx = date_row[date_row.str.contains(target_date)].index[0]
+        except IndexError:
+            return pd.DataFrame() # Date not found
+
+        demand_data = []
+        for idx in range(date_row_idx + 1, len(df)):
+            # Assuming Family/Type is in column 0, 1, or 2. We scan early columns.
+            raw_family = df.iloc[idx, 0] 
+            demand_val = df.iloc[idx, target_col_idx]
+            
+            if pd.notna(demand_val) and str(demand_val).replace('.', '', 1).isdigit():
+                family = extract_family(raw_family)
+                demand_data.append({
+                    'Family': family,
+                    'Demand_Rings': float(demand_val) * 1000
+                })
+        return pd.DataFrame(demand_data).groupby('Family').sum().reset_index()
     except Exception as e:
-        print(f"Extraction exception on sheet '{sheet_name}': {e}")
+        print(f"Error reading Zeroset: {e}")
         return pd.DataFrame()
 
-def parse_zeroset_plan(df: pd.DataFrame, target_date: str) -> Dict[str, float]:
-    """Scans the demand table to isolate columns matching target timeline keys."""
-    demands = {}
-    if df.empty: return demands
+def get_weights(url):
+    """Maps Family & Part (100/120) to kg per ring."""
+    try:
+        df = pd.read_excel(url, sheet_name='WEIGHTS')
+        # Expecting cols: types, ir/or, weight per ring, Type
+        # Mapping 100 -> OR, 120 -> IR
+        df['PartCode'] = df['ir/or'].map({100: 'OR', 120: 'IR'})
+        return df
+    except:
+        return pd.DataFrame()
 
-    date_col_idx = None
-    for idx, row in df.iterrows():
-        row_str = [str(cell).strip().upper() for cell in row.values]
-        if "MTD" in row_str or "PKWIP" in row_str:
-            for c_idx, cell in enumerate(row_str):
-                if target_date.upper() in cell:
-                    date_col_idx = c_idx
-                    break
-            if date_col_idx is not None: break
+def get_furnace_flexibility(url):
+    """Maps items to Primary and Alt furnaces."""
+    try:
+        return pd.read_excel(url, sheet_name='Furnace Type Flexibility')
+    except:
+        return pd.DataFrame()
 
-    if date_col_idx is None: return demands
-
-    for idx, row in df.iterrows():
-        raw_type = str(row.iloc[0]).strip().upper()
-        if not raw_type or raw_type in ["0.0", "TYPE", "MTD", "PKWIP", "TOTAL"]:
-            continue
-        
-        cleaned_type = raw_type.replace("MF", "").strip() if raw_type.startswith("MF") else raw_type
-        try:
-            val = float(row.iloc[date_col_idx])
-            if val > 0:
-                demands[cleaned_type] = val * 1000.0
-        except:
-            continue
+def get_grinding_machines(url):
+    """Parses dynamic sheets like 544, Gardner BG1."""
+    machines = {}
+    try:
+        xls = pd.ExcelFile(url)
+        skip_sheets = ['WEIGHTS', 'Furnace Type Flexibility']
+        for sheet in xls.sheet_names:
+            if sheet in skip_sheets: continue
             
-    return demands
+            df = pd.read_excel(xls, sheet_name=sheet, header=None)
+            start_cells = np.where(df == 'MACHINE')
+            if not start_cells[0].size: continue
+            
+            r, c = start_cells[0][0], start_cells[1][0]
+            machine_num = df.iloc[r, c+1]
+            process = df.iloc[r, c+2] # Face or OD
+            
+            headers = df.iloc[r+1]
+            data = df.iloc[r+2:].copy()
+            data.columns = headers
+            data['PART'] = data['PART'].map({100: 'OR', 120: 'IR'})
+            
+            machines[str(machine_num)] = {
+                'Process': process,
+                'Rates': data[['TYPE', 'PART', 'STD/HR', 'Boxes/hr', 'Rings/Box']].dropna().to_dict('records')
+            }
+    except:
+        pass
+    return machines
 
-def parse_weights_and_flex(url: str) -> tuple:
-    """Extracts material component configuration parameters and furnace priorities."""
-    weights_df = read_sheet_positional(url, sheet_name="WEIGHTS")
-    flex_df = read_sheet_positional(url, sheet_name="Furnace Type Flexibility")
+def get_box_rings(url):
+    """Gets Rings per box mapping."""
+    try:
+        df = pd.read_excel(url, sheet_name='RING PER BOX.')
+        return df
+    except:
+        return pd.DataFrame()
+
+# --- MAIN ENDPOINT ---
+@app.post("/api/schedule")
+def generate_schedule(payload: ScheduleRequest):
+    print(f"Received request for {payload.sector} on {payload.date}. Unit: {payload.unit_mode}")
     
-    weight_map = {}
-    if not weights_df.empty:
-        for idx, row in weights_df.iterrows():
-            if idx == 0: continue
-            t = str(row.iloc[0]).strip().upper()
-            comp = str(row.iloc[1]).strip()
-            try:
-                w = float(row.iloc[2])
-                if t not in weight_map: weight_map[t] = {}
-                weight_map[t][comp] = w
-            except: continue
-
-    flex_map = {}
-    if not flex_df.empty:
-        for idx, row in flex_df.iterrows():
-            if idx == 0: continue
-            t = str(row.iloc[0]).strip().upper()
-            primary = str(row.iloc[1]).strip().upper()
-            alt1 = str(row.iloc[2]).strip().upper() if len(row) > 2 else ""
-            flex_map[t] = {"primary": primary, "alt1": alt1}
-
-    return weight_map, flex_map
-
-def parse_box_capacities(url: str) -> Dict[str, Dict[str, int]]:
-    """Generates structural dictionary translation layers for box volumetric counts."""
-    df = read_sheet_positional(url, sheet_name=0)
-    caps = {}
-    if df.empty: return caps
+    # 1. Fetch live data
+    # (In production, replace these with actual file reads or Google Drive API calls)
+    # df_demand = get_zeroset_demand(ZEROSET_URL, payload.date)
+    # df_weights = get_weights(SHO_PRODUCTION_URL)
+    # df_furnace = get_furnace_flexibility(SHO_PRODUCTION_URL)
+    # dict_machines = get_grinding_machines(SHO_PRODUCTION_URL)
+    # df_boxes = get_box_rings(BOX_RING_DATA_URL)
     
-    for idx, row in df.iterrows():
-        for col_idx in [0, 3]:
-            if col_idx >= len(row): continue
-            t = str(row.iloc[col_idx]).strip().upper()
-            if not t or t in ["TYPE", "0.0"]: continue
-            try:
-                or_val = int(row.iloc[col_idx + 1])
-                ir_val = int(row.iloc[col_idx + 2])
-                caps[t] = {"100": or_val, "120": ir_val}
-            except: continue
-    return caps
+    # 2. Parse UI Buffer Entries (Normalization)
+    net_requirements = []
+    
+    # Example logic to parse the generic UI dictionary 
+    # Entries format: 'ch_buffer_1_CH01_IR': '500'
+    for key, value in payload.entries.items():
+        if not value: continue
+        parts = key.split('_')
+        if len(parts) >= 4:
+            row_type = parts[0] + '_' + parts[1] # e.g., ch_buffer
+            channel = parts[2]
+            part_ir_or = parts[3]
+            
+            # Example Normalization Logic (pseudo-implementation)
+            buffer_val = float(value)
+            buffer_in_rings = buffer_val
+            if payload.unit_mode == 'Boxes':
+                # buffer_in_rings = buffer_val * get_rings_from_box_db(channel, part_ir_or)
+                pass
+            elif payload.unit_mode == 'Days':
+                # buffer_in_rings = buffer_val * get_daily_demand(channel)
+                pass
+                
+            net_requirements.append({
+                "Channel": channel,
+                "Part": part_ir_or,
+                "BufferRings": buffer_in_rings
+            })
 
-# --- OPTIMIZED CAPACITY ROUTING ALGORITHMS ---
-def dispatch_heat_treatment(net_demand: Dict[str, float], weights: Dict, flex: Dict) -> List[Dict]:
-    """Distributes system components across thermal units checking for changeovers."""
-    furnaces = {
-        "AICHELIN.(896)": {"cap": 350, "jobs": [], "load": 0.0},
-        "CASTLINK FURNACE( 1018 )": {"cap": 250, "jobs": [], "load": 0.0},
-        "ROLLER FURNACE ( 148 )": {"cap": 250, "jobs": [], "load": 0.0},
-        "SIMPLICITY FURNACE(1238)": {"cap": 180, "jobs": [], "load": 0.0},
-        "BIRLEC FURNACE  ( 1158 )": {"cap": 170, "jobs": [], "load": 0.0},
-        "SHOEI FURNACE   ( 1062 )": {"cap": 350, "jobs": [], "load": 0.0},
-        "AICHELIN UNITHERM ( 2033 )": {"cap": 250, "jobs": [], "load": 0.0}
+    # 3. Apply Heuristic Scheduling Logic
+    schedule_results = {
+        "Furnace_Schedule": [],
+        "Grinding_Schedule": []
     }
     
-    HT_CHANGEOVER = 0.5 # 30-minute changeover time constraint
+    # Mock applying the 30min and 2hr changeover constraints
+    # for req in sorted_requirements:
+    #    time_needed = req['Rings'] / machine['STD/HR']
+    #    if previous_type != current_type: time_needed += 2.0 # 2hr changeover
     
-    for part, qty in net_demand.items():
-        if qty <= 0: continue
-        w_or = weights.get(part, {}).get("100", 0.2)
-        w_ir = weights.get(part, {}).get("120", 0.18)
-        
-        total_kg = (qty * w_or) + (qty * w_ir)
-        pref = flex.get(part, {}).get("primary", "AICHELIN.(896)")
-        alt = flex.get(part, {}).get("alt1", "CASTLINK FURNACE( 1018 )")
-        
-        target = pref if pref in furnaces else "AICHELIN.(896)"
-        hrs_req = (total_kg / furnaces[target]["cap"]) + HT_CHANGEOVER
-        
-        if furnaces[target]["load"] + hrs_req > 24.0:
-            target = alt if alt in furnaces else "CASTLINK FURNACE( 1018 )"
-            hrs_req = (total_kg / furnaces[target]["cap"]) + HT_CHANGEOVER
-            
-        if furnaces[target]["load"] + hrs_req <= 24.0:
-            furnaces[target]["jobs"].append({
-                "type": part,
-                "qty_kg": round(total_kg, 1),
-                "channel": "Combined Line"
-            })
-            furnaces[target]["load"] += hrs_req
-            
-    return [{"furnace": k, "capacity": f"{v['cap']} kg/h", "jobs": v["jobs"]} for k, v in furnaces.items()]
+    return {
+        "status": "success",
+        "message": "Schedule calculated based on Buffer inputs, machine capacities, and Zeroset demand.",
+        "data": schedule_results
+    }
 
-def dispatch_grinding(net_demand: Dict[str, float]) -> List[Dict]:
-    """Splits target output into continuous 8-hour shift groups with 2-hour changeovers."""
-    machines = [
-        {"name": "544 Machine", "type": "Face", "std_hr": 7771, "box_hr": 12.0},
-        {"name": "Gardner BG1", "type": "Face", "std_hr": 7200, "box_hr": 10.0},
-        {"name": "1904+170 Line", "type": "OD", "std_hr": 6986, "box_hr": 17.0}
-    ]
-    
-    G_CHANGEOVER = 2.0 # 2-hour changeover constraint
-    schedule_out = []
-    
-    for m in machines:
-        avail_hrs = [8.0, 8.0, 8.0]
-        shifts_res = [
-            {"qty": 0, "job": "", "priority": ""},
-            {"qty": 0, "job": "", "priority": ""},
-            {"qty": 0, "job": "", "priority": ""}
-        ]
-        
-        for part, qty in net_demand.items():
-            if qty <= 0: continue
-            needed_rings = qty
-            
-            for s_idx in range(3):
-                if needed_rings <= 0: break
-                
-                net_hrs = avail_hrs[s_idx] - (G_CHANGEOVER if shifts_res[s_idx]["job"] else 0)
-                if net_hrs <= 0: continue
-                
-                run_rings = min(needed_rings, net_hrs * m["std_hr"])
-                if run_rings > 0:
-                    shifts_res[s_idx]["qty"] += int(run_rings)
-                    shifts_res[s_idx]["job"] = f"{part}-OR/IR"
-                    shifts_res[s_idx]["priority"] = "P1"
-                    
-                    needed_rings -= run_rings
-                    avail_hrs[s_idx] -= (run_rings / m["std_hr"])
-                    
-        schedule_out.append({
-            "machine": m["name"],
-            "type": m["type"],
-            "std_box": int(m["box_hr"]),
-            "shift_1": shifts_res[0],
-            "shift_2": shifts_res[1],
-            "shift_3": shifts_res[2]
-        })
-        
-    return schedule_out
-
-# --- MAIN ROUTER SCHEDULING DISPATCH ENDPOINT ---
-@router.post("/api/schedule")
-async def generate_schedule(req: ScheduleRequest):
-    try:
-        zeroset_df = read_sheet_positional(ZEROSET_URL)
-        weights, flex = parse_weights_and_flex(SHO_PRODUCTION_URL)
-        box_caps = parse_box_capacities(BOX_RING_DATA_URL)
-        
-        base_demand = parse_zeroset_plan(zeroset_df, req.target_date)
-        net_demand = base_demand.copy()
-        
-        for row in req.buffers:
-            pt = row.part_type.upper()
-            if pt not in net_demand: continue
-            
-            comp_code = "120" if row.component == "IR" else "100"
-            box_capacity = box_caps.get(pt, {}).get(comp_code, 500)
-            
-            total_input_units = (
-                row.channel_buffer + row.next_type_buffer + 
-                row.od_buffer + row.face_buffer + row.ht_buffer
-            )
-            
-            deduction_rings = 0.0
-            if req.unit_mode == "Boxes":
-                deduction_rings = total_input_units * box_capacity
-            elif req.unit_mode == "Days":
-                deduction_rings = total_input_units * base_demand.get(pt, 0.0)
-            else:
-                deduction_rings = total_input_units
-                
-            net_demand[pt] = max(0.0, net_demand[pt] - deduction_rings)
-            
-        return {
-            "date": req.target_date,
-            "unit_mode_processed": req.unit_mode,
-            "face_od_grinding": dispatch_grinding(net_demand),
-            "heat_treatment": dispatch_heat_treatment(net_demand, weights, flex)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,21 +1,24 @@
 .sho-container {
   font-family: Arial, sans-serif;
-  padding: 20px;
+  padding: 15px;
   background-color: #f8f9fa;
-  min-height: 100vh;
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
 }
 
-/* --- Controls Panel --- */
 .controls-panel {
   display: flex;
   gap: 20px;
   background-color: white;
-  padding: 15px 20px;
+  padding: 10px 20px;
   border: 1px solid #ccc;
   border-radius: 4px;
-  margin-bottom: 20px;
+  margin-bottom: 15px;
   align-items: center;
   box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+  flex-shrink: 0;
 }
 
 .control-group {
@@ -32,7 +35,7 @@
 
 .control-group select,
 .control-group input {
-  padding: 6px 10px;
+  padding: 4px 8px;
   border: 1px solid #aaa;
   border-radius: 4px;
   font-size: 14px;
@@ -47,68 +50,71 @@
   border-radius: 4px;
   cursor: pointer;
   margin-left: auto;
-  transition: background-color 0.2s;
 }
 
-.btn-save:hover {
-  background-color: #004494;
-}
+.btn-save:hover { background-color: #004494; }
 
-/* --- Dynamic Table Styling (Excel Look) --- */
-.table-wrapper {
-  overflow-x: auto;
+/* --- Table Scrolling Optimization --- */
+.table-scroll-container {
+  flex-grow: 1;
+  overflow: auto; /* Adds both horizontal and vertical scrolling */
   background: white;
   border: 2px solid #000;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
 }
 
 .excel-table {
   border-collapse: collapse;
-  width: max-content;
-  min-width: 100%;
-  font-size: 12px;
+  width: 100%;
+  font-size: 11px; /* Smaller font to fit more */
 }
+
+/* Sticky Headers so they stay visible when scrolling down */
+.excel-table thead th {
+  position: sticky;
+  top: 0;
+  background-color: #fdfdfd;
+  z-index: 2;
+}
+.excel-table thead tr:nth-child(1) th { top: 0; }
+.excel-table thead tr:nth-child(2) th { top: 22px; }
+.excel-table thead tr:nth-child(3) th { top: 44px; }
+.excel-table thead tr:nth-child(4) th { top: 72px; border-bottom: 2px solid #000; }
 
 .excel-table th, 
 .excel-table td {
   border: 1px solid #888;
   text-align: center;
   vertical-align: middle;
+  white-space: nowrap;
 }
 
-.excel-table th {
-  padding: 6px;
-  background-color: #fdfdfd;
-}
+.excel-table th { padding: 4px; }
 
-.text-blue {
-  color: #005bb5;
-  font-weight: bold;
-}
-
+.text-blue { color: #005bb5; font-weight: bold; }
 .font-bold { font-weight: bold; }
-.font-xl { font-size: 18px; }
+.font-xl { font-size: 15px; }
 .text-left { text-align: left; }
 .text-right { text-align: right; }
 .pl-2 { padding-left: 10px !important; }
 .pr-2 { padding-right: 10px !important; }
 .border-right-thick { border-right: 2px solid #000 !important; }
 
-.column-title {
-  font-size: 14px;
-}
-
 .row-label {
   background-color: #fdfdfd;
-  padding: 4px 8px;
-  text-align: center;
-  white-space: nowrap;
+  padding: 2px 6px;
+  text-align: left;
+  position: sticky;
+  left: 0; /* Keeps the label column sticky when scrolling right */
+  z-index: 1;
 }
 
-/* --- Input Cells --- */
+/* --- Input Cells Optimization (No padding wasted) --- */
 .input-cell {
-  padding: 0;
-  width: 60px;
-  height: 25px;
+  padding: 0 !important;
+  width: 45px;
+  min-width: 45px;
+  height: 22px;
 }
 
 .input-cell input {
@@ -119,17 +125,25 @@
   font-size: 12px;
   background-color: transparent;
   outline: none;
-  padding: 0;
+  padding: 0 1px; /* Minimal padding for maximum width */
+  box-sizing: border-box;
 }
 
-/* Highlight cell when typing */
 .input-cell input:focus {
   background-color: #e8f4fd;
   box-shadow: inset 0 0 0 1px #005bb5;
 }
 
-/* Spacer Row styling */
-.spacer-row td {
-  height: 20px;
-  background-color: #fdfdfd;
+/* --- Blocked/Merged Cells --- */
+.disabled-block {
+  background: repeating-linear-gradient(
+    45deg,
+    #f0f0f0,
+    #f0f0f0 5px,
+    #e8e8e8 5px,
+    #e8e8e8 10px
+  );
+  border: 1px solid #888;
 }
+
+.spacer-row td { height: 10px; background-color: #eee; }

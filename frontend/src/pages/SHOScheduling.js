@@ -7,7 +7,8 @@ const SHOScheduling = () => {
   const [unitMode, setUnitMode] = useState('Days');
   
   const [tableData, setTableData] = useState({});
-  const [unlockedBlocks, setUnlockedBlocks] = useState([]); // Tracks which blocks the user has manually enabled
+  const [unlockedBlocks, setUnlockedBlocks] = useState([]); 
+  const [isSaving, setIsSaving] = useState(false);
 
   const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
@@ -15,8 +16,6 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
-  // GRANULAR BLOCKING: Specify EXACTLY which ring (IR or OR) is merged/disabled.
-  // Note: Adjust these arrays if your exact image has slight variations.
   const DEFAULT_BLOCKED = {
     DGBB: { 
       OD: { CH01: ['IR'], CH03: ['IR', 'OR'], SABB: ['OR'], CH07: ['IR', 'OR'], CH11: ['IR', 'OR'] }, 
@@ -37,24 +36,19 @@ const SHOScheduling = () => {
     { label: 'TYPE', key: 'type_1', section: 'CH', sectionIndex: 1 },
     { label: 'CH. BUFFER', key: 'ch_buffer_2', section: 'CH', sectionIndex: 2 },
     { label: 'NEXT TYPE', key: 'next_type_1', section: 'CH', sectionIndex: 3 },
-    
     { label: 'OD BUFFER', key: 'od_buffer_1', section: 'OD', sectionIndex: 0 },
     { label: 'TYPE', key: 'type_2', section: 'OD', sectionIndex: 1 },
     { label: 'OD BUFFER', key: 'od_buffer_2', section: 'OD', sectionIndex: 2 },
     { label: 'NEXT TYPE', key: 'next_type_2', section: 'OD', sectionIndex: 3 },
-    
     { label: 'FACE BUFFER', key: 'face_buffer_1', section: 'FACE', sectionIndex: 0 },
     { label: 'TYPE', key: 'type_3', section: 'FACE', sectionIndex: 1 },
     { label: 'FACE BUFFER', key: 'face_buffer_2', section: 'FACE', sectionIndex: 2 },
     { label: 'TYPE', key: 'type_4', section: 'FACE', sectionIndex: 3 },
-    
     { label: 'HT. BUFFER', key: 'ht_buffer_1', section: 'HT', sectionIndex: 0 },
     { label: 'TYPE', key: 'type_5', section: 'HT', sectionIndex: 1 },
     { label: 'HT. BUFFER', key: 'ht_buffer_2', section: 'HT', sectionIndex: 2 },
     { label: 'TYPE', key: 'type_6', section: 'HT', sectionIndex: 3 },
-    
     { label: '', key: 'spacer', section: 'NONE', sectionIndex: 0 },
-    
     { label: 'RUNNING', key: 'running', section: 'RUN', sectionIndex: 0 },
     { label: 'NEXT TYPE', key: 'next_type_3', section: 'RUN', sectionIndex: 1 },
     { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
@@ -77,13 +71,42 @@ const SHOScheduling = () => {
     setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
   };
 
-  const handleSave = () => {
+  const handleSaveAndSchedule = async () => {
+    setIsSaving(true);
+    
+    // 1. Save to LocalStorage
     const payload = { entries: tableData, unlocked: unlockedBlocks };
     localStorage.setItem(`sho_db_${sector}_${selectedDate}`, JSON.stringify(payload));
-    alert(`Data saved! Ready for scheduling calculation.`);
+    
+    // 2. Send to Backend
+    try {
+      const response = await fetch('http://localhost:8000/api/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sector: sector,
+          date: selectedDate,
+          unit_mode: unitMode,
+          entries: tableData,
+          unlocked_blocks: unlockedBlocks
+        })
+      });
+
+      const result = await response.json();
+      if (response.ok) {
+        alert("Success! Backend calculated the plan.");
+        console.log("Schedule Result:", result);
+      } else {
+        alert("Error from server: " + (result.message || "Unknown error"));
+      }
+    } catch (error) {
+      console.error("Failed to connect to backend:", error);
+      alert("Saved locally, but failed to reach backend API. Is it running on port 8000?");
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  // Double-Click Handler to unlock a merged block
   const unlockBlock = (section, col, subCol) => {
     const blockKey = `${sector}_${section}_${col}_${subCol}`;
     if (!unlockedBlocks.includes(blockKey)) {
@@ -94,7 +117,6 @@ const SHOScheduling = () => {
   const columns = SECTOR_COLUMNS[sector];
   const totalCols = (columns.length * 2) + 1;
 
-  // Helper to check if a specific IR/OR cell is blocked
   const isCellBlocked = (section, col, subCol) => {
     const defaultBlock = DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol);
     const isUnlocked = unlockedBlocks.includes(`${sector}_${section}_${col}_${subCol}`);
@@ -124,14 +146,15 @@ const SHOScheduling = () => {
             <option value="Rings">No. of Rings</option>
           </select>
         </div>
-        <button className="btn-save" onClick={handleSave}>Save Entries</button>
+        <button className="btn-save" onClick={handleSaveAndSchedule} disabled={isSaving}>
+          {isSaving ? "Calculating..." : "Save & Generate Schedule"}
+        </button>
         <div className="hint-text">💡 <em>Hint: Double-click a gray blocked cell to enable typing in it.</em></div>
       </div>
 
       <div className="table-scroll-container">
         <table className="excel-table">
           <thead>
-            {/* ROW 1: Company Header */}
             <tr>
               <th colSpan="3" className="text-blue text-left pl-2">SKF INDIA LTD.</th>
               <th colSpan={totalCols - 6} className="text-blue">
@@ -142,8 +165,6 @@ const SHOScheduling = () => {
                 DATE :- {selectedDate.split('-').reverse().join('/')}
               </th>
             </tr>
-            
-            {/* ROW 2: Sector Titles */}
             {sector === 'DGBB' && (
               <tr>
                 <th colSpan="3" className="text-blue border-thick-bottom">BUFFER IN DAYS FOR 100% EFF.</th>
@@ -165,16 +186,12 @@ const SHOScheduling = () => {
                 <th colSpan="6" className="text-blue font-xl border-thick-bottom border-thick-right">THUB</th>
               </tr>
             )}
-
-            {/* ROW 3: Channel Headers */}
             <tr className="header-row">
               <th className="text-blue border-thick-right border-thick-bottom" style={{minWidth: '110px'}}>CHANNEL</th>
               {columns.map(col => (
                 <th key={col} colSpan="2" className="text-blue column-title border-thick-right border-thick-bottom">{col}</th>
               ))}
             </tr>
-            
-            {/* ROW 4: IR/OR Sub-Headers */}
             <tr className="subheader-row">
               <th className="font-bold border-thick-right border-thick-bottom">PART</th>
               {columns.map(col => (
@@ -185,55 +202,32 @@ const SHOScheduling = () => {
               ))}
             </tr>
           </thead>
-          
           <tbody>
             {ROWS.map((row) => (
               <tr key={row.key} className={row.key === 'spacer' ? 'spacer-row border-thick-bottom' : ''}>
                 <td className="row-label font-bold border-thick-right">{row.label}</td>
-                
                 {row.key !== 'spacer' ? columns.map(col => {
                   const irBlocked = isCellBlocked(row.section, col, 'IR');
                   const orBlocked = isCellBlocked(row.section, col, 'OR');
 
                   return (
                     <React.Fragment key={`${row.key}-${col}`}>
-                      {/* IR CELL RENDERING */}
                       {irBlocked ? (
                         row.sectionIndex === 0 ? (
-                          <td 
-                            rowSpan={4} 
-                            className="disabled-block" 
-                            title="Double-click to enable"
-                            onDoubleClick={() => unlockBlock(row.section, col, 'IR')}
-                          ></td>
+                          <td rowSpan={4} className="disabled-block" onDoubleClick={() => unlockBlock(row.section, col, 'IR')}></td>
                         ) : null
                       ) : (
                         <td className="input-cell">
-                          <input 
-                            type="text"
-                            value={tableData[`${row.key}_${col}_IR`] || ''}
-                            onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}
-                          />
+                          <input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/>
                         </td>
                       )}
-
-                      {/* OR CELL RENDERING */}
                       {orBlocked ? (
                         row.sectionIndex === 0 ? (
-                          <td 
-                            rowSpan={4} 
-                            className="disabled-block border-thick-right" 
-                            title="Double-click to enable"
-                            onDoubleClick={() => unlockBlock(row.section, col, 'OR')}
-                          ></td>
+                          <td rowSpan={4} className="disabled-block border-thick-right" onDoubleClick={() => unlockBlock(row.section, col, 'OR')}></td>
                         ) : null
                       ) : (
                         <td className="input-cell border-thick-right">
-                          <input 
-                            type="text"
-                            value={tableData[`${row.key}_${col}_OR`] || ''}
-                            onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}
-                          />
+                          <input type="text" value={tableData[`${row.key}_${col}_OR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}/>
                         </td>
                       )}
                     </React.Fragment>

@@ -59,6 +59,7 @@
   background: white;
   border: 3px solid #000;
   box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+  margin-bottom: 20px; /* Separator for new schedule UI */
 }
 
 .excel-table {
@@ -96,6 +97,7 @@
 .text-right { text-align: right; }
 .pl-2 { padding-left: 10px !important; }
 .pr-2 { padding-right: 10px !important; }
+.text-red { color: #dc3545; }
 
 .row-label {
   background-color: #f8f9fa;
@@ -145,16 +147,13 @@
   background-color: #d6d8db; 
 }
 
-/* ADD TO BOTTOM OF EXISTING CSS */
-
-.mb-4 { margin-bottom: 20px; }
+/* NEW STYLES FOR THE SCHEDULE OUTPUT */
 .mb-2 { margin-bottom: 10px; }
 .text-center { text-align: center; }
 
 .schedule-output-container {
-  margin-top: 20px;
   background-color: white;
-  border: 2px solid #000;
+  border: 3px solid #000;
   padding: 10px;
   box-shadow: 0 4px 8px rgba(0,0,0,0.2);
   flex-grow: 1;
@@ -164,13 +163,13 @@
 .schedule-grid {
   display: flex;
   flex-direction: row;
-  gap: 10px;
+  gap: 15px;
   align-items: flex-start;
 }
 
 .schedule-col {
   flex: 1;
-  min-width: 300px;
+  min-width: 320px;
 }
 
 .full-width {
@@ -178,9 +177,9 @@
 }
 
 .machine-header {
-  background-color: #d1ecf1;
+  background-color: #e9ecef; /* Light gray to stand out */
 }
 
-.text-red {
-  color: red;
+.schedule-col .excel-table thead th {
+  position: static; /* Prevent sticky header issues in the lower table */
 }

@@ -122,48 +122,60 @@ def get_box_rings(url):
 # Use @router instead of @app
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
-    print(f"Received request for {payload.sector} on {payload.date}. Unit: {payload.unit_mode}")
-    
-    # 1. Fetch live data
-    # df_demand = get_zeroset_demand(ZEROSET_URL, payload.date)
-    # df_weights = get_weights(SHO_PRODUCTION_URL)
-    # df_furnace = get_furnace_flexibility(SHO_PRODUCTION_URL)
-    # dict_machines = get_grinding_machines(SHO_PRODUCTION_URL)
-    # df_boxes = get_box_rings(BOX_RING_DATA_URL)
-    
-    # 2. Parse UI Buffer Entries (Normalization)
-    net_requirements = []
-    
-    for key, value in payload.entries.items():
-        if not value: continue
-        parts = key.split('_')
-        if len(parts) >= 4:
-            row_type = parts[0] + '_' + parts[1] 
-            channel = parts[2]
-            part_ir_or = parts[3]
-            
-            buffer_val = float(value)
-            buffer_in_rings = buffer_val
-            
-            if payload.unit_mode == 'Boxes':
-                pass
-            elif payload.unit_mode == 'Days':
-                pass
+    try:
+        print(f"Received request for {payload.sector} on {payload.date}. Unit: {payload.unit_mode}")
+        
+        net_requirements = []
+        
+        for key, value in payload.entries.items():
+            # Skip empty strings, nulls, or pure whitespace
+            if not value or str(value).strip() == "": 
+                continue
                 
-            net_requirements.append({
-                "Channel": channel,
-                "Part": part_ir_or,
-                "BufferRings": buffer_in_rings
-            })
+            parts = key.split('_')
+            if len(parts) >= 4:
+                row_type = parts[0] + '_' + parts[1] 
+                channel = parts[2]
+                part_ir_or = parts[3]
+                
+                # Safely attempt to convert the input to a float
+                try:
+                    buffer_val = float(value)
+                except ValueError:
+                    print(f"Warning: Could not convert '{value}' to a number for {key}")
+                    continue # Skip invalid numbers instead of crashing
+                
+                buffer_in_rings = buffer_val
+                
+                net_requirements.append({
+                    "Channel": channel,
+                    "Part": part_ir_or,
+                    "BufferRings": buffer_in_rings
+                })
 
-    schedule_results = {
-        "Furnace_Schedule": [],
-        "Grinding_Schedule": []
-    }
-    
-    return {
-        "status": "success",
-        "message": "Schedule calculated based on Buffer inputs, machine capacities, and Zeroset demand.",
-        "data": schedule_results
-    }
+        schedule_results = {
+            "Furnace_Schedule": [],
+            "Grinding_Schedule": []
+        }
+        
+        return {
+            "status": "success",
+            "message": "Schedule calculated successfully.",
+            "data": schedule_results,
+            "parsed_requirements": net_requirements # Sending this back so you can debug
+        }
+        
+    except Exception as e:
+        # Catch ANY python crash, print it to Render logs, and send it cleanly to React
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"CRITICAL BACKEND ERROR:\n{error_details}")
+        
+        # Raise a proper HTTP Exception so CORS headers are preserved
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Backend processing error: {str(e)}"
+        )
+
+
     

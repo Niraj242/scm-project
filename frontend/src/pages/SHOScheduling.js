@@ -2,8 +2,6 @@ import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
 const SHOScheduling = () => {
-  const [activeTab, setActiveTab] = useState('buffer'); // Tab state
-
   const [sector, setSector] = useState('DGBB');
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Days');
@@ -12,10 +10,9 @@ const SHOScheduling = () => {
   const [unlockedBlocks, setUnlockedBlocks] = useState([]); 
   const [isSaving, setIsSaving] = useState(false);
 
-  // New states for schedule
-  const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().split('T')[0]);
+  // New states for tracking and viewing the calculated plan
+  const [viewMode, setViewMode] = useState('buffer'); // 'buffer' or 'schedule'
   const [scheduleData, setScheduleData] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
 
   const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
@@ -78,41 +75,53 @@ const SHOScheduling = () => {
     setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
   };
 
-  const unlockBlock = (section, col, subCol) => {
-    const blockKey = `${sector}_${section}_${col}_${subCol}`;
-    if (!unlockedBlocks.includes(blockKey)) {
-      setUnlockedBlocks([...unlockedBlocks, blockKey]);
-    }
-  };
-
-  // Buffer Save Function
-  const saveBufferData = () => {
+  const handleSaveAndSchedule = async () => {
     setIsSaving(true);
+    
+    // 1. Save to LocalStorage
     const payload = { entries: tableData, unlocked: unlockedBlocks };
     localStorage.setItem(`sho_db_${sector}_${selectedDate}`, JSON.stringify(payload));
-    setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved!"); }, 300);
-  };
-
-  // Schedule Generation API Call
-  const fetchSchedule = async () => {
-    setIsLoading(true);
+    
+    // 2. Define your Render Backend URL
     const API = 'https://scm-backend-pshv.onrender.com';
+    
+    // 3. Send to Backend
     try {
       const response = await fetch(`${API}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: unlockedBlocks })
+        body: JSON.stringify({
+          sector: sector,
+          date: selectedDate,
+          unit_mode: unitMode,
+          entries: tableData,
+          unlocked_blocks: unlockedBlocks
+        })
       });
+
       const result = await response.json();
-      if (response.ok) { 
-        setScheduleData(result.data); 
-      } else { 
-        alert("Error: " + (result.detail || result.message)); 
+      if (response.ok) {
+        alert("Success! Backend calculated the plan.");
+        console.log("Schedule Result:", result);
+        if (result.data) {
+          setScheduleData(result.data);
+          setViewMode('schedule'); // Automatically open schedule view on success
+        }
+      } else {
+        alert("Error from server: " + (result.detail || result.message || "Unknown error"));
       }
-    } catch (e) {
-      alert("Failed to connect to backend. Please check if the server is running.");
+    } catch (error) {
+      console.error("Failed to connect to backend:", error);
+      alert(`Failed to reach the backend at ${API}. Make sure your Render service is live and not sleeping.`);
     } finally {
-      setIsLoading(false);
+      setIsSaving(false);
+    }
+  };
+
+  const unlockBlock = (section, col, subCol) => {
+    const blockKey = `${sector}_${section}_${col}_${subCol}`;
+    if (!unlockedBlocks.includes(blockKey)) {
+      setUnlockedBlocks([...unlockedBlocks, blockKey]);
     }
   };
 
@@ -127,14 +136,18 @@ const SHOScheduling = () => {
 
   return (
     <div className="sho-container">
-      {/* TABS */}
-      <div className="tab-buttons">
-        <button className={activeTab === 'buffer' ? 'active' : ''} onClick={() => setActiveTab('buffer')}>1. Buffer Entry</button>
-        <button className={activeTab === 'schedule' ? 'active' : ''} onClick={() => setActiveTab('schedule')}>2. Production Schedule</button>
+      {/* View Switcher Taps */}
+      <div className="view-switcher-tabs">
+        <button className={viewMode === 'buffer' ? 'tab-btn active' : 'tab-btn'} onClick={() => setViewMode('buffer')}>
+          📋 1. Buffer Entry Screen
+        </button>
+        <button className={viewMode === 'schedule' ? 'tab-btn active' : 'tab-btn'} onClick={() => setViewMode('schedule')}>
+          🗓️ 2. Production Schedule View
+        </button>
       </div>
 
-      {/* VIEW 1: YOUR EXACT BUFFER ENTRY (Untouched) */}
-      {activeTab === 'buffer' && (
+      {/* VIEW 1: EXCLUSIVELY THE ORIGINAL BUFFER TABLE */}
+      {viewMode === 'buffer' && (
         <>
           <div className="controls-panel">
             <div className="control-group">
@@ -157,8 +170,8 @@ const SHOScheduling = () => {
                 <option value="Rings">No. of Rings</option>
               </select>
             </div>
-            <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>
-              {isSaving ? "Saving..." : "Save Buffer Data"}
+            <button className="btn-save" onClick={handleSaveAndSchedule} disabled={isSaving}>
+              {isSaving ? "Calculating..." : "Save & Generate Schedule"}
             </button>
             <div className="hint-text">💡 <em>Hint: Double-click a gray blocked cell to enable typing in it.</em></div>
           </div>
@@ -257,167 +270,114 @@ const SHOScheduling = () => {
         </>
       )}
 
-      {/* VIEW 2: SCHEDULE (Matching the image exactly) */}
-      {activeTab === 'schedule' && (
-        <>
-          <div className="controls-panel">
-            <div className="control-group">
-              <label>Plan Date:</label>
-              <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
+      {/* VIEW 2: 3-COLUMN PRODUCTION SCHEDULE LAYOUT */}
+      {viewMode === 'schedule' && (
+        <div className="schedule-dashboard">
+          {!scheduleData ? (
+            <div className="no-schedule-banner">
+              ⚠️ No plan computed yet. Please go to the "Buffer Entry Screen", enter values, and click "Save & Generate Schedule".
             </div>
-            <button className="btn-save" style={{backgroundColor: '#28a745', borderColor: '#1e7e34'}} onClick={fetchSchedule} disabled={isLoading}>
-              {isLoading ? "Generating Schedule..." : "Generate Production Schedule"}
-            </button>
-          </div>
-          
-          {scheduleData && (
-            <div className="image-layout-container">
+          ) : (
+            <div className="schedule-columns-grid">
               
-              {/* TOP HEADER MATCHING IMAGE */}
-              <div className="schedule-master-header">
-                <div className="header-title">Face & OD Grinding Schedule</div>
-                <div className="header-date">Date :- {scheduleDate.split('-').reverse().join('/')}</div>
+              {/* COLUMN 1: FACE GRINDING */}
+              <div className="sched-block-col">
+                <table className="sched-excel-table">
+                  <thead>
+                    <tr><th colSpan="4" className="main-col-title face-header">Face Grinding</th></tr>
+                    <tr className="sub-header-row">
+                      <th>Machine / Part</th>
+                      <th>STD BOX</th>
+                      <th>2nd</th>
+                      <th>3rd</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scheduleData.face_grinding?.map((m, idx) => (
+                      <React.Fragment key={`face-${idx}`}>
+                        <tr className="group-header-row"><td colSpan="4">{m.machine}</td></tr>
+                        {m.rows?.map((r, i) => (
+                          <tr key={i}>
+                            <td className="text-left-cell font-bold">{r.part}</td>
+                            <td>{r.std_box}</td>
+                            <td>{r.p_2nd || ''}</td>
+                            <td>{r.p_3rd || ''}</td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
               </div>
 
-              {/* THREE MAIN COLUMNS */}
-              <div className="schedule-grid-wrapper">
-                
-                {/* 1. FACE GRINDING */}
-                <div className="schedule-column">
-                  <table className="img-table">
-                    <thead>
-                      <tr>
-                        <th colSpan="4" className="col-main-title">Face Grinding</th>
-                      </tr>
-                      <tr className="sub-header">
-                        <th rowSpan="2" className="empty-corner"></th>
-                        <th rowSpan="2">STD BOX</th>
-                        <th colSpan="2">Shift Priority</th>
-                      </tr>
-                      <tr className="sub-header">
-                        <th>2nd</th>
-                        <th>3rd</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {scheduleData.face_grinding.map((m, idx) => (
-                        <React.Fragment key={idx}>
-                          <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
-                          {m.rows.map((r, i) => (
-                            <tr key={i}>
-                              <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
-                              <td className="center-text">{r.std_box}</td>
-                              <td className="center-text">{r.p_2nd}</td>
-                              <td className="center-text">{r.p_3rd}</td>
-                            </tr>
-                          ))}
-                        </React.Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* 2. OD GRINDING */}
-                <div className="schedule-column">
-                  <table className="img-table">
-                    <thead>
-                      <tr>
-                        <th colSpan="4" className="col-main-title">OD Grinding</th>
-                      </tr>
-                      <tr className="sub-header">
-                        <th rowSpan="2" className="empty-corner"></th>
-                        <th rowSpan="2">STD BOX</th>
-                        <th colSpan="2">Shift Priority</th>
-                      </tr>
-                      <tr className="sub-header">
-                        <th>2nd</th>
-                        <th>3rd</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {scheduleData.od_grinding.map((m, idx) => (
-                        <React.Fragment key={idx}>
-                          <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
-                          {m.rows.map((r, i) => (
-                            <tr key={i}>
-                              <td className={`part-name ${r.alert ? 'text-red' : ''}`}>
-                                {r.p_label && <strong>{r.p_label}</strong>} {r.part}
-                              </td>
-                              <td className="center-text">{r.std_box}</td>
-                              <td className="center-text">{r.p_2nd}</td>
-                              <td className="center-text">{r.p_3rd}</td>
-                            </tr>
-                          ))}
-                        </React.Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* 3. HEAT TREATMENT (Split into two columns like image) */}
-                <div className="schedule-column ht-column">
-                  <table className="img-table">
-                    <thead>
-                      <tr>
-                        <th colSpan="4" className="col-main-title ht-title">HEAT TREATMENT</th>
-                        <th colSpan="4" className="col-main-title ht-title">DATE - {scheduleDate.split('-').reverse().join('/')}</th>
-                      </tr>
-                    </thead>
-                    <tbody className="ht-flex-body">
-                      <tr>
-                        {/* Furnace 1 */}
-                        <td colSpan="4" className="nested-td">
-                          <table className="inner-ht-table">
-                            <tbody>
-                              {scheduleData.heat_treatment.slice(0, Math.ceil(scheduleData.heat_treatment.length/2)).map((f, idx) => (
-                                <React.Fragment key={idx}>
-                                  <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
-                                  </tr>
-                                  {f.rows.map((r, i) => (
-                                    <tr key={i}>
-                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
-                                      <td className="center-text">{r.qty}</td>
-                                      <td className="center-text">{r.cha}</td>
-                                      <td className="center-text">{r.rate}</td>
-                                    </tr>
-                                  ))}
-                                </React.Fragment>
-                              ))}
-                            </tbody>
-                          </table>
-                        </td>
-                        {/* Furnace 2 */}
-                        <td colSpan="4" className="nested-td">
-                          <table className="inner-ht-table">
-                            <tbody>
-                              {scheduleData.heat_treatment.slice(Math.ceil(scheduleData.heat_treatment.length/2)).map((f, idx) => (
-                                <React.Fragment key={idx}>
-                                  <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
-                                  </tr>
-                                  {f.rows.map((r, i) => (
-                                    <tr key={i}>
-                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
-                                      <td className="center-text">{r.qty}</td>
-                                      <td className="center-text">{r.cha}</td>
-                                      <td className="center-text">{r.rate}</td>
-                                    </tr>
-                                  ))}
-                                </React.Fragment>
-                              ))}
-                            </tbody>
-                          </table>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
+              {/* COLUMN 2: OD GRINDING */}
+              <div className="sched-block-col">
+                <table className="sched-excel-table">
+                  <thead>
+                    <tr><th colSpan="4" className="main-col-title od-header">OD Grinding</th></tr>
+                    <tr className="sub-header-row">
+                      <th>Machine / Part</th>
+                      <th>STD BOX</th>
+                      <th>2nd</th>
+                      <th>3rd</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scheduleData.od_grinding?.map((m, idx) => (
+                      <React.Fragment key={`od-${idx}`}>
+                        <tr className="group-header-row"><td colSpan="4">{m.machine}</td></tr>
+                        {m.rows?.map((r, i) => (
+                          <tr key={i}>
+                            <td className="text-left-cell font-bold">
+                              {r.p_label ? <span className="p-badge">{r.p_label}</span> : ''} {r.part}
+                            </td>
+                            <td>{r.std_box}</td>
+                            <td>{r.p_2nd || ''}</td>
+                            <td>{r.p_3rd || ''}</td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
               </div>
+
+              {/* COLUMN 3: HEAT TREATMENT */}
+              <div className="sched-block-col">
+                <table className="sched-excel-table">
+                  <thead>
+                    <tr><th colSpan="4" className="main-col-title ht-header">HEAT TREATMENT</th></tr>
+                    <tr className="sub-header-row">
+                      <th>Furnace / Part</th>
+                      <th>QTY</th>
+                      <th>Cha</th>
+                      <th>Rate</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {scheduleData.heat_treatment?.map((f, idx) => (
+                      <React.Fragment key={`ht-${idx}`}>
+                        <tr className="group-header-row">
+                          <td colSpan="2" className="text-left-cell">{f.furnace}</td>
+                          <td colSpan="2" className="text-right-cell">Cap: {f.capacity} kg/hr</td>
+                        </tr>
+                        {f.rows?.map((r, i) => (
+                          <tr key={i}>
+                            <td className="text-left-cell font-bold">{r.part}</td>
+                            <td>{r.qty}</td>
+                            <td>{r.cha || ''}</td>
+                            <td>{r.rate || ''}</td>
+                          </tr>
+                        ))}
+                      </React.Fragment>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
             </div>
           )}
-        </>
+        </div>
       )}
     </div>
   );

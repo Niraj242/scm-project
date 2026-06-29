@@ -334,3 +334,99 @@
 .mac-head {
   background-color: #d1ecf1;
 }
+/* ADD THIS AT THE VERY BOTTOM OF YOUR EXISTING CSS */
+
+.tab-buttons {
+  display: flex;
+  margin-bottom: 10px;
+  gap: 5px;
+}
+.tab-buttons button {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: bold;
+  border: 1px solid #aaa;
+  border-bottom: none;
+  background-color: #e9ecef;
+  cursor: pointer;
+}
+.tab-buttons button.active {
+  background-color: white;
+  border-top: 3px solid #0056b3;
+  color: #004085;
+}
+
+/* SCHEDULE IMAGE LAYOUT */
+.image-layout-container {
+  background-color: white;
+  border: 1px solid #000;
+  overflow-x: auto;
+  font-family: 'Arial', sans-serif;
+  margin-top: 10px;
+}
+
+.schedule-master-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 15px;
+  background-color: #f0f8ff;
+  border-bottom: 2px solid #5fa1e6;
+  color: #4a90e2;
+  font-weight: bold;
+  font-size: 24px;
+}
+
+.schedule-grid-wrapper {
+  display: flex;
+  min-width: 1400px; /* Forces Excel-like stretch */
+}
+
+.schedule-column {
+  flex: 1;
+  border-right: 2px solid #5fa1e6;
+}
+.schedule-column:last-child {
+  border-right: none;
+  flex: 1.5; /* HT takes up more space for double cols */
+}
+
+.img-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.img-table th, .img-table td {
+  border: 1px solid #a9cce3;
+  padding: 4px;
+}
+
+.col-main-title {
+  color: #4a90e2;
+  font-size: 18px;
+  text-align: center;
+  background-color: #f9fbfc;
+  padding: 6px;
+}
+
+.sub-header th {
+  color: #4a90e2;
+  font-weight: bold;
+  text-align: center;
+  background-color: #f9fbfc;
+}
+
+.machine-name-row td {
+  background-color: #e8f4fd;
+  color: #4a90e2;
+  font-weight: bold;
+  text-align: center;
+}
+
+.part-name { text-align: left; padding-left: 5px; }
+.center-text { text-align: center; }
+.text-red { color: red; font-weight: bold; }
+.empty-corner { border-top: none; border-left: none; }
+
+.inner-ht-table { width: 100%; border-collapse: collapse; }
+.inner-ht-table td { border: 1px solid #a9cce3; padding: 4px; }
+.nested-td { padding: 0; vertical-align: top; }

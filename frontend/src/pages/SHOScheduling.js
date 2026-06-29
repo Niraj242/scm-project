@@ -1,13 +1,34 @@
 import React, { useState } from 'react';
-import './SHOSchedule.css'; // Make sure this matches your CSS file name
+import './SHOSchedule.css';
 
 const SHOSchedule = () => {
   const [activeTab, setActiveTab] = useState('buffer');
 
-  // NOTE FOR BACKEND SAVING: 
-  // When you are ready to make this functional, replace the hardcoded numbers 
-  // (e.g., 1.2, 0.3) with state variables and add an onClick handler to a save button
-  // that sends a fetch/axios POST request to your FastAPI backend.
+  // ==========================================================
+  // HERE IS WHERE THE CODE GOES inside the component
+  // ==========================================================
+  const generateSchedule = async () => {
+    try {
+      // NOTE: Replace 'http://localhost:10000' with your actual backend URL later
+      const response = await fetch('http://localhost:10000/api/schedule', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          target_date: "01/04/2026",
+          unit_mode: "Days",
+          buffers: [] // This will map to your form inputs later
+        })
+      });
+      const data = await response.json();
+      console.log("Schedule generated:", data);
+      
+      // Automatically switch to the schedule tab once data is received
+      setActiveTab('schedule');
+    } catch (error) {
+      console.error("Error generating schedule:", error);
+    }
+  };
+  // ==========================================================
 
   return (
     <div className="exact-container">
@@ -18,6 +39,15 @@ const SHOSchedule = () => {
         >
           Buffer Input Grid (Image 1)
         </button>
+        
+        {/* I also added a button here to actually trigger the function you just pasted! */}
+        <button 
+           style={{ backgroundColor: '#28a745', color: 'white', fontWeight: 'bold', border: '1px solid #218838' }}
+           onClick={generateSchedule}
+        >
+          Generate Schedule 
+        </button>
+
         <button 
           className={activeTab === 'schedule' ? 'active-tab' : ''} 
           onClick={() => setActiveTab('schedule')}

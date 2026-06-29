@@ -183,3 +183,50 @@
 .schedule-col .excel-table thead th {
   position: static; /* Prevent sticky header issues in the lower table */
 }
+/* Add to bottom of your SHOScheduling.css */
+
+.tab-navigation {
+  display: flex;
+  margin-bottom: 10px;
+  gap: 5px;
+}
+
+.tab-navigation button {
+  padding: 10px 20px;
+  font-size: 16px;
+  font-weight: bold;
+  border: 1px solid #aaa;
+  border-bottom: none;
+  background-color: #d6d8db;
+  color: #333;
+  cursor: pointer;
+  border-radius: 5px 5px 0 0;
+}
+
+.tab-navigation button.active-tab {
+  background-color: white;
+  color: #004085;
+  border-top: 3px solid #0056b3;
+}
+
+.view-container {
+  display: flex;
+  flex-direction: column;
+  flex-grow: 1;
+  overflow: hidden; /* prevents layout breaking */
+}
+
+.schedule-view {
+  background: transparent;
+}
+
+.btn-fetch {
+  background-color: #28a745;
+  color: white;
+  font-weight: bold;
+  border: 1px solid #1e7e34;
+  padding: 8px 20px;
+  cursor: pointer;
+  margin-left: auto;
+}
+.btn-fetch:hover { background-color: #218838; }

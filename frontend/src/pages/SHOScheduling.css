@@ -1,149 +1,135 @@
-.exact-container {
-  font-family: Arial, Helvetica, sans-serif; 
-  padding: 10px;
-  background: white;
-  color: black;
-  font-size: 11px;
+.sho-container {
+  font-family: Arial, sans-serif;
+  padding: 20px;
+  background-color: #f8f9fa;
+  min-height: 100vh;
 }
 
-.tab-buttons {
-  margin-bottom: 20px;
-}
-
-.tab-buttons button {
-  padding: 8px 16px;
-  margin-right: 10px;
+/* --- Controls Panel --- */
+.controls-panel {
+  display: flex;
+  gap: 20px;
+  background-color: white;
+  padding: 15px 20px;
   border: 1px solid #ccc;
-  background: #f0f0f0;
-  cursor: pointer;
+  border-radius: 4px;
+  margin-bottom: 20px;
+  align-items: center;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.control-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.control-group label {
   font-weight: bold;
+  font-size: 14px;
+  color: #333;
 }
 
-.tab-buttons button.active-tab {
-  background: #3498db;
-  color: white;
-  border-color: #2980b9;
-}
-
-.scroll-wrapper {
-  overflow-x: auto;
-  width: 100%;
-}
-
-/* =========================================
-   IMAGE 1: BUFFER GRID STYLES
-========================================= */
-.exact-buffer-table {
-  border-collapse: collapse;
-  width: max-content;
-  text-align: center;
-}
-
-.exact-buffer-table th, 
-.exact-buffer-table td {
-  border: 1px solid #a0a0a0;
-  padding: 4px 8px;
-  white-space: nowrap;
-}
-
-.exact-buffer-table .row-header {
-  text-align: left;
-  background-color: #f8f8f8;
-}
-
-.bg-cyan { background-color: #5bc0de !important; font-weight: bold; }
-.bg-red { background-color: red !important; }
-.text-red { color: red !important; }
-.text-white { color: white !important; }
-.font-bold { font-weight: bold !important; }
-.text-xs { font-size: 9px !important; }
-.border-bottom-thick { border-bottom: 2px solid black !important; }
-
-/* =========================================
-   IMAGE 2: SCHEDULE LAYOUT STYLES
-========================================= */
-.schedule-layout {
-  border: 2px solid black;
-  padding: 5px;
-}
-
-.schedule-header {
-  display: flex;
-  justify-content: space-around;
-  text-align: center;
-  border-bottom: 2px solid #5bc0de;
-  margin-bottom: 10px;
-}
-
-.schedule-header h2 {
-  margin: 5px 0;
-  font-size: 16px;
-}
-
-.three-columns {
-  display: flex;
-  gap: 10px;
-  align-items: flex-start;
-}
-
-.column {
-  flex: 1;
-  border: 1px solid #000;
-  min-width: 300px;
-}
-
-.column-title {
-  text-align: center;
-  margin: 5px 0;
+.control-group select,
+.control-group input {
+  padding: 6px 10px;
+  border: 1px solid #aaa;
+  border-radius: 4px;
   font-size: 14px;
 }
 
-.text-blue { color: #2980b9; }
-.bg-light-blue { background-color: #e0f2f7; }
-.bg-dark-blue { background-color: #7b9cba; }
-.bg-white { background-color: white; }
-.text-left { text-align: left !important; }
-.text-center { text-align: center !important; }
-
-.schedule-table {
-  width: 100%;
-  border-collapse: collapse;
+.btn-save {
+  background-color: #0056b3;
+  color: white;
+  font-weight: bold;
+  border: none;
+  padding: 8px 20px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: auto;
+  transition: background-color 0.2s;
 }
 
-.schedule-table th, 
-.schedule-table td {
-  border: 1px solid #a0a0a0;
-  padding: 3px 5px;
-  font-size: 10px;
+.btn-save:hover {
+  background-color: #004494;
+}
+
+/* --- Dynamic Table Styling (Excel Look) --- */
+.table-wrapper {
+  overflow-x: auto;
+  background: white;
+  border: 2px solid #000;
+}
+
+.excel-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
+}
+
+.excel-table th, 
+.excel-table td {
+  border: 1px solid #888;
+  text-align: center;
   vertical-align: middle;
 }
 
-.schedule-table th {
+.excel-table th {
+  padding: 6px;
+  background-color: #fdfdfd;
+}
+
+.text-blue {
+  color: #005bb5;
   font-weight: bold;
+}
+
+.font-bold { font-weight: bold; }
+.font-xl { font-size: 18px; }
+.text-left { text-align: left; }
+.text-right { text-align: right; }
+.pl-2 { padding-left: 10px !important; }
+.pr-2 { padding-right: 10px !important; }
+.border-right-thick { border-right: 2px solid #000 !important; }
+
+.column-title {
+  font-size: 14px;
+}
+
+.row-label {
+  background-color: #fdfdfd;
+  padding: 4px 8px;
   text-align: center;
+  white-space: nowrap;
 }
 
-/* Specific HT table adjustments to match the dense look */
-.ht-table th, .ht-table td {
-  padding: 2px 4px;
-}
-.mt-row th {
-  border-top: 2px solid #000;
+/* --- Input Cells --- */
+.input-cell {
+  padding: 0;
+  width: 60px;
+  height: 25px;
 }
 
-/* High Alert Box Styling */
-.alert-box {
-  margin-top: 20px;
-  border: 1px solid #a0a0a0;
-  background: white;
+.input-cell input {
+  width: 100%;
+  height: 100%;
+  border: none;
+  text-align: center;
+  font-size: 12px;
+  background-color: transparent;
+  outline: none;
+  padding: 0;
 }
-.alert-header {
-  background-color: #7b9cba;
-  color: white;
-  font-weight: bold;
-  padding: 4px;
+
+/* Highlight cell when typing */
+.input-cell input:focus {
+  background-color: #e8f4fd;
+  box-shadow: inset 0 0 0 1px #005bb5;
 }
-.alert-item {
-  padding: 8px;
-  border-bottom: 1px solid #e0e0e0;
+
+/* Spacer Row styling */
+.spacer-row td {
+  height: 20px;
+  background-color: #fdfdfd;
 }

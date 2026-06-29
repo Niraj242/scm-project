@@ -202,3 +202,66 @@
 }
 
 @keyframes spin { 100% { transform:rotate(360deg); } }
+/* ADD THIS TO THE BOTTOM OF YOUR EXISTING CSS FILE */
+
+.tab-buttons {
+  display: flex;
+  margin-bottom: 10px;
+  gap: 5px;
+}
+
+.tab-buttons button {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: bold;
+  border: 1px solid #aaa;
+  border-bottom: none;
+  background-color: #e9ecef;
+  cursor: pointer;
+}
+
+.tab-buttons button.active {
+  background-color: white;
+  border-top: 3px solid #0056b3;
+  color: #004085;
+}
+
+.btn-fetch {
+  background-color: #28a745;
+  color: white;
+  font-weight: bold;
+  border: 1px solid #1e7e34;
+  padding: 8px 20px;
+  cursor: pointer;
+  margin-left: auto;
+}
+.btn-fetch:hover { background-color: #218838; }
+
+.schedule-container {
+  background: white;
+  padding: 10px;
+  border: 2px solid #000;
+  overflow: auto;
+}
+
+.schedule-layout {
+  display: flex;
+  gap: 15px;
+}
+
+.sched-col {
+  flex: 1;
+  min-width: 320px;
+}
+
+.sched-table {
+  width: 100%;
+}
+
+.sched-table thead th {
+  position: static !important;
+}
+
+.mac-head {
+  background-color: #d1ecf1;
+}

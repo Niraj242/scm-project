@@ -1,432 +1,255 @@
-/* --- Master Tabbed Navigation Layout Control Engine --- */
-.tab-header-row {
-  display: flex;
-  margin-bottom: 12px;
-  gap: 8px;
-  border-bottom: 3px solid #004085;
-  background-color: #f1f3f5;
-  padding: 6px 6px 0 6px;
-  border-radius: 4px 4px 0 0;
-}
-
-.nav-tab-btn {
-  padding: 12px 26px;
-  font-size: 14px;
-  font-weight: bold;
-  border: 1px solid #ced4da;
-  border-bottom: none;
-  background-color: #e9ecef;
-  color: #495057;
-  cursor: pointer;
-  border-radius: 6px 6px 0 0;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.nav-tab-btn:hover {
-  background-color: #dee2e6;
-  color: #000;
-}
-
-.nav-tab-btn.tab-active {
-  background-color: #004085;
-  color: #ffffff;
-  border-color: #004085;
-  box-shadow: 0 -2px 6px rgba(0,0,0,0.15);
-}
-
-.view-panel-wrapper {
+.sho-container {
+  font-family: Arial, sans-serif;
+  padding: 15px;
+  background-color: #e0e6ed;
+  height: 100vh;
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  flex-grow: 1;
-  overflow: hidden;
 }
 
-.btn-generate-plan {
-  background-color: #28a745;
-  color: #ffffff;
-  font-weight: bold;
-  font-size: 14px;
-  border: 1px solid #1e7e34;
-  padding: 10px 24px;
-  cursor: pointer;
-  border-radius: 4px;
-  margin-left: auto;
-  transition: background-color 0.2s;
-}
-
-.btn-generate-plan:hover:not(:disabled) {
-  background-color: #218838;
-}
-
-.btn-generate-plan:disabled {
-  background-color: #6c757d;
-  cursor: not-allowed;
-}
-
-/* --- Production Schedule Grid System Layout --- */
-.schedule-layout-output {
-  background-color: #ffffff;
-  border: 2px solid #343a40;
-  border-radius: 4px;
-  padding: 16px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-  flex-grow: 1;
-  overflow-y: auto;
-}
-
-.schedule-main-title {
-  font-size: 18px;
-  color: #004085;
-  text-align: center;
-  margin-bottom: 18px;
-  font-weight: 8px;
-  border-bottom: 2px dashed #ced4da;
-  padding-bottom: 8px;
-}
-
-.process-flow-grid {
+.controls-panel {
   display: flex;
-  flex-direction: row;
-  gap: 20px;
-  align-items: flex-start;
-  overflow-x: auto;
-  padding-bottom: 10px;
-}
-
-.process-card-column {
-  flex: 1;
-  min-width: 360px;
-  background-color: #f8f9fa;
-  border: 1px solid #ced4da;
-  border-radius: 6px;
-  padding: 10px;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.05);
-}
-
-.process-header-banner {
-  font-size: 14px;
-  font-weight: bold;
-  color: #ffffff;
-  padding: 8px 12px;
-  border-radius: 4px;
-  margin-bottom: 10px;
-  text-align: center;
-}
-
-.banner-ht { background-color: #dc3545; }
-.banner-face { background-color: #6f42c1; }
-.banner-od { background-color: #fd7e14; }
-
-.schedule-excel-grid {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-  background-color: #ffffff;
-}
-
-.schedule-excel-grid th,
-.schedule-excel-grid td {
-  border: 1px solid #dee2e6;
-  padding: 8px 6px;
-  vertical-align: middle;
-}
-
-.schedule-excel-grid th {
-  background-color: #e9ecef;
-  color: #343a40;
-  font-weight: bold;
-}
-
-.resource-identifier-row {
-  background-color: #e2e8f0;
-}
-
-.resource-identifier-row td {
-  font-weight: bold;
-  color: #1a202c;
-  font-size: 13px;
-  text-align: left;
-  padding-left: 10px;
-  border-left: 4px solid #4a5568;
-}
-
-.resource-sub-label {
-  color: #718096;
-  font-style: italic;
-  text-align: center;
-}
-
-/* --- Inline Badges --- */
-.badge {
-  display: inline-block;
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: bold;
-  border-radius: 12px;
-  text-align: center;
-}
-
-.badge-blue { background-color: #cce5ff; color: #004085; }
-.badge-orange { background-color: #fff3cd; color: #856404; }
-.badge-purple { background-color: #e2d9f3; color: #512da8; }
-.badge-red-border { border: 1px solid #f5c6cb; background-color: #f8d7da; color: #721c24; font-weight: bold; }
-
-.empty-alert {
-  text-align: center;
-  color: #6c757d;
-  font-style: italic;
-  padding: 20px !important;
-}
-
-.text-dark-blue { color: #0056b3; }
-.text-green { color: #1e7e34; }
-
-.schedule-placeholder-prompt {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  text-align: center;
-  padding: 60px 20px;
-  background-color: #ffffff;
-  border: 1px dashed #adb5bd;
-  border-radius: 6px;
-  color: #495057;
-  margin-top: 10px;
-}
-
-.prompt-art {
-  font-size: 48px;
-  margin-bottom: 12px;
-  animation: spin 8s linear infinite;
-}
-
-@keyframes spin { 100% { transform:rotate(360deg); } }
-/* ADD THIS TO THE BOTTOM OF YOUR EXISTING CSS FILE */
-
-.tab-buttons {
-  display: flex;
-  margin-bottom: 10px;
-  gap: 5px;
-}
-
-.tab-buttons button {
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: bold;
-  border: 1px solid #aaa;
-  border-bottom: none;
-  background-color: #e9ecef;
-  cursor: pointer;
-}
-
-.tab-buttons button.active {
+  gap: 15px;
   background-color: white;
-  border-top: 3px solid #0056b3;
-  color: #004085;
+  padding: 10px 20px;
+  border: 1px solid #aaa;
+  margin-bottom: 15px;
+  align-items: center;
+  box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+  flex-wrap: wrap;
 }
 
-.btn-fetch {
-  background-color: #28a745;
+.control-group label {
+  font-weight: bold;
+  font-size: 14px;
+  margin-right: 8px;
+  color: #333;
+}
+
+.control-group select,
+.control-group input {
+  padding: 4px 8px;
+  border: 1px solid #555;
+  font-size: 14px;
+}
+
+.btn-save {
+  background-color: #0056b3;
   color: white;
   font-weight: bold;
-  border: 1px solid #1e7e34;
+  border: 1px solid #003d82;
   padding: 8px 20px;
   cursor: pointer;
   margin-left: auto;
 }
-.btn-fetch:hover { background-color: #218838; }
+.btn-save:hover:not(:disabled) { background-color: #004494; }
+.btn-save:disabled { background-color: #7b9bb9; cursor: not-allowed; }
 
-.schedule-container {
-  background: white;
-  padding: 10px;
-  border: 2px solid #000;
-  overflow: auto;
-}
-
-.schedule-layout {
-  display: flex;
-  gap: 15px;
-}
-
-.sched-col {
-  flex: 1;
-  min-width: 320px;
-}
-
-.sched-table {
+.hint-text {
+  font-size: 12px;
+  color: #555;
   width: 100%;
+  margin-top: 5px;
 }
 
-.sched-table thead th {
-  position: static !important;
+.table-scroll-container {
+  flex-grow: 1;
+  overflow: auto;
+  background: white;
+  border: 3px solid #000;
+  box-shadow: 0 4px 8px rgba(0,0,0,0.2);
 }
 
-.mac-head {
-  background-color: #d1ecf1;
+.excel-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
 }
-/* ADD TO THE BOTTOM OF EXISTING CSS */
 
-.tab-buttons {
+.excel-table thead th {
+  position: sticky;
+  background-color: #f8f9fa;
+  z-index: 2;
+}
+.excel-table thead tr:nth-child(1) th { top: 0; }
+.excel-table thead tr:nth-child(2) th { top: 25px; }
+.excel-table thead tr:nth-child(3) th { top: 50px; }
+.excel-table thead tr:nth-child(4) th { top: 75px; }
+
+.excel-table th, 
+.excel-table td {
+  border: 1px solid #999;
+  text-align: center;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.border-thick-right { border-right: 2px solid #000 !important; }
+.border-thick-bottom { border-bottom: 2px solid #000 !important; }
+
+.text-blue { color: #004085; font-weight: bold; }
+.font-bold { font-weight: bold; }
+.font-xl { font-size: 16px; }
+.text-left { text-align: left; }
+.text-right { text-align: right; }
+.pl-2 { padding-left: 10px !important; }
+.pr-2 { padding-right: 10px !important; }
+
+.row-label {
+  background-color: #f8f9fa;
+  padding: 2px 8px;
+  text-align: left;
+  position: sticky;
+  left: 0;
+  z-index: 1;
+}
+.excel-table thead th:first-child { left: 0; z-index: 3; }
+
+.input-cell {
+  padding: 0 !important;
+  width: 50px;
+  min-width: 50px;
+  height: 24px;
+}
+
+.input-cell input {
+  width: 100%;
+  height: 100%;
+  border: none;
+  text-align: center;
+  font-size: 13px;
+  background-color: transparent;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.input-cell input:focus {
+  background-color: #cce5ff;
+  box-shadow: inset 0 0 0 2px #0056b3;
+}
+
+.disabled-block {
+  background: repeating-linear-gradient(45deg, #e9ecef, #e9ecef 6px, #dee2e6 6px, #dee2e6 12px);
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.disabled-block:hover {
+  opacity: 0.8;
+}
+
+.spacer-row td { 
+  height: 12px; 
+  background-color: #d6d8db; 
+}
+
+/* --- CALCULATED PLANNING DASHBOARD LAYOUT CLASSES --- */
+.view-switcher-tabs {
   display: flex;
-  margin-bottom: 15px;
-  gap: 10px;
+  margin-bottom: 10px;
+  gap: 8px;
 }
 
-.tab-buttons button {
+.tab-btn {
   padding: 10px 20px;
   font-size: 14px;
   font-weight: bold;
   border: 1px solid #aaa;
-  border-bottom: none;
-  background-color: #e9ecef;
+  background-color: #e2e8f0;
   cursor: pointer;
-  border-radius: 5px 5px 0 0;
+  border-radius: 4px 4px 0 0;
+  color: #4a5568;
 }
 
-.tab-buttons button.active {
+.tab-btn.active {
   background-color: white;
-  border-top: 3px solid #0056b3;
-  color: #004085;
+  border-bottom: 2px solid white;
+  color: #0056b3;
+  box-shadow: 0 -2px 4px rgba(0,0,0,0.05);
 }
 
-.btn-fetch {
-  background-color: #28a745;
-  color: white;
-  font-weight: bold;
-  border: 1px solid #1e7e34;
-  padding: 8px 20px;
-  cursor: pointer;
-  margin-left: auto;
-}
-.btn-fetch:hover { background-color: #218838; }
-
-.schedule-container {
-  background: white;
-  padding: 15px;
-  border: 3px solid #000;
-  overflow: auto;
+.schedule-dashboard {
   flex-grow: 1;
+  background-color: white;
+  border: 3px solid #000;
+  padding: 15px;
+  overflow-y: auto;
 }
 
-.schedule-layout {
+.no-schedule-banner {
+  padding: 30px;
+  text-align: center;
+  font-size: 16px;
+  font-weight: bold;
+  background-color: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffeeba;
+  border-radius: 4px;
+}
+
+.schedule-columns-grid {
   display: flex;
-  flex-direction: row;
-  justify-content: space-between;
   gap: 20px;
-  min-width: 1000px; /* Forces columns to stay side by side */
+  align-items: flex-start;
+  min-width: 1050px;
 }
 
-.sched-col {
+.sched-block-col {
   flex: 1;
-  min-width: 320px;
-  background-color: #fff;
+  background: #ffffff;
+  border: 1px solid #ccc;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.05);
 }
 
-.sched-table {
-  width: 100%;
-}
-
-.sched-table thead th {
-  position: static !important; /* Disables sticky headers for schedule view */
-}
-
-.mac-head {
-  background-color: #d1ecf1;
-}
-/* ADD THIS AT THE VERY BOTTOM OF YOUR EXISTING CSS */
-
-.tab-buttons {
-  display: flex;
-  margin-bottom: 10px;
-  gap: 5px;
-}
-.tab-buttons button {
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: bold;
-  border: 1px solid #aaa;
-  border-bottom: none;
-  background-color: #e9ecef;
-  cursor: pointer;
-}
-.tab-buttons button.active {
-  background-color: white;
-  border-top: 3px solid #0056b3;
-  color: #004085;
-}
-
-/* SCHEDULE IMAGE LAYOUT */
-.image-layout-container {
-  background-color: white;
-  border: 1px solid #000;
-  overflow-x: auto;
-  font-family: 'Arial', sans-serif;
-  margin-top: 10px;
-}
-
-.schedule-master-header {
-  display: flex;
-  justify-content: space-between;
-  padding: 5px 15px;
-  background-color: #f0f8ff;
-  border-bottom: 2px solid #5fa1e6;
-  color: #4a90e2;
-  font-weight: bold;
-  font-size: 24px;
-}
-
-.schedule-grid-wrapper {
-  display: flex;
-  min-width: 1400px; /* Forces Excel-like stretch */
-}
-
-.schedule-column {
-  flex: 1;
-  border-right: 2px solid #5fa1e6;
-}
-.schedule-column:last-child {
-  border-right: none;
-  flex: 1.5; /* HT takes up more space for double cols */
-}
-
-.img-table {
+.sched-excel-table {
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
 }
-.img-table th, .img-table td {
-  border: 1px solid #a9cce3;
-  padding: 4px;
-}
 
-.col-main-title {
-  color: #4a90e2;
-  font-size: 18px;
-  text-align: center;
-  background-color: #f9fbfc;
+.sched-excel-table th, 
+.sched-excel-table td {
+  border: 1px solid #aaa;
   padding: 6px;
-}
-
-.sub-header th {
-  color: #4a90e2;
-  font-weight: bold;
-  text-align: center;
-  background-color: #f9fbfc;
-}
-
-.machine-name-row td {
-  background-color: #e8f4fd;
-  color: #4a90e2;
-  font-weight: bold;
   text-align: center;
 }
 
-.part-name { text-align: left; padding-left: 5px; }
-.center-text { text-align: center; }
-.text-red { color: red; font-weight: bold; }
-.empty-corner { border-top: none; border-left: none; }
+.main-col-title {
+  font-size: 15px;
+  font-weight: bold;
+  color: white;
+  padding: 8px;
+}
 
-.inner-ht-table { width: 100%; border-collapse: collapse; }
-.inner-ht-table td { border: 1px solid #a9cce3; padding: 4px; }
-.nested-td { padding: 0; vertical-align: top; }
+.face-header { background-color: #0056b3; }
+.od-header { background-color: #28a745; }
+.ht-header { background-color: #dc3545; }
+
+.sub-header-row th {
+  background-color: #f1f5f9;
+  color: #334155;
+  font-weight: bold;
+}
+
+.group-header-row td {
+  background-color: #e2e8f0;
+  color: #1e293b;
+  font-weight: bold;
+  text-align: left;
+  padding-left: 10px;
+}
+
+.text-left-cell { text-align: left !important; }
+.text-right-cell { text-align: right !important; }
+
+.p-badge {
+  background-color: #ffc107;
+  color: #000;
+  font-size: 10px;
+  padding: 2px 5px;
+  font-weight: bold;
+  border-radius: 3px;
+  margin-right: 4px;
+}

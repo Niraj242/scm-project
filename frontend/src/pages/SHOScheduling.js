@@ -1,374 +1,197 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
-const SHOSchedule = () => {
-  const [activeTab, setActiveTab] = useState('buffer');
+const SHOScheduling = () => {
+  // Top-level controls state
+  const [sector, setSector] = useState('DGBB');
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  const [unitMode, setUnitMode] = useState('Days');
+  
+  // Matrix state to hold all entered data
+  const [tableData, setTableData] = useState({});
 
-  // ==========================================================
-  // HERE IS WHERE THE CODE GOES inside the component
-  // ==========================================================
-  const generateSchedule = async () => {
-    try {
-      // NOTE: Replace 'http://localhost:10000' with your actual backend URL later
-      const response = await fetch('http://localhost:10000/api/schedule', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          target_date: "01/04/2026",
-          unit_mode: "Days",
-          buffers: [] // This will map to your form inputs later
-        })
-      });
-      const data = await response.json();
-      console.log("Schedule generated:", data);
-      
-      // Automatically switch to the schedule tab once data is received
-      setActiveTab('schedule');
-    } catch (error) {
-      console.error("Error generating schedule:", error);
-    }
+  // Column definitions based on your 3 images
+  const SECTOR_COLUMNS = {
+    DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
+    TRB: ['T 1', 'T 2', 'T 3', 'T 4', 'T 5', 'T 6', 'T 7', 'T 8', 'T 9', 'T10'],
+    HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
-  // ==========================================================
+
+  // Row definitions matching the exact structure of your Excel sheets
+  const ROWS = [
+    { label: 'CH. BUFFER', key: 'ch_buffer_1' },
+    { label: 'TYPE', key: 'type_1' },
+    { label: 'CH. BUFFER', key: 'ch_buffer_2' },
+    { label: 'NEXT TYPE', key: 'next_type_1' },
+    { label: 'OD BUFFER', key: 'od_buffer_1' },
+    { label: 'TYPE', key: 'type_2' },
+    { label: 'OD BUFFER', key: 'od_buffer_2' },
+    { label: 'NEXT TYPE', key: 'next_type_2' },
+    { label: 'FACE BUFFER', key: 'face_buffer_1' },
+    { label: 'TYPE', key: 'type_3' },
+    { label: 'FACE BUFFER', key: 'face_buffer_2' },
+    { label: 'TYPE', key: 'type_4' },
+    { label: 'HT. BUFFER', key: 'ht_buffer_1' },
+    { label: 'TYPE', key: 'type_5' },
+    { label: 'HT. BUFFER', key: 'ht_buffer_2' },
+    { label: 'TYPE', key: 'type_6' },
+    { label: '', key: 'spacer' }, // Empty row as seen in images
+    { label: 'RUNNING', key: 'running' },
+    { label: 'NEXT TYPE', key: 'next_type_3' },
+    { label: 'BUFFER IN DAYS', key: 'buffer_in_days' }
+  ];
+
+  // Handle clearing table when switching sectors (or you can fetch from DB here later)
+  useEffect(() => {
+    setTableData({});
+    // LATER: Add an API call here to fetch existing data for the selected Date & Sector
+  }, [sector, selectedDate]);
+
+  // Handle typing in the grid
+  const handleInputChange = (rowKey, col, subCol, value) => {
+    const dataKey = `${rowKey}_${col}_${subCol}`;
+    setTableData(prev => ({
+      ...prev,
+      [dataKey]: value
+    }));
+  };
+
+  // Save handler for backend
+  const handleSave = async () => {
+    const payload = {
+      sector,
+      date: selectedDate,
+      unit: unitMode,
+      entries: tableData
+    };
+    console.log("Saving payload to Database:", payload);
+    alert(`Data saved for ${sector} on ${selectedDate} in ${unitMode}`);
+    // LATER: Send 'payload' to your FastAPI backend via POST request
+  };
+
+  const columns = SECTOR_COLUMNS[sector];
 
   return (
-    <div className="exact-container">
-      <div className="tab-buttons">
-        <button 
-          className={activeTab === 'buffer' ? 'active-tab' : ''} 
-          onClick={() => setActiveTab('buffer')}
-        >
-          Buffer Input Grid (Image 1)
-        </button>
-        
-        {/* I also added a button here to actually trigger the function you just pasted! */}
-        <button 
-           style={{ backgroundColor: '#28a745', color: 'white', fontWeight: 'bold', border: '1px solid #218838' }}
-           onClick={generateSchedule}
-        >
-          Generate Schedule 
-        </button>
+    <div className="sho-container">
+      {/* HEADER & CONTROLS */}
+      <div className="controls-panel">
+        <div className="control-group">
+          <label>Sector:</label>
+          <select value={sector} onChange={(e) => setSector(e.target.value)}>
+            <option value="DGBB">DGBB</option>
+            <option value="TRB">TRB</option>
+            <option value="HUB">HUB</option>
+          </select>
+        </div>
 
-        <button 
-          className={activeTab === 'schedule' ? 'active-tab' : ''} 
-          onClick={() => setActiveTab('schedule')}
-        >
-          Schedule Output (Image 2)
+        <div className="control-group">
+          <label>Date:</label>
+          <input 
+            type="date" 
+            value={selectedDate} 
+            onChange={(e) => setSelectedDate(e.target.value)} 
+          />
+        </div>
+
+        <div className="control-group">
+          <label>Entry Unit:</label>
+          <select value={unitMode} onChange={(e) => setUnitMode(e.target.value)}>
+            <option value="Days">Buffer Days</option>
+            <option value="Boxes">Boxes</option>
+            <option value="Rings">No. of Rings</option>
+          </select>
+        </div>
+
+        <button className="btn-save" onClick={handleSave}>
+          Save Entries
         </button>
       </div>
 
-      {activeTab === 'buffer' && (
-        <div className="scroll-wrapper">
-          <table className="exact-buffer-table">
-            <thead>
+      {/* DYNAMIC DATA ENTRY TABLE */}
+      <div className="table-wrapper">
+        <table className="excel-table">
+          <thead>
+            {/* Top Corporate Header */}
+            <tr>
+              <th colSpan="2" className="text-blue text-left pl-2">SKF INDIA LTD.</th>
+              <th colSpan={columns.length * 2 - 4} className="text-blue">
+                CHANNEL BUFFER STATUS (VERSION - 6)<br/>
+                {sector === 'DGBB' ? 'DBBB' : sector}
+              </th>
+              <th colSpan="2" className="text-blue text-right pr-2">DATE :- {selectedDate.split('-').reverse().join('/')}</th>
+            </tr>
+            
+            {/* Sector Sub-header row (Specific to HUB/TRB images) */}
+            {sector === 'TRB' && (
               <tr>
-                <th className="row-header"></th>
-                <th colSpan="2" className="bg-cyan">CH 01</th>
-                <th colSpan="2">CH 02</th>
-                <th colSpan="2">CH 03</th>
-                <th colSpan="2">CH 04</th>
-                <th colSpan="2">CH 05</th>
-                <th colSpan="2">XIJI</th>
-                <th colSpan="2">CH 07</th>
-                <th colSpan="2">CH 08</th>
-                <th colSpan="2" className="bg-cyan">CH 11</th>
+                <th colSpan="2" className="text-blue">BUFFER IN DAYS FOR 100% EFF.</th>
+                <th colSpan={columns.length * 2 - 4} className="text-blue font-xl">TRB</th>
+                <th colSpan="2" className="text-blue">SPLIT THU</th>
               </tr>
+            )}
+            {sector === 'HUB' && (
               <tr>
-                <th className="row-header font-bold">PART</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
-                <th>IR</th><th>OR</th>
+                <th colSpan="2"></th>
+                <th colSpan="8" className="text-blue font-xl border-right-thick">HUB</th>
+                <th colSpan="6" className="text-blue font-xl">THUB</th>
               </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td className="font-bold">Running</td>
-                <td>1.2</td><td>0.3</td>
-                <td>0.1</td><td>0.5</td>
-                <td>1.7</td><td>0.7</td>
-                <td>0.1</td><td>1</td>
-                <td>1.2</td><td>0.1</td>
-                <td>0</td><td>0</td>
-                <td></td><td></td>
-                <td>0.6</td><td>0.6</td>
-                <td>0.8</td><td>0.8</td>
-              </tr>
-              <tr>
-                <td className="font-bold">Next Type</td>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-              </tr>
-              <tr>
-                <td className="font-bold">Expected Time</td>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-              </tr>
-              {/* OD Buffer Blocks */}
-              <tr>
-                <td rowSpan="3" className="font-bold">OD Buffer</td>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-              </tr>
-              <tr>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td className="border-bottom-thick">0.2</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td className="border-bottom-thick">0.2</td>
-              </tr>
-              <tr>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td className="font-bold">6311</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td className="font-bold">63/28</td>
-              </tr>
-              {/* Face Buffer Blocks */}
-              <tr>
-                <td rowSpan="3" className="font-bold">Face Buffer</td>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-              </tr>
-              <tr>
-                <td></td><td className="border-bottom-thick">1</td><td></td><td></td><td></td><td className="border-bottom-thick">0.1</td><td></td><td></td><td></td><td className="border-bottom-thick">0.8</td><td></td><td></td><td></td><td></td><td className="border-bottom-thick">1</td><td className="border-bottom-thick">1.1</td><td></td><td></td>
-              </tr>
-              <tr>
-                <td></td><td className="font-bold">63/28</td><td></td><td></td><td></td><td className="font-bold">6306</td><td></td><td></td><td></td><td className="font-bold">6311</td><td></td><td></td><td></td><td></td><td className="font-bold">6307</td><td className="font-bold">6307</td><td></td><td></td>
-              </tr>
-              {/* HT Buffer Blocks */}
-              <tr>
-                <td rowSpan="4" className="font-bold">HT Buffer</td>
-                <td></td><td></td><td className="border-bottom-thick font-bold">0.4</td><td></td><td className="border-bottom-thick font-bold">0.7</td><td className="border-bottom-thick font-bold">1.7</td><td className="border-bottom-thick font-bold">2</td><td className="border-bottom-thick font-bold">1</td><td className="border-bottom-thick font-bold">1.3</td><td></td><td></td><td></td><td></td><td></td><td className="border-bottom-thick font-bold">1.7</td><td className="border-bottom-thick font-bold">1.7</td><td></td><td></td>
-              </tr>
-              <tr>
-                <td></td><td></td><td className="font-bold">6007</td><td></td><td className="font-bold">6306</td><td className="font-bold">6306</td><td className="font-bold">6010</td><td className="font-bold">6010</td><td className="font-bold">6311</td><td className="font-bold">6311</td><td></td><td></td><td></td><td></td><td className="font-bold">6307</td><td className="font-bold">6307</td><td></td><td></td>
-              </tr>
-              <tr>
-                <td className="border-bottom-thick font-bold">1.2</td><td className="border-bottom-thick font-bold">1.2</td><td className="border-bottom-thick font-bold">0.4</td><td className="border-bottom-thick font-bold">1.3</td><td className="border-bottom-thick font-bold">0.7</td><td className="border-bottom-thick font-bold">0.6</td><td></td><td></td><td className="border-bottom-thick font-bold">1</td><td></td><td></td><td></td><td></td><td></td><td></td><td className="border-bottom-thick font-bold">0.3</td><td className="border-bottom-thick font-bold">1</td><td className="border-bottom-thick font-bold">1.2</td>
-              </tr>
-              <tr>
-                <td className="font-bold">63/28</td><td className="font-bold">63/28</td><td className="font-bold">6007 RE</td><td className="font-bold">6007 RE</td><td className="font-bold">6306 CN</td><td className="font-bold">6306 VU</td><td></td><td></td><td className="font-bold">6312</td><td></td><td></td><td></td><td></td><td></td><td></td><td className="font-bold">6307N</td><td className="font-bold">63/28</td><td className="font-bold">63/28</td>
-              </tr>
-              <tr>
-                <td className="font-bold">Running Types</td>
-                <td className="font-bold">63/28</td><td className="font-bold">63/28</td><td className="font-bold">6007</td><td className="font-bold">6007</td><td className="font-bold">6306</td><td className="font-bold">6306</td><td className="font-bold">6308</td><td className="font-bold">6308</td><td className="font-bold">6311</td><td className="font-bold">6311</td><td className="font-bold">23102RS</td><td className="font-bold">2310 2RS</td><td></td><td></td><td className="font-bold">6307</td><td className="font-bold">6307</td><td className="font-bold">63/28</td><td className="font-bold">63/28</td>
-              </tr>
-              <tr>
-                <td className="font-bold">Next Type</td>
-                <td></td><td></td><td></td><td></td><td></td><td></td><td></td><td className="font-bold">6010</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td>
-              </tr>
-              {/* Calculated Results Row */}
-              <tr>
-                <td className="font-bold">Buffer in day</td>
-                <td className="font-bold">2.4</td><td className="font-bold text-red">2.5</td><td className="font-bold text-red">0.9</td><td className="font-bold text-red">1.8</td><td className="font-bold">3.1</td><td className="font-bold">3.1</td><td className="font-bold">2.1</td><td className="font-bold">2</td><td className="font-bold">3.5</td><td className="font-bold text-red">1.1</td><td className="font-bold text-red">0</td><td className="font-bold text-red">0</td><td className="font-bold text-red">0</td><td className="font-bold text-red">0</td><td className="font-bold">3.3</td><td className="font-bold text-red">3.7</td><td className="font-bold text-red">1.8</td><td className="font-bold text-red">2.2</td>
-              </tr>
-              <tr>
-                <td className="font-bold">RUSH Batches</td>
-                <td></td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td></td><td></td><td></td><td></td><td></td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td></td><td></td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td><td className="bg-red text-white font-bold text-xs">NO NEXT MAT</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      )}
+            )}
 
-      {activeTab === 'schedule' && (
-        <div className="schedule-layout">
-          <div className="schedule-header">
-            <h2 className="text-blue">Face & OD Grinding Schedule</h2>
-            <h2 className="text-blue">Date :- 01/04/2026</h2>
-          </div>
-
-          <div className="three-columns">
-            {/* COLUMN 1: FACE GRINDING */}
-            <div className="column column-face">
-              <h3 className="column-title text-blue">Face Grinding</h3>
-              <table className="schedule-table">
-                <thead>
-                  <tr>
-                    <th className="bg-light-blue text-blue" style={{width: '60%'}}>DDS (544)</th>
-                    <th className="bg-light-blue text-blue">STD BOX</th>
-                    <th colSpan="2" className="bg-white">Shift Priority<br/><span className="text-blue">2nd</span> | <span className="text-blue">3rd</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr><td className="font-bold text-red">BREAKDOWN DAY 03</td><td>0</td><td rowSpan="4">1</td><td rowSpan="4">P2</td></tr>
-                  <tr><td className="font-bold">33005---OR</td><td>0</td></tr>
-                  <tr><td className="font-bold">33005---IR</td><td>0</td></tr>
-                  <tr><td>BT11366---IR BLUE BOX</td><td>0</td></tr>
-                  <tr><td className="text-red">BTH1024---IR APQ</td><td>0</td><td rowSpan="2">3</td><td rowSpan="2"></td></tr>
-                  <tr><td></td><td>0</td></tr>
-                  
-                  {/* Gardner (1016) */}
-                  <tr>
-                    <th className="bg-light-blue text-blue">Gardner ( 1016 + USA 1996 )</th>
-                    <th className="bg-light-blue text-blue">STD BOX</th>
-                    <th colSpan="2"></th>
-                  </tr>
-                  <tr><td>6306---OR</td><td>0</td><td rowSpan="2">1</td><td rowSpan="6">P1</td></tr>
-                  <tr><td className="text-red font-bold">6311---OR APQ</td><td>0</td></tr>
-                  <tr><td>2820---OR</td><td>0</td><td rowSpan="4">2</td></tr>
-                  <tr><td>32212---OR</td><td>0</td></tr>
-                  <tr><td>6307---OR</td><td>0</td></tr>
-                  <tr><td>BT11366---OR</td><td>0</td></tr>
-                  <tr><td className="text-red font-bold">6312---OR APQ</td><td>0</td><td>3</td><td></td></tr>
-                  
-                  {/* DDS Cell */}
-                  <tr>
-                    <th className="bg-light-blue text-blue">DDS Cell ( 709 + 1186 )</th>
-                    <th className="bg-light-blue text-blue">STD BOX</th>
-                    <th colSpan="2"></th>
-                  </tr>
-                  <tr><td className="font-bold text-red">BAR0594---IR</td><td></td><td>1</td><td rowSpan="7">P1</td></tr>
-                  <tr><td>32212---IR</td><td></td><td rowSpan="5">2</td></tr>
-                  <tr><td>BT11798---OR</td><td></td></tr>
-                  <tr><td>BT11798---IR</td><td></td></tr>
-                  <tr><td>3525---OR</td><td></td></tr>
-                  <tr><td>3585---IR</td><td></td></tr>
-                  <tr><td>32217---OR</td><td></td><td rowSpan="3">3</td></tr>
-                  <tr><td>32217---IR</td><td></td><td rowSpan="2"></td></tr>
-                  <tr><td className="font-bold text-red">BAR0594---IR</td><td></td></tr>
-                </tbody>
-              </table>
-            </div>
-
-            {/* COLUMN 2: OD GRINDING */}
-            <div className="column column-od">
-              <h3 className="column-title text-blue">OD Grinding</h3>
-              <table className="schedule-table">
-                <thead>
-                  <tr>
-                    <th className="bg-light-blue text-blue" style={{width: '60%'}}>CL -46 Cell 2 ( 0945 + 0839 )</th>
-                    <th className="bg-light-blue text-blue">STD BOX</th>
-                    <th colSpan="2" className="bg-white">Shift Priority<br/><span className="text-blue">2nd</span> | <span className="text-blue">3rd</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr><td className="font-bold">6306-OR <span className="text-red">TOTE BOX</span>(+2TO-6)</td><td></td><td>1</td><td rowSpan="4">P1</td></tr>
-                  <tr><td>2820---OR</td><td></td><td rowSpan="2">2</td></tr>
-                  <tr><td>6307---OR BLUE BOX</td><td></td></tr>
-                  <tr><td>BT11366---OR BLUE BOX</td><td></td><td>3</td></tr>
-                  
-                  {/* Cell 1 */}
-                  <tr>
-                    <th className="bg-light-blue text-blue">CL-46 Cell 1 ( 0661 + 1125 )</th>
-                    <th className="bg-light-blue text-blue">STD BOX</th>
-                    <th colSpan="2"></th>
-                  </tr>
-                  <tr><td>6311---OR</td><td></td><td rowSpan="2">1</td><td rowSpan="5">P1</td></tr>
-                  <tr><td>32212---OR</td><td></td></tr>
-                  <tr><td>3525---OR</td><td></td><td rowSpan="2">2</td></tr>
-                  <tr><td>32217---OR</td><td></td></tr>
-                  <tr><td>BT10230---OR</td><td></td><td>3</td></tr>
-                  
-                  {/* Cell 3 */}
-                  <tr>
-                    <th className="bg-light-blue text-blue">CL-46 Cell 3 ( 1600 + 1903 )</th>
-                    <th className="bg-light-blue text-blue">STD BOX</th>
-                    <th colSpan="2"></th>
-                  </tr>
-                  <tr><td>6307---OR BLUE BOX</td><td></td><td rowSpan="2">1</td><td rowSpan="4">P1</td></tr>
-                  <tr><td>BT11798---OR</td><td></td></tr>
-                  <tr><td>BAH0303---OR</td><td></td><td rowSpan="2">2</td></tr>
-                  <tr><td className="font-bold">6306-OR+ VU <span className="text-red">TOTE BOX</span></td><td></td></tr>
-
-                  {/* Cell 4 */}
-                  <tr>
-                    <th className="bg-light-blue text-blue">CL-46 Cell 4 ( 170 + 1904 )</th>
-                    <th className="bg-light-blue text-blue">STD BOX</th>
-                    <th colSpan="2"></th>
-                  </tr>
-                  <tr><td>BTH329129---OR BLUE BOX</td><td></td><td>1</td><td rowSpan="3">P1</td></tr>
-                  <tr><td className="font-bold text-red">BAH0381-OR BLUE BOX</td><td></td><td>2</td></tr>
-                  <tr><td>BTH329129---OR BLUE BOX</td><td></td><td>3</td></tr>
-                </tbody>
-              </table>
-            </div>
-
-            {/* COLUMN 3: HEAT TREATMENT */}
-            <div className="column column-ht">
-               <table className="schedule-table ht-table">
-                <thead>
-                  <tr>
-                    <th colSpan="3" className="bg-light-blue text-blue">HEAT TREATMENT</th>
-                    <th colSpan="2" className="bg-light-blue text-blue">DATE - 01/04/2026</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {/* AICHELIN */}
-                  <tr>
-                    <th className="bg-light-blue text-blue text-left">AICHELIN.(896)</th>
-                    <th className="bg-light-blue text-blue">QTY</th>
-                    <th className="bg-light-blue text-blue">Cha 350</th>
-                    <th className="bg-light-blue text-blue text-left">ASTLINK FURNACE( 1018)</th>
-                    <th className="bg-light-blue text-blue">QTY</th>
-                  </tr>
-                  <tr>
-                    <td>72487---OR</td><td></td><td>T3</td>
-                    <td>BT11366---OR</td><td></td>
-                  </tr>
-                  <tr>
-                    <td>32212---IR</td><td>6000</td><td>T5</td>
-                    <td>63/28---OR</td><td>12000</td>
-                  </tr>
-                  <tr>
-                    <td>3720---OR</td><td>5000</td><td>T6</td>
-                    <td>33108---OR</td><td></td>
-                  </tr>
-                  <tr>
-                    <td>72212---IR</td><td></td><td>T3</td>
-                    <td><span className="font-bold">6007---OR <span className="text-red">RE S0</span></span></td><td></td>
-                  </tr>
-                  
-                  {/* ROLLER FURNACE */}
-                  <tr>
-                    <th className="bg-light-blue text-blue text-left mt-row">ROLLER FURNACE ( 148 )</th>
-                    <th className="bg-light-blue text-blue mt-row">QTY</th>
-                    <th className="bg-light-blue text-blue mt-row">Cha 250</th>
-                    <th className="bg-light-blue text-blue text-left mt-row">MPLICITY FURNACE(1238)</th>
-                    <th className="bg-light-blue text-blue mt-row">QTY</th>
-                  </tr>
-                  <tr>
-                    <td>BAR0594---IR</td><td>10000</td><td>HUB3</td>
-                    <td>1922---OR</td><td>15000</td>
-                  </tr>
-                  <tr>
-                    <td><span className="font-bold">32007<span className="text-red">VB</span>---IR BLUE BOX</span></td><td></td><td>T8</td>
-                    <td><span className="font-bold">63/28---IR <span className="text-red">TOTE BOX</span></span></td><td>15000</td>
-                  </tr>
-                  <tr>
-                    <td>63/28---IR BLUE BOX</td><td>12000</td><td>CH11</td>
-                    <td>1988---IR</td><td></td>
-                  </tr>
-
-                  {/* REMARK BOX */}
-                  <tr>
-                    <th colSpan="2" className="bg-dark-blue text-white mt-row">REMARK / CONVERSION QTY</th>
-                    <th className="bg-dark-blue text-white mt-row"></th>
-                    <th className="bg-dark-blue text-white text-center mt-row">FOR FACE &OD</th>
-                    <th className="bg-dark-blue text-white mt-row">QTY</th>
-                  </tr>
-                  <tr>
-                    <td colSpan="2">6010 OR</td><td></td><td>BTH1024 OR</td><td>2800</td>
-                  </tr>
-                  <tr>
-                    <td colSpan="2">6206 IR OR</td><td></td><td>6311 OR</td><td></td>
-                  </tr>
-                  <tr>
-                    <td colSpan="2">6007 IR RE</td><td></td><td>BAH0381 OR-10K IR- 12K</td><td></td>
-                  </tr>
-                  <tr>
-                    <td colSpan="2" className="font-bold">BTH1024 IR</td><td className="font-bold">8000</td><td>BTH329129 IR</td><td>7000</td>
-                  </tr>
-                </tbody>
-              </table>
-
-              {/* HIGH ALERT BOX */}
-              <div className="alert-box">
-                <div className="alert-header">HIGH ALERT TYPE</div>
-                <div className="alert-item font-bold text-red">63/28 OR = VKR SIZE</div>
-                <div className="alert-item font-bold text-red">BAH0378OR= VKR+ SIZE+ CLA</div>
-                <div className="alert-item font-bold text-red">BAH0348 OR= VKR+CLA + SIZE</div>
-                <div className="alert-item font-bold text-red">BAH0381 OR= VKR+ CLA</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+            {/* Main Column Headers */}
+            <tr className="header-row">
+              <th className="text-blue" style={{width: '120px'}}>CHANNEL</th>
+              {columns.map(col => (
+                <th key={col} colSpan="2" className="text-blue column-title">{col}</th>
+              ))}
+            </tr>
+            
+            {/* IR / OR Sub-headers */}
+            <tr className="subheader-row">
+              <th className="font-bold">PART</th>
+              {columns.map(col => (
+                <React.Fragment key={`${col}-sub`}>
+                  <th className="font-bold">IR</th>
+                  <th className="font-bold">OR</th>
+                </React.Fragment>
+              ))}
+            </tr>
+          </thead>
+          
+          <tbody>
+            {ROWS.map((row, index) => (
+              <tr key={index} className={row.key === 'spacer' ? 'spacer-row' : ''}>
+                <td className="row-label font-bold">{row.label}</td>
+                
+                {row.key !== 'spacer' ? columns.map(col => (
+                  <React.Fragment key={`${row.key}-${col}`}>
+                    <td className="input-cell">
+                      <input 
+                        type="text"
+                        value={tableData[`${row.key}_${col}_IR`] || ''}
+                        onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}
+                      />
+                    </td>
+                    <td className="input-cell">
+                      <input 
+                        type="text"
+                        value={tableData[`${row.key}_${col}_OR`] || ''}
+                        onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}
+                      />
+                    </td>
+                  </React.Fragment>
+                )) : columns.map(col => (
+                  <React.Fragment key={`spacer-${col}`}>
+                    <td className="spacer-cell"></td>
+                    <td className="spacer-cell"></td>
+                  </React.Fragment>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 };
 
-export default SHOSchedule;
+export default SHOScheduling;

@@ -265,3 +265,72 @@
 .mac-head {
   background-color: #d1ecf1;
 }
+/* ADD TO THE BOTTOM OF EXISTING CSS */
+
+.tab-buttons {
+  display: flex;
+  margin-bottom: 15px;
+  gap: 10px;
+}
+
+.tab-buttons button {
+  padding: 10px 20px;
+  font-size: 14px;
+  font-weight: bold;
+  border: 1px solid #aaa;
+  border-bottom: none;
+  background-color: #e9ecef;
+  cursor: pointer;
+  border-radius: 5px 5px 0 0;
+}
+
+.tab-buttons button.active {
+  background-color: white;
+  border-top: 3px solid #0056b3;
+  color: #004085;
+}
+
+.btn-fetch {
+  background-color: #28a745;
+  color: white;
+  font-weight: bold;
+  border: 1px solid #1e7e34;
+  padding: 8px 20px;
+  cursor: pointer;
+  margin-left: auto;
+}
+.btn-fetch:hover { background-color: #218838; }
+
+.schedule-container {
+  background: white;
+  padding: 15px;
+  border: 3px solid #000;
+  overflow: auto;
+  flex-grow: 1;
+}
+
+.schedule-layout {
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
+  gap: 20px;
+  min-width: 1000px; /* Forces columns to stay side by side */
+}
+
+.sched-col {
+  flex: 1;
+  min-width: 320px;
+  background-color: #fff;
+}
+
+.sched-table {
+  width: 100%;
+}
+
+.sched-table thead th {
+  position: static !important; /* Disables sticky headers for schedule view */
+}
+
+.mac-head {
+  background-color: #d1ecf1;
+}

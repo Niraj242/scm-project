@@ -4,7 +4,9 @@ import './SHOScheduling.css';
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
   const [sector, setSector] = useState('DGBB');
-  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
+  
+  // FIX: Properly named bufferDate instead of selectedDate
+  const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Days');
   
   const [tableData, setTableData] = useState({});
@@ -210,6 +212,7 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
+                      {scheduleData.face_grinding.length === 0 && <tr><td colSpan="4" className="center-text">No parts scheduled.</td></tr>}
                       {scheduleData.face_grinding.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
@@ -240,6 +243,7 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
+                      {scheduleData.od_grinding.length === 0 && <tr><td colSpan="4" className="center-text">No parts scheduled.</td></tr>}
                       {scheduleData.od_grinding.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>

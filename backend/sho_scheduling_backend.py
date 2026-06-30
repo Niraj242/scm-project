@@ -1,5 +1,6 @@
 import os
 import re
+import math
 import pandas as pd
 import numpy as np
 import requests
@@ -8,7 +9,6 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List
-import math
 
 router = APIRouter()
 
@@ -21,8 +21,8 @@ FAM_REGEX = re.compile(r'(\d{3,5})')
 class ScheduleRequest(BaseModel):
     sector: str
     date: str
-    unit_mode: str  # 'Boxes' or 'Days'
-    entries: Dict[str, Any] # Buffer entries from UI
+    unit_mode: str
+    entries: Dict[str, Any]
     unlocked_blocks: List[str]
 
 def parse_family(prod_text):
@@ -47,12 +47,19 @@ def parse_family(prod_text):
     return base
 
 def safe_float(val):
+    """Bulletproof conversion to float. Forces NaN and empty cells to 0.0"""
+    if pd.isna(val) or val is None:
+        return 0.0
     try:
-        return float(str(val).replace(',', '').strip())
-    except:
+        s_val = str(val).replace(',', '').strip().lower()
+        if s_val in ['nan', 'none', '', 'null']:
+            return 0.0
+        f_val = float(s_val)
+        # Final safety net for math.nan
+        return 0.0 if math.isnan(f_val) else f_val
+    except Exception:
         return 0.0
 
-# --- DIAGNOSTIC EXCEL LOADER ---
 def load_excel_fast(url, file_label="Unknown"):
     logs = []
     if not url or url.strip() == "":
@@ -82,13 +89,12 @@ def generate_schedule(payload: ScheduleRequest):
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         next_date = req_date + timedelta(days=1)
         
-        # WE NOW JUST LOOK FOR THE INTEGER DAY (e.g., 1, 2, 3...)
         req_d = str(req_date.day)
         nxt_d = str(next_date.day)
         
         # 1. READ ZEROSET
         total_demand, daily_demand = {}, {}
-        xls_zero, logs1 = load_excel_fast(ZEROSET_URL, "ZEROSET_URL")
+        xls_zero, logs1 = load_excel_fast(ZEROSET_URL, "ZEROSET")
         debug_logs.extend(logs1)
         
         if xls_zero:
@@ -109,8 +115,6 @@ def generate_schedule(payload: ScheduleRequest):
                         r_idx = i
                         for j, val in enumerate(row.values):
                             if pd.isna(val): continue
-                            
-                            # EXACT MATCH FOR INTEGER DAYS (1, 2, 3...)
                             val_str = str(val).strip()
                             if val_str == req_d or val_str == f"{req_d}.0": c1 = j
                             if val_str == nxt_d or val_str == f"{nxt_d}.0": c2 = j
@@ -137,7 +141,7 @@ def generate_schedule(payload: ScheduleRequest):
 
         # 2. READ BOXES & PREPARE BUFFER LOGIC
         box_matrix = {}
-        xls_box, logs2 = load_excel_fast(BOX_RING_DATA_URL, "BOX_RING_DATA_URL")
+        xls_box, logs2 = load_excel_fast(BOX_RING_DATA_URL, "BOX_RING_DATA")
         if xls_box and 'RING PER BOX.' in xls_box.sheet_names:
             df_box = pd.read_excel(xls_box, sheet_name='RING PER BOX.')
             for _, r in df_box.iterrows():
@@ -146,32 +150,29 @@ def generate_schedule(payload: ScheduleRequest):
                     if fam: box_matrix[fam] = {'OR': safe_float(r.get('O/R', 100)), 'IR': safe_float(r.get('I/R', 100))}
 
         # --- DEDUCT BUFFER FROM DEMAND ---
-        # NOTE: This subtracts UI input buffers (converted if needed) from the total demand.
-        # It handles the logic you requested (Days -> Boxes -> Rings subtraction).
         for block_id, entry in payload.entries.items():
             fam = parse_family(entry.get('type', ''))
             if fam and fam in daily_demand:
                 ir_buf = safe_float(entry.get('IR', 0))
                 or_buf = safe_float(entry.get('OR', 0))
                 
-                # If UI is in days, convert to rings based on daily demand
                 if payload.unit_mode == 'Days':
                     ir_deduct_rings = ir_buf * daily_demand[fam]
                     or_deduct_rings = or_buf * daily_demand[fam]
-                else:
-                    # UI is in boxes, convert to rings based on ring/box matrix
+                elif payload.unit_mode == 'Boxes':
                     ir_deduct_rings = ir_buf * box_matrix.get(fam, {}).get('IR', 100)
                     or_deduct_rings = or_buf * box_matrix.get(fam, {}).get('OR', 100)
+                else:
+                    ir_deduct_rings = ir_buf
+                    or_deduct_rings = or_buf
                 
-                # Subtract from total demand (rough aggregate for now)
-                daily_demand[fam] = max(0, daily_demand[fam] - ((ir_deduct_rings + or_deduct_rings) / 2))
+                daily_demand[fam] = max(0.0, daily_demand[fam] - ((ir_deduct_rings + or_deduct_rings) / 2))
 
         # 3. READ MACHINES & FURNACES
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
-        xls_prod, logs3 = load_excel_fast(SHO_PRODUCTION_URL, "SHO_PRODUCTION_URL")
+        xls_prod, logs3 = load_excel_fast(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
         
-        m_count = 0
         if xls_prod:
             if 'WEIGHTS' in xls_prod.sheet_names:
                 df_w = pd.read_excel(xls_prod, sheet_name='WEIGHTS')
@@ -199,7 +200,6 @@ def generate_schedule(payload: ScheduleRequest):
                             m_type = str(df_m.iloc[r, c+2]).strip().upper()
                             
                             if m_type in ['FACE', 'OD']:
-                                m_count += 1
                                 if m_num not in machines_data[m_type]:
                                     machines_data[m_type][m_num] = {'name': m_num, 'rates': {}}
                                 
@@ -233,7 +233,7 @@ def generate_schedule(payload: ScheduleRequest):
                 
                 candidates = []
                 for fam, dem in sorted_fams:
-                    if dem <= 0: continue
+                    if dem <= 0 or math.isnan(dem): continue
                     for p_code in ['IR', 'OR']:
                         fp = f"{fam}_{p_code}"
                         if fp in rates and rates[fp] > 0:
@@ -270,7 +270,7 @@ def generate_schedule(payload: ScheduleRequest):
         # 5. ASSIGN HEAT TREATMENT
         result_ht = {}
         for fam, dem in sorted_fams:
-            if dem <= 0: continue
+            if dem <= 0 or math.isnan(dem): continue
             
             fur = furnace_map.get(fam, "AICHELIN.(896)") 
             if fur not in result_ht: result_ht[fur] = []

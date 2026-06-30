@@ -97,6 +97,8 @@ def generate_schedule(payload: ScheduleRequest):
         
         req_d, req_m = req_date.day, req_date.strftime("%b").lower()
         nxt_d, nxt_m = next_date.day, next_date.strftime("%b").lower()
+        req_iso = req_date.strftime("%Y-%m-%d")
+        nxt_iso = next_date.strftime("%Y-%m-%d")
         
         # 1. READ ZEROSET
         total_demand, daily_demand = {}, {}
@@ -122,21 +124,35 @@ def generate_schedule(payload: ScheduleRequest):
                         r_idx = i
                         for j, val in enumerate(row.values):
                             if pd.isna(val): continue
-                            # Highly aggressive date matching
+                            
+                            # SUPER AGGRESSIVE DATE MATCHING
+                            # 1. Check if it's already a datetime object
                             if isinstance(val, (datetime, pd.Timestamp)):
                                 if val.day == req_d and val.month == req_date.month: c1 = j
                                 if val.day == nxt_d and val.month == next_date.month: c2 = j
                             else:
-                                s_val = str(val).strip().lower()
-                                if f"{req_d}-{req_m}" in s_val or f"{req_d:02d}-{req_m}" in s_val: c1 = j
-                                if f"{nxt_d}-{nxt_m}" in s_val or f"{nxt_d:02d}-{nxt_m}" in s_val: c2 = j
+                                # 2. Try parsing string into a datetime object using Pandas
+                                try:
+                                    dt_val = pd.to_datetime(str(val), errors='coerce')
+                                    if pd.notna(dt_val):
+                                        if dt_val.day == req_d and dt_val.month == req_date.month: c1 = j
+                                        if dt_val.day == nxt_d and dt_val.month == next_date.month: c2 = j
+                                except:
+                                    pass
+                                
+                                # 3. Fallback to brute-force string matching
+                                if c1 is None or c2 is None:
+                                    s_val = str(val).strip().lower()
+                                    if (f"{req_d}-{req_m}" in s_val or f"{req_d:02d}-{req_m}" in s_val or req_iso in s_val): c1 = j
+                                    if (f"{nxt_d}-{nxt_m}" in s_val or f"{nxt_d:02d}-{nxt_m}" in s_val or nxt_iso in s_val): c2 = j
+                                    
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None:
                     if c1 is not None or c2 is not None:
                         debug_logs.append(f"[ZEROSET_URL] Found Dates (Col {c1}, {c2}) in sheet '{sheet_name}'. Parsing demand...")
                     else:
-                        debug_logs.append(f"[ZEROSET_URL] Found row but NO DATES matched {req_d}-{req_m} in sheet '{sheet_name}'")
+                        debug_logs.append(f"[ZEROSET_URL] Found row but NO DATES matched {req_iso} or {req_d}-{req_m} in sheet '{sheet_name}'")
                         
                     for idx in range(r_idx + 1, len(df_zero)):
                         raw_type = df_zero.iloc[idx, type_col_idx]

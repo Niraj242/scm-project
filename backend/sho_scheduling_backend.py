@@ -26,14 +26,11 @@ class ScheduleRequest(BaseModel):
     entries: Dict[str, Any]
     unlocked_blocks: List[str]
 
-@router.get("/api/health")
-def health_check():
-    return {"status": "ok"}
-
 def parse_family(prod_text):
     text = str(prod_text).strip().upper()
-    if not text or text in ["NAN", "NONE", "", "UNKNOWN"]: return None
+    if "INDUSTRILA" in text: text = text.replace("INDUSTRILA", "INDUSTRIAL")
     if "AUTOMOTIVE" in text: return None
+    if not text or text in ["NAN", "NONE", ""]: return None
     
     t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
     words = t_norm.split()
@@ -60,36 +57,29 @@ def safe_float(val):
         return 0.0
 
 def load_excel_all_sheets(url, file_label="Unknown"):
-    """Downloads the excel file and parses all sheets at once into a dict of DataFrames for speed."""
+    """Downloads an excel file and parses all sheets at once into a dict of DataFrames for optimal performance."""
     logs = []
     if not url or url.strip() == "":
         logs.append(f"[{file_label}] FAILED: URL is empty.")
         return None, logs
     
     start_time = time.time()
-    for attempt in range(2):
-        try:
-            logs.append(f"[{file_label}] Fetching data stream...")
-            resp = requests.get(url, timeout=30)
-            if resp.status_code != 200:
-                time.sleep(1)
-                continue
-                
-            content = io.BytesIO(resp.content)
-            # Read all sheets simultaneously to drastically cut execution time
-            try:
-                sheets_dict = pd.read_excel(content, sheet_name=None, header=None, engine='calamine')
-                logs.append(f"[{file_label}] SUCCESS (calamine) in {round(time.time() - start_time, 2)}s.")
-                return sheets_dict, logs
-            except Exception:
-                sheets_dict = pd.read_excel(content, sheet_name=None, header=None)
-                logs.append(f"[{file_label}] SUCCESS (openpyxl) in {round(time.time() - start_time, 2)}s.")
-                return sheets_dict, logs
-        except Exception as e:
-            logs.append(f"[{file_label}] Connection attempt error: {str(e)}")
-            time.sleep(1)
+    try:
+        resp = requests.get(url, timeout=30)
+        if resp.status_code != 200:
+            return None, [f"[{file_label}] FAILED: Status code {resp.status_code}"]
             
-    return None, logs
+        content = io.BytesIO(resp.content)
+        try:
+            sheets_dict = pd.read_excel(content, sheet_name=None, header=None, engine='calamine')
+            logs.append(f"[{file_label}] SUCCESS loaded all sheets in {round(time.time() - start_time, 2)}s.")
+            return sheets_dict, logs
+        except Exception:
+            sheets_dict = pd.read_excel(content, sheet_name=None, header=None)
+            logs.append(f"[{file_label}] SUCCESS (fallback) loaded all sheets in {round(time.time() - start_time, 2)}s.")
+            return sheets_dict, logs
+    except Exception as e:
+        return None, [f"[{file_label}] CONNECTION ERROR: {str(e)}"]
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -98,12 +88,12 @@ def generate_schedule(payload: ScheduleRequest):
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         next_date = req_date + timedelta(days=1)
         
-        # Build flexible variants for date matching (e.g., "1", "01", "1.0", "01-Apr")
-        d1_variants = [str(req_date.day), f"{req_date.day}.0", req_date.strftime("%d-%b").upper(), req_date.strftime("%b-%d").upper()]
-        d2_variants = [str(next_date.day), f"{next_date.day}.0", next_date.strftime("%d-%b").upper(), next_date.strftime("%b-%d").upper()]
+        # Build flexible column header matchers for the current and next day numbers
+        d1_variants = [str(req_date.day), f"{req_date.day}.0", req_date.strftime("%d-%b").upper(), req_date.strftime("%d-%b").lower()]
+        d2_variants = [str(next_date.day), f"{next_date.day}.0", next_date.strftime("%d-%b").upper(), next_date.strftime("%d-%b").lower()]
         
         # ==========================================
-        # 1. READ ZEROSET (Pipeline Demand)
+        # 1. PARSE ZEROSET (PIPELINE DEMAND)
         # ==========================================
         channel_demands = {} 
         sheets_zero, logs1 = load_excel_all_sheets(ZEROSET_URL, "ZEROSET")
@@ -113,7 +103,7 @@ def generate_schedule(payload: ScheduleRequest):
             for sheet_name, df_zero in sheets_zero.items():
                 r_idx, type_col_idx, c1, c2 = None, None, None, None
                 
-                # Scan first 15 rows to locate data layout headers
+                # Scan top rows to find layout coordinate configurations
                 for i in range(min(15, len(df_zero))):
                     row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
                     row_joined = " ".join(row_strs)
@@ -129,12 +119,12 @@ def generate_schedule(payload: ScheduleRequest):
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if pd.isna(val): continue
                             v_str = str(val).strip().upper()
-                            if v_str in d1_variants: c1 = j
-                            if v_str in d2_variants: c2 = j
+                            if v_str in d1_variants or any(dv in v_str for dv in d1_variants): c1 = j
+                            if v_str in d2_variants or any(dv in v_str for dv in d2_variants): c2 = j
                     if r_idx is not None and type_col_idx is not None: break
                         
-                if r_idx is not None and type_col_idx is not None and (c1 is not None or c2 is not None):
-                    # FIX: Forward-fill the merged Type column so child rows inherit part IDs
+                if r_idx is not None and type_col_idx is not None and c1 is not None:
+                    # Propagate merged type cells down into blank children
                     df_zero[type_col_idx] = df_zero[type_col_idx].ffill()
                     
                     found_count = 0
@@ -143,58 +133,63 @@ def generate_schedule(payload: ScheduleRequest):
                         fam = parse_family(raw_type)
                         if not fam: continue
                         
-                        # Extract quantity data (multiply decimal values by 1000 if tracking in hours/k-units)
-                        val1 = safe_float(df_zero.iloc[idx, c1]) if c1 is not None else 0.0
+                        val1 = safe_float(df_zero.iloc[idx, c1])
                         val2 = safe_float(df_zero.iloc[idx, c2]) if c2 is not None else 0.0
                         
-                        r1 = val1 * 1000 if 0 < val1 <= 50 else val1
-                        r2 = val2 * 1000 if 0 < val2 <= 50 else val2
+                        # Standardize quantities if tracked in thousands/decimal units
+                        r1 = val1 * 1000 if 0 < val1 <= 70 else val1
+                        r2 = val2 * 1000 if 0 < val2 <= 70 else val2
                         
                         if r1 > 0 or r2 > 0:
+                            # --- CRITICAL RULE: IF TYPE CHANGES NEXT DAY, LEAVE IT FOR TOMORROW ---
+                            # If there is no demand today (r1 == 0) but demand tomorrow (r2 > 0),
+                            # it means this is a new type transition starting tomorrow. We leave it out!
+                            if r1 == 0 and r2 > 0:
+                                continue 
+                                
                             found_count += 1
                             if fam not in channel_demands: 
                                 channel_demands[fam] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
                             
-                            # Aggregate demand across both targeted days
-                            combined_day_qty = r1 + r2
                             is_or = 'OR' in str(raw_type).upper()
                             is_ir = 'IR' in str(raw_type).upper()
                             
+                            # Combine demands only if it is a continuing run
+                            combined_qty = r1 + r2 if r1 > 0 else r1
+                            
                             if is_or:
-                                channel_demands[fam]['OR'] = max(channel_demands[fam]['OR'], combined_day_qty)
+                                channel_demands[fam]['OR'] += combined_qty
                             elif is_ir:
-                                channel_demands[fam]['IR'] = max(channel_demands[fam]['IR'], combined_day_qty)
+                                channel_demands[fam]['IR'] += combined_qty
                             else:
-                                channel_demands[fam]['IR'] = max(channel_demands[fam]['IR'], combined_day_qty)
-                                channel_demands[fam]['OR'] = max(channel_demands[fam]['OR'], combined_day_qty)
+                                channel_demands[fam]['IR'] += combined_qty
+                                channel_demands[fam]['OR'] += combined_qty
                                 
                     if found_count > 0:
-                        debug_logs.append(f"[ZEROSET] Sheet '{sheet_name}' -> Successfully extracted {found_count} demands.")
-                        
+                        debug_logs.append(f"[ZEROSET] Sheet '{sheet_name}': Parsed {found_count} valid entries.")
             del sheets_zero
             gc.collect()
 
         # ==========================================
-        # 2. READ BOXES MATRIX
+        # 2. BOX RATIO CONFIGURATIONS
         # ==========================================
         box_matrix = {}
         sheets_box, logs2 = load_excel_all_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
         if sheets_box and 'RING PER BOX.' in sheets_box:
             df_box = sheets_box['RING PER BOX.']
-            # Reconstruct headers cleanly
             df_box.columns = [str(x).strip().upper() for x in df_box.iloc[0]]
             for idx, r in df_box.iloc[1:].iterrows():
                 fam = parse_family(r.iloc[0])
                 if fam: 
                     box_matrix[fam] = {
-                        'OR': safe_float(r.get('O/R', r.get('OR', 100))), 
-                        'IR': safe_float(r.get('I/R', r.get('IR', 100)))
+                        'OR': safe_float(r.get('O/R', r.get('OR', 100))) or 100, 
+                        'IR': safe_float(r.get('I/R', r.get('IR', 100))) or 100
                     }
             del sheets_box
             gc.collect()
 
         # ==========================================
-        # 3. MAP UI LIVE BUFFER ENTRIES 
+        # 3. BUFFER MERGING LOGIC
         # ==========================================
         buffers_by_fam = {}
         BUFFER_MAP = {
@@ -207,7 +202,6 @@ def generate_schedule(payload: ScheduleRequest):
         for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
             for key, val in payload.entries.items():
                 if key.startswith(type_prefix + '_'):
-                    # Key syntax matches: type_1_CH01_IR
                     parts = key.split('_')
                     if len(parts) < 3: continue
                     col_channel = parts[-2]
@@ -216,7 +210,6 @@ def generate_schedule(payload: ScheduleRequest):
                     fam = parse_family(val)
                     if not fam: continue
                     
-                    # Match dynamic buffer parameter
                     buf_key = f"{buf_prefix}_{col_channel}_{sub_ring_type}"
                     buf_val = safe_float(payload.entries.get(buf_key, 0))
                     if buf_val <= 0: continue
@@ -228,21 +221,17 @@ def generate_schedule(payload: ScheduleRequest):
                         }
                     buffers_by_fam[fam][stage][sub_ring_type] += buf_val
 
-        # ==========================================
-        # 4. PIPELINE STAGE PIPING & DEDUCTIONS
-        # ==========================================
+        # Deduct / Apply inventory modifiers to form net workflow volumes
         od_req, face_req, ht_req = {}, {}, {}
-
         for fam, demands in channel_demands.items():
-            rpb_ir = box_matrix.get(fam, {}).get('IR', 100) or 100
-            rpb_or = box_matrix.get(fam, {}).get('OR', 100) or 100
+            rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
+            rpb_or = box_matrix.get(fam, {}).get('OR', 100)
             
-            # Translate gross unit demand down to box structures
             req_boxes_ir = demands['IR'] / rpb_ir
             req_boxes_or = demands['OR'] / rpb_or
             
-            def get_buf_boxes(stage, side_code, base_boxes, rpb_rate):
-                raw_buf = buffers_by_fam.get(fam, {}).get(stage, {}).get(side_code, 0)
+            def get_buf_boxes(stage, side, base_boxes, rpb_rate):
+                raw_buf = buffers_by_fam.get(fam, {}).get(stage, {}).get(side, 0)
                 if payload.unit_mode == 'Days': return raw_buf * base_boxes
                 elif payload.unit_mode == 'Rings': return raw_buf / rpb_rate
                 return raw_buf 
@@ -254,7 +243,6 @@ def generate_schedule(payload: ScheduleRequest):
             face_buf_ir = get_buf_boxes('FACE', 'IR', req_boxes_ir, rpb_ir)
             face_buf_or = get_buf_boxes('FACE', 'OR', req_boxes_or, rpb_or)
 
-            # Deduct buffers downstream. If buffer is zero, 100% passes down automatically
             net_od_ir = max(0.0, req_boxes_ir - ch_buf_ir)
             net_od_or = max(0.0, req_boxes_or - ch_buf_or)
             
@@ -269,12 +257,14 @@ def generate_schedule(payload: ScheduleRequest):
             if net_face_ir > 0 or net_face_or > 0: 
                 face_req[fam] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': demands['channel']}
             if net_ht_ir > 0 or net_ht_or > 0: 
-                ht_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'rings': {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}, 'channel': demands['channel']}
-
-        debug_logs.append(f"Net Pipeline Demands Post-Buffer -> OD: {len(od_req)} | FACE: {len(face_req)} | HT: {len(ht_req)}")
+                ht_req[fam] = {
+                    'IR': net_ht_ir, 'OR': net_ht_or, 
+                    'rings': {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}, 
+                    'channel': demands['channel']
+                }
 
         # ==========================================
-        # 5. READ PRODUCTION CAPACITIES & FLEXIBILITY
+        # 4. PARSE PRODUCTION SPEEDS & RIGID FLEXIBILITY
         # ==========================================
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
         sheets_prod, logs3 = load_excel_all_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
@@ -293,11 +283,12 @@ def generate_schedule(payload: ScheduleRequest):
             if 'Furnace Type Flexibility' in sheets_prod:
                 df_f = sheets_prod['Furnace Type Flexibility']
                 for idx, r in df_f.iterrows():
-                    if pd.notna(r.iloc[0]): 
+                    if pd.notna(r.iloc[0]) and pd.notna(r.iloc[1]): 
                         fam = parse_family(r.iloc[0])
-                        if fam: furnace_map[fam] = str(r.iloc[1]).strip()
+                        if fam: 
+                            # Support comma or space separated alternative furnace routings
+                            furnace_map[fam] = [f.strip() for f in str(r.iloc[1]).replace(',', ' ').split() if f.strip()]
             
-            # Map dynamic engineering layouts for machine sheets
             for sheet_name, df_m in sheets_prod.items():
                 if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.']: continue
                 str_matrix = df_m.fillna('').astype(str).values
@@ -314,9 +305,8 @@ def generate_schedule(payload: ScheduleRequest):
                         
                         if m_type in ['FACE', 'OD']:
                             if m_num not in machines_data[m_type]:
-                                machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 16.0}
+                                machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 24.0}
                             
-                            # Find data block column headers down to 5 steps
                             header_idx = -1
                             for offset in range(1, 6):
                                 if r + offset >= str_matrix.shape[0]: break
@@ -327,7 +317,7 @@ def generate_schedule(payload: ScheduleRequest):
                             
                             if header_idx != -1:
                                 headers = [str(x).strip().upper() for x in df_m.iloc[header_idx].values]
-                                block = df_m.iloc[header_idx+1 : header_idx+18].copy()
+                                block = df_m.iloc[header_idx+1 : header_idx+25].copy()
                                 block.columns = headers
                                 
                                 if 'TYPE' in block.columns:
@@ -348,8 +338,10 @@ def generate_schedule(payload: ScheduleRequest):
             gc.collect()
 
         # ==========================================
-        # 6. ALLOCATION SCHEDULER ENGINE (GRINDING)
+        # 5. 24-HOUR GRINDING SCHEDULER WITH RESET PENALTY
         # ==========================================
+        RESET_TIME_GRINDING = 1.0  # 1 hour to change types on a grinding machine
+        
         def allocate_grinding(m_type, demands_dict):
             allocated_result = []
             sorted_fams = sorted(demands_dict.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True)
@@ -358,7 +350,8 @@ def generate_schedule(payload: ScheduleRequest):
             for m_num, m_info in machines_data.get(m_type, {}).items():
                 rates = m_info.get('rates', {})
                 selected_rows = []
-                hours_left = m_info['avail_hours']
+                hours_left = m_info['avail_hours'] # Complete 24h budget
+                current_running_family = None
                 
                 for fam, _ in sorted_fams:
                     if hours_left <= 0 or len(selected_rows) >= 3: break
@@ -369,6 +362,17 @@ def generate_schedule(payload: ScheduleRequest):
                         part_key = f"{fam}_{p_code}"
                         if part_key in rates and rates[part_key] > 0:
                             rate = rates[part_key]
+                            
+                            # Factor changeover cost if switching families
+                            setup_cost = 0.0
+                            if current_running_family and current_running_family != fam:
+                                setup_cost = RESET_TIME_GRINDING
+                                
+                            if hours_left <= setup_cost:
+                                hours_left = 0.0
+                                break
+                                
+                            hours_left -= setup_cost
                             time_required = boxes_needed / rate
                             
                             if time_required <= hours_left:
@@ -380,6 +384,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 hours_used = hours_left
                                 hours_left = 0.0
                                 
+                            current_running_family = fam
                             selected_rows.append({
                                 "part": f"{fam} {p_code}",
                                 "std_box": str(round(rate, 1)),
@@ -398,36 +403,81 @@ def generate_schedule(payload: ScheduleRequest):
         final_od = allocate_grinding('OD', od_req)
 
         # ==========================================
-        # 7. HEAT TREATMENT FURNACE ROUTING
+        # 6. DYNAMIC HEAT TREATMENT FURNACE BALANCER
         # ==========================================
-        result_ht = {}
-        for fam, data in ht_req.items():
+        RESET_TIME_FURNACE = 2.0  # 2 hours stabilization when switching sizes in furnace
+        FURNACE_CAPACITY_KG_HR = 400.0  # Normalized fallback capacity per hour
+        
+        # Discover all unique furnaces configured across sheets
+        all_furnaces = set()
+        for f_list in furnace_map.values():
+            all_furnaces.update(f_list)
+        if not all_furnaces:
+            all_furnaces = {"AICHELIN.(896)", "FURNACE 2", "FURNACE 3", "CGC"}
+            
+        furnace_clocks = {f: {"avail_hours": 24.0, "current_fam": None, "rows": []} for f in all_furnaces}
+
+        for fam, data in sorted(ht_req.items(), key=lambda x: x[1]['rings']['IR'] + x[1]['rings']['OR'], reverse=True):
             rings_ir = data['rings']['IR']
             rings_or = data['rings']['OR']
             if rings_ir <= 0 and rings_or <= 0: continue
             
-            # Route using the mapped flexibility configuration matrix
-            fur = furnace_map.get(fam, "AICHELIN.(896)")
-            if fur not in result_ht: result_ht[fur] = []
+            # Locate mapped furnace priority variants or default
+            allowed_furnaces = furnace_map.get(fam, ["AICHELIN.(896)"])
             
-            total_rings = rings_ir + rings_or
-            w_ir = weight_matrix.get(f"{fam}_IR", 0.1)
-            w_or = weight_matrix.get(f"{fam}_OR", 0.1)
-            total_weight_kg = (rings_ir * w_ir) + (rings_or * w_or)
+            w_ir = weight_matrix.get(f"{fam}_IR", 0.15)
+            w_or = weight_matrix.get(f"{fam}_OR", 0.15)
             
-            result_ht[fur].append({
-                "part": fam,
-                "qty": str(int(total_rings)),
-                "cha": data['channel'],
-                "rate": str(round(total_weight_kg, 2)),
-                "alert": False
-            })
+            for p_code, qty in [('IR', rings_ir), ('OR', rings_or)]:
+                if qty <= 0: continue
+                unit_weight = w_or if p_code == 'OR' else w_ir
+                total_weight_kg = qty * unit_weight
+                
+                # Attempt to place across any of its flexible compatible furnace lines
+                allocated = False
+                for fur in allowed_furnaces:
+                    if fur not in furnace_clocks:
+                        furnace_clocks[fur] = {"avail_hours": 24.0, "current_fam": None, "rows": []}
+                        
+                    ctx = furnace_clocks[fur]
+                    if ctx["avail_hours"] <= 0: continue
+                    
+                    # Deduct resetting hours if changing type runs
+                    setup_penalty = 0.0
+                    if ctx["current_fam"] and ctx["current_fam"] != fam:
+                        setup_penalty = RESET_TIME_FURNACE
+                        
+                    if ctx["avail_hours"] <= setup_penalty: continue
+                    
+                    ctx["avail_hours"] -= setup_penalty
+                    kg_per_hr = FURNACE_CAPACITY_KG_HR
+                    time_needed = total_weight_kg / kg_per_hr
+                    
+                    if time_needed <= ctx["avail_hours"]:
+                        run_qty = qty
+                        ctx["avail_hours"] -= time_needed
+                    else:
+                        run_qty = math.floor(ctx["avail_hours"] * kg_per_hr / unit_weight)
+                        ctx["avail_hours"] = 0.0
+                        
+                    if run_qty > 0:
+                        ctx["current_fam"] = fam
+                        ctx["rows"].append({
+                            "part": f"{fam}-{p_code}",
+                            "qty": str(int(run_qty)),
+                            "cha": data['channel'],
+                            "rate": str(round(qty * unit_weight / 24.0, 2)), # output load tracking rate
+                            "alert": False
+                        })
+                        allocated = True
+                        break
+                if not allocated:
+                    debug_logs.append(f"[HT Warning] Cap full or no route for {fam}-{p_code}")
 
-        ht_formatted = [{"furnace": fur, "capacity": "500", "rows": items} for fur, items in result_ht.items()]
-
-        # Fallback to display requirements if everything checks out empty
-        if not final_face and not final_od and not ht_formatted:
-            debug_logs.append("No automated machine routing possible. Outputting global fallback visualization.")
+        ht_formatted = [
+            {"furnace": fur, "capacity": "400", "rows": f_data["rows"]}
+            for fur, f_data in furnace_clocks.items() if len(f_data["rows"]) > 0
+        ]
 
         return {
             "status": "success",
@@ -440,5 +490,8 @@ def generate_schedule(payload: ScheduleRequest):
         }
     except Exception as e:
         import traceback
-        debug_logs.append(f"CRITICAL BACKEND ERROR: {traceback.format_exc()}")
-        return {"status": "error", "debug_logs": debug_logs, "detail": str(e)}
+        return {
+            "status": "error", 
+            "debug_logs": debug_logs + [f"CRITICAL BACKEND ERROR: {traceback.format_exc()}"], 
+            "detail": str(e)
+        }

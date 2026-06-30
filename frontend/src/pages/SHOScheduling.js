@@ -3,21 +3,19 @@ import './SHOScheduling.css';
 
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
-  
-  // Buffer Entry States
   const [sector, setSector] = useState('DGBB');
-  const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Days');
+  
   const [tableData, setTableData] = useState({});
   const [unlockedBlocks, setUnlockedBlocks] = useState([]); 
   const [isSaving, setIsSaving] = useState(false);
   
-  // Schedule View States
   const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().split('T')[0]);
   const [scheduleData, setScheduleData] = useState(null);
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
 
-  // -- YOUR EXACT ORIGINAL CONSTANTS --
+  // -- CONSTANTS --
   const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
     TRB: ['T 1', 'T 2', 'T 3', 'T 4', 'T 5', 'T 6', 'T 7', 'T 8', 'T 9', 'T10'],
@@ -66,21 +64,15 @@ const SHOScheduling = () => {
     }
   }, [sector, bufferDate]);
 
-  const handleInputChange = (rowKey, col, subCol, value) => {
-    setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
-  };
-
+  const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
   const unlockBlock = (section, col, subCol) => {
     const blockKey = `${sector}_${section}_${col}_${subCol}`;
-    if (!unlockedBlocks.includes(blockKey)) {
-      setUnlockedBlocks([...unlockedBlocks, blockKey]);
-    }
+    if (!unlockedBlocks.includes(blockKey)) setUnlockedBlocks([...unlockedBlocks, blockKey]);
   };
 
   const saveBufferData = () => {
     setIsSaving(true);
-    const payload = { entries: tableData, unlocked: unlockedBlocks };
-    localStorage.setItem(`sho_db_${sector}_${bufferDate}`, JSON.stringify(payload));
+    localStorage.setItem(`sho_db_${sector}_${bufferDate}`, JSON.stringify({ entries: tableData, unlocked: unlockedBlocks }));
     setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
   };
 
@@ -88,30 +80,21 @@ const SHOScheduling = () => {
     setIsLoadingPlan(true);
     const API = 'https://scm-backend-pshv.onrender.com';
     try {
-      // NOTE: We pass 'scheduleDate' here so it calculates for the exact day requested
       const response = await fetch(`${API}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: unlockedBlocks })
       });
       const result = await response.json();
-      if (response.ok) { 
-        setScheduleData(result.data); 
-      } else { 
-        alert("Error: " + (result.detail || result.message)); 
-      }
-    } catch (e) {
-      alert("Failed to connect to backend. Note: Fetching 3 Excel files over the internet takes time.");
-    } finally {
-      setIsLoadingPlan(false);
-    }
+      if (response.ok) setScheduleData(result.data); 
+      else alert("Error: " + (result.detail || result.message)); 
+    } catch (e) { alert("Failed to connect to backend. Ensure server is active."); } 
+    finally { setIsLoadingPlan(false); }
   };
 
   const columns = SECTOR_COLUMNS[sector];
   const totalCols = (columns.length * 2) + 1;
-  const isCellBlocked = (section, col, subCol) => {
-    return DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol) && !unlockedBlocks.includes(`${sector}_${section}_${col}_${subCol}`);
-  };
+  const isCellBlocked = (section, col, subCol) => DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol) && !unlockedBlocks.includes(`${sector}_${section}_${col}_${subCol}`);
 
   return (
     <div className="sho-container">
@@ -127,11 +110,7 @@ const SHOScheduling = () => {
           <div className="controls-panel">
             <div className="control-group">
               <label>Sector:</label>
-              <select value={sector} onChange={(e) => setSector(e.target.value)}>
-                <option value="DGBB">DGBB</option>
-                <option value="TRB">TRB</option>
-                <option value="HUB">HUB</option>
-              </select>
+              <select value={sector} onChange={(e) => setSector(e.target.value)}><option value="DGBB">DGBB</option><option value="TRB">TRB</option><option value="HUB">HUB</option></select>
             </div>
             <div className="control-group">
               <label>Date:</label>
@@ -139,15 +118,9 @@ const SHOScheduling = () => {
             </div>
             <div className="control-group">
               <label>Entry Unit:</label>
-              <select value={unitMode} onChange={(e) => setUnitMode(e.target.value)}>
-                <option value="Days">Buffer Days</option>
-                <option value="Boxes">Boxes</option>
-                <option value="Rings">No. of Rings</option>
-              </select>
+              <select value={unitMode} onChange={(e) => setUnitMode(e.target.value)}><option value="Days">Buffer Days</option><option value="Boxes">Boxes</option><option value="Rings">No. of Rings</option></select>
             </div>
-            <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>
-              {isSaving ? "Saving..." : "Save Buffer Data"}
-            </button>
+            <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>{isSaving ? "Saving..." : "Save Buffer Data"}</button>
           </div>
 
           <div className="table-scroll-container">
@@ -182,16 +155,10 @@ const SHOScheduling = () => {
 
                       return (
                         <React.Fragment key={`${row.key}-${col}`}>
-                          {irBlocked ? (
-                            row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block" onDoubleClick={() => unlockBlock(row.section, col, 'IR')}></td> : null
-                          ) : (
-                            <td className="input-cell"><input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/></td>
-                          )}
-                          {orBlocked ? (
-                            row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block border-thick-right" onDoubleClick={() => unlockBlock(row.section, col, 'OR')}></td> : null
-                          ) : (
-                            <td className="input-cell border-thick-right"><input type="text" value={tableData[`${row.key}_${col}_OR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}/></td>
-                          )}
+                          {irBlocked ? (row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block" onDoubleClick={() => unlockBlock(row.section, col, 'IR')}></td> : null) 
+                          : (<td className="input-cell"><input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/></td>)}
+                          {orBlocked ? (row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block border-thick-right" onDoubleClick={() => unlockBlock(row.section, col, 'OR')}></td> : null) 
+                          : (<td className="input-cell border-thick-right"><input type="text" value={tableData[`${row.key}_${col}_OR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}/></td>)}
                         </React.Fragment>
                       );
                     }) : columns.map(col => (
@@ -208,10 +175,9 @@ const SHOScheduling = () => {
         </>
       )}
 
-      {/* VIEW 2: SCHEDULE VIEW (Image Layout) */}
+      {/* VIEW 2: SCHEDULE VIEW (Exact Image Match Layout) */}
       {activeTab === 'schedule' && (
         <>
-          {/* DEDICATED CONTROLS JUST FOR SCHEDULE */}
           <div className="controls-panel" style={{ backgroundColor: '#eef8ff' }}>
             <div className="control-group">
               <label>Select Date to Schedule:</label>
@@ -224,7 +190,6 @@ const SHOScheduling = () => {
           
           {scheduleData && (
             <div className="image-layout-container">
-              
               <div className="schedule-master-header">
                 <div className="header-title">Face & OD Grinding Schedule</div>
                 <div className="header-date">Date :- {scheduleDate.split('-').reverse().join('/')}</div>
@@ -245,7 +210,6 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
-                      {scheduleData.face_grinding.length === 0 && <tr><td colSpan="4" className="center-text">No parts scheduled.</td></tr>}
                       {scheduleData.face_grinding.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
@@ -276,14 +240,13 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
-                      {scheduleData.od_grinding.length === 0 && <tr><td colSpan="4" className="center-text">No parts scheduled.</td></tr>}
                       {scheduleData.od_grinding.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
                           {m.rows.map((r, i) => (
                             <tr key={i}>
                               <td className={`part-name ${r.alert ? 'text-red' : ''}`}>
-                                {r.p_label && <strong>{r.p_label}</strong>} {r.part}
+                                {r.p_label && <span className="p-badge">{r.p_label}</span>} {r.part}
                               </td>
                               <td className="center-text">{r.std_box}</td>
                               <td className="center-text">{r.p_2nd}</td>
@@ -296,7 +259,7 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                {/* 3. HEAT TREATMENT */}
+                {/* 3. HEAT TREATMENT (Split 2 Columns) */}
                 <div className="schedule-column ht-column">
                   <table className="img-table">
                     <thead>
@@ -333,7 +296,7 @@ const SHOScheduling = () => {
                         <td colSpan="4" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
-                              {scheduleData.heat_treatment.slice(Math.ceil(scheduleData.heat_treatment.length/2)).map((f, idx) => (
+                              {scheduleData.heat_treatment.slice(Math.max(1, Math.ceil(scheduleData.heat_treatment.length/2))).map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
                                     <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>

@@ -56,7 +56,6 @@ def safe_float(val):
     except Exception:
         return 0.0
 
-# --- BULLETPROOF EXCEL DOWNLOADER ---
 def load_excel_fast(url, file_label="Unknown"):
     logs = []
     if not url or url.strip() == "":
@@ -98,7 +97,7 @@ def generate_schedule(payload: ScheduleRequest):
         req_d, nxt_d = str(req_date.day), str(next_date.day)
         
         # 1. READ ZEROSET
-        channel_demands = {} # Store raw ring demand
+        channel_demands = {} 
         xls_zero, logs1 = load_excel_fast(ZEROSET_URL, "ZEROSET")
         debug_logs.extend(logs1)
         
@@ -131,7 +130,6 @@ def generate_schedule(payload: ScheduleRequest):
                         r2 = safe_float(df_zero.iloc[idx, c2]) * 1000 if c2 is not None else 0
                         if r1 > 0 or r2 > 0:
                             if fam not in channel_demands: channel_demands[fam] = {'IR': 0, 'OR': 0, 'channel': sheet_name}
-                            # Assuming single demand applies to both IR/OR required to make a set
                             channel_demands[fam]['IR'] += ((r1 + r2) / 2)
                             channel_demands[fam]['OR'] += ((r1 + r2) / 2)
 
@@ -146,31 +144,36 @@ def generate_schedule(payload: ScheduleRequest):
 
         # 3. PARSE UI BUFFER ENTRIES BY STAGE
         buffers_by_fam = {}
-        
-        # Mappings matching React UI exactly
-        UI_PAIRS = {
-            'type_1': ('ch_buffer_1', 'CH'), 'next_type_1': ('ch_buffer_2', 'CH'),
-            'type_2': ('od_buffer_1', 'OD'), 'next_type_2': ('od_buffer_2', 'OD'),
-            'type_3': ('face_buffer_1', 'FACE'), 'type_4': ('face_buffer_2', 'FACE'),
-            'type_5': ('ht_buffer_1', 'HT'), 'type_6': ('ht_buffer_2', 'HT')
+        BUFFER_MAP = {
+            'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
+            'od_buffer_1': ('type_2', 'OD'), 'od_buffer_2': ('next_type_2', 'OD'),
+            'face_buffer_1': ('type_3', 'FACE'), 'face_buffer_2': ('type_4', 'FACE'),
+            'ht_buffer_1': ('type_5', 'HT'), 'ht_buffer_2': ('type_6', 'HT')
         }
 
+        # Loop over ALL payload entries looking for buffer inputs
         for key, val in payload.entries.items():
-            for type_key, (buf_key, stage) in UI_PAIRS.items():
-                if key.startswith(type_key + '_'):
-                    suffix = key[len(type_key + '_'):] # e.g., 'CH01_IR'
-                    fam = parse_family(val)
-                    if not fam: continue
+            for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
+                if key.startswith(buf_prefix + '_'):
+                    suffix = key[len(buf_prefix + '_'):] # e.g., 'CH01_IR'
+                    buf_val = safe_float(val)
+                    if buf_val <= 0: continue
                     
-                    buf_val = safe_float(payload.entries.get(f"{buf_key}_{suffix}", 0))
+                    # Fetch the corresponding TYPE input from UI
+                    type_val = payload.entries.get(f"{type_prefix}_{suffix}", "")
+                    fam = parse_family(type_val)
                     
+                    if not fam or fam == "UNKNOWN":
+                        debug_logs.append(f"⚠️ Buffer of {buf_val} entered at {stage} ({suffix}) IGNORED: 'TYPE' row is empty in UI!")
+                        continue
+                        
                     if fam not in buffers_by_fam:
                         buffers_by_fam[fam] = {'CH': {'IR':0, 'OR':0}, 'OD': {'IR':0, 'OR':0}, 'FACE': {'IR':0, 'OR':0}, 'HT': {'IR':0, 'OR':0}}
                     
                     sub_col = 'OR' if suffix.endswith('_OR') else 'IR'
                     buffers_by_fam[fam][stage][sub_col] += buf_val
 
-        debug_logs.append(f"Parsed buffers for {len(buffers_by_fam)} families from UI payload.")
+        debug_logs.append(f"Successfully linked buffers to {len(buffers_by_fam)} families.")
 
         # 4. CALCULATE NET DEMAND PER STAGE (THE PIPELINE)
         od_req, face_req, ht_req = {}, {}, {}
@@ -179,11 +182,9 @@ def generate_schedule(payload: ScheduleRequest):
             rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
             rpb_or = box_matrix.get(fam, {}).get('OR', 100)
             
-            # 1. Total Daily Demand in Boxes
             req_boxes_ir = demands['IR'] / rpb_ir if rpb_ir else 0
             req_boxes_or = demands['OR'] / rpb_or if rpb_or else 0
             
-            # 2. Extract Stage Buffers and convert to boxes based on unit
             def get_buf_boxes(stage, p_code, req_boxes, rpb):
                 raw_buf = buffers_by_fam.get(fam, {}).get(stage, {}).get(p_code, 0)
                 if payload.unit_mode == 'Days': return raw_buf * req_boxes
@@ -199,16 +200,13 @@ def generate_schedule(payload: ScheduleRequest):
             face_buf_ir = get_buf_boxes('FACE', 'IR', req_boxes_ir, rpb_ir)
             face_buf_or = get_buf_boxes('FACE', 'OR', req_boxes_or, rpb_or)
 
-            # 3. Apply Deductions (Backwards through the line)
-            # OD Scheduling: Needs to cover missing Assembly (CH) Buffer
+            # Stage Deductions (Backwards through the line)
             net_od_ir = max(0, req_boxes_ir - ch_buf_ir)
             net_od_or = max(0, req_boxes_or - ch_buf_or)
             
-            # Face Scheduling: Needs to cover missing Assembly AND missing OD Buffer
             net_face_ir = max(0, net_od_ir - od_buf_ir)
             net_face_or = max(0, net_od_or - od_buf_or)
             
-            # HT Scheduling: Needs to cover missing Assembly, missing OD, AND missing Face Buffer
             net_ht_ir = max(0, net_face_ir - face_buf_ir)
             net_ht_or = max(0, net_face_or - face_buf_or)
 
@@ -216,7 +214,7 @@ def generate_schedule(payload: ScheduleRequest):
             if net_face_ir > 0 or net_face_or > 0: face_req[fam] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': demands['channel']}
             if net_ht_ir > 0 or net_ht_or > 0: ht_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'channel': demands['channel']}
 
-        debug_logs.append(f"Net requirements mapped: OD ({len(od_req)}), FACE ({len(face_req)}), HT ({len(ht_req)})")
+        debug_logs.append(f"Net Pipeline Demand -> OD: {len(od_req)} parts | FACE: {len(face_req)} parts | HT: {len(ht_req)} parts")
 
         # 5. READ MACHINES & FURNACES
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
@@ -251,31 +249,32 @@ def generate_schedule(payload: ScheduleRequest):
                             
                             if m_type in ['FACE', 'OD']:
                                 if m_num not in machines_data[m_type]:
-                                    # 16 available hours assuming two 8-hr shifts
                                     machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 16.0}
                                 
-                                headers = df_m.iloc[r+1]
+                                # FIX: Make column parsing case-insensitive by stripping and forcing uppercase
+                                headers = [str(col_val).strip().upper() for col_val in df_m.iloc[r+1].values]
                                 block = df_m.iloc[r+2:r+20].copy()
                                 block.columns = headers
+                                
                                 if 'TYPE' in block.columns and 'PART' in block.columns:
                                     for _, row in block.dropna(subset=['TYPE']).iterrows():
                                         fam = parse_family(row['TYPE'])
                                         if not fam: continue
                                         p_code = 'OR' if '100' in str(row['PART']) else 'IR'
                                         
-                                        boxes_hr = safe_float(row.get('Boxes/hr', 0))
+                                        boxes_hr = safe_float(row.get('BOXES/HR', 0))
                                         if boxes_hr == 0 and pd.notna(row.get('STD/HR')):
-                                            rpb = safe_float(row.get('Rings/Box', 100)) or 100
+                                            rpb = safe_float(row.get('RINGS/BOX', 100)) or 100
                                             boxes_hr = safe_float(row.get('STD/HR')) / rpb
                                         
                                         machines_data[m_type][m_num]['rates'][f"{fam}_{p_code}"] = boxes_hr
+                                        
+        debug_logs.append(f"Successfully mapped capacity for {len(machines_data['FACE'])} Face & {len(machines_data['OD'])} OD Grinding Machines.")
 
         # 6. ALLOCATE WITH SETUP TIME PENALTY
         def allocate(m_type, demands):
             result = []
             assigned_parts = set()
-            
-            # Sort demands by highest total volume required
             sorted_demands = sorted(demands.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True)
             
             for m_num, m_info in machines_data[m_type].items():
@@ -291,9 +290,8 @@ def generate_schedule(payload: ScheduleRequest):
                         part_key = f"{fam}_{p_code}"
                         
                         if boxes_needed > 0 and part_key in rates and rates[part_key] > 0 and part_key not in assigned_parts:
-                            # 1 hour Setup/Changeover time deducted
                             if hours_left < 1: continue 
-                            hours_left -= 1.0 
+                            hours_left -= 1.0 # 1 Hour setup time
                             
                             process_time = boxes_needed / rates[part_key]
                             if process_time <= hours_left:
@@ -333,10 +331,7 @@ def generate_schedule(payload: ScheduleRequest):
             rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
             rpb_or = box_matrix.get(fam, {}).get('OR', 100)
             
-            # Revert boxes back to rings for HT qty display
             total_rings = (reqs['IR'] * rpb_ir) + (reqs['OR'] * rpb_or)
-            
-            # Compute KG/Hr Rate
             w_ir = weight_matrix.get(f"{fam}_IR", 0.1)
             w_or = weight_matrix.get(f"{fam}_OR", 0.1)
             total_weight = (reqs['IR'] * rpb_ir * w_ir) + (reqs['OR'] * rpb_or * w_or)

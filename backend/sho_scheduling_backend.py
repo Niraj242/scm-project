@@ -5,6 +5,7 @@ import pandas as pd
 import requests
 import io
 import time
+import gc  # Added for memory management
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -25,7 +26,11 @@ class ScheduleRequest(BaseModel):
     entries: Dict[str, Any]
     unlocked_blocks: List[str]
 
-# --- CLEANED FAMILY PARSER ---
+# --- HEALTH CHECK (To test if your server deployed correctly) ---
+@router.get("/api/health")
+def health_check():
+    return {"status": "Backend is ALIVE and successfully deployed."}
+
 def parse_family(prod_text):
     text = str(prod_text).strip().upper()
     if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN"
@@ -64,7 +69,7 @@ def load_excel_fast(url, file_label="Unknown"):
     for attempt in range(max_retries):
         try:
             logs.append(f"[{file_label}] Attempt {attempt + 1}: Fetching URL...")
-            resp = requests.get(url, timeout=60, stream=True)
+            resp = requests.get(url, timeout=(10, 60), stream=True)
             if resp.status_code != 200:
                 time.sleep(2)
                 continue
@@ -95,7 +100,9 @@ def generate_schedule(payload: ScheduleRequest):
         next_date = req_date + timedelta(days=1)
         req_d, nxt_d = str(req_date.day), str(next_date.day)
         
+        # ==========================================
         # 1. READ ZEROSET (Pipeline Demand)
+        # ==========================================
         channel_demands = {} 
         xls_zero, logs1 = load_excel_fast(ZEROSET_URL, "ZEROSET")
         debug_logs.extend(logs1)
@@ -131,8 +138,14 @@ def generate_schedule(payload: ScheduleRequest):
                             if fam not in channel_demands: channel_demands[fam] = {'IR': 0, 'OR': 0, 'channel': sheet_name}
                             channel_demands[fam]['IR'] += ((r1 + r2) / 2)
                             channel_demands[fam]['OR'] += ((r1 + r2) / 2)
+            
+            # FREE MEMORY to prevent server crash
+            del xls_zero
+            gc.collect()
 
+        # ==========================================
         # 2. READ BOXES MATRIX
+        # ==========================================
         box_matrix = {}
         xls_box, logs2 = load_excel_fast(BOX_RING_DATA_URL, "BOX_RING_DATA")
         if xls_box and 'RING PER BOX.' in xls_box.sheet_names:
@@ -140,8 +153,14 @@ def generate_schedule(payload: ScheduleRequest):
             for _, r in df_box.iterrows():
                 fam = parse_family(r.iloc[0])
                 if fam and fam != "UNKNOWN": box_matrix[fam] = {'OR': safe_float(r.get('O/R', 100)), 'IR': safe_float(r.get('I/R', 100))}
+            
+            # FREE MEMORY
+            del xls_box
+            gc.collect()
 
-        # 3. PARSE UI BUFFER ENTRIES (FIXED TO MATCH UI KEYS EXACTLY)
+        # ==========================================
+        # 3. PARSE UI BUFFER ENTRIES 
+        # ==========================================
         buffers_by_fam = {}
         BUFFER_MAP = {
             'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
@@ -152,13 +171,11 @@ def generate_schedule(payload: ScheduleRequest):
 
         for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
             for key, val in payload.entries.items():
-                # Locate type fields: e.g., 'type_1_CH01_IR'
                 if key.startswith(type_prefix + '_'):
-                    suffix = key[len(type_prefix + '_'):] # Extract 'CH01_IR'
+                    suffix = key[len(type_prefix + '_'):]
                     fam = parse_family(val)
                     if not fam or fam == "UNKNOWN": continue
                     
-                    # Look up the matching buffer value
                     buf_key = f"{buf_prefix}_{suffix}"
                     buf_val = safe_float(payload.entries.get(buf_key, 0))
                     
@@ -172,7 +189,9 @@ def generate_schedule(payload: ScheduleRequest):
 
         debug_logs.append(f"Successfully linked buffers to {len(buffers_by_fam)} families.")
 
-        # 4. CALCULATE NET DEMAND PER STAGE (THE PIPELINE)
+        # ==========================================
+        # 4. CALCULATE NET DEMAND & APPLY UNITS
+        # ==========================================
         od_req, face_req, ht_req = {}, {}, {}
 
         for fam, demands in channel_demands.items():
@@ -182,11 +201,12 @@ def generate_schedule(payload: ScheduleRequest):
             req_boxes_ir = demands['IR'] / rpb_ir if rpb_ir else 0
             req_boxes_or = demands['OR'] / rpb_or if rpb_or else 0
             
+            # THE UNIT CONVERSION HAPPENS EXACTLY HERE:
             def get_buf_boxes(stage, p_code, req_boxes, rpb):
                 raw_buf = buffers_by_fam.get(fam, {}).get(stage, {}).get(p_code, 0)
                 if payload.unit_mode == 'Days': return raw_buf * req_boxes
                 elif payload.unit_mode == 'Rings': return raw_buf / rpb if rpb else 0
-                else: return raw_buf # Boxes
+                else: return raw_buf # Box mode
                 
             ch_buf_ir = get_buf_boxes('CH', 'IR', req_boxes_ir, rpb_ir)
             ch_buf_or = get_buf_boxes('CH', 'OR', req_boxes_or, rpb_or)
@@ -197,7 +217,7 @@ def generate_schedule(payload: ScheduleRequest):
             face_buf_ir = get_buf_boxes('FACE', 'IR', req_boxes_ir, rpb_ir)
             face_buf_or = get_buf_boxes('FACE', 'OR', req_boxes_or, rpb_or)
 
-            # Stage Deductions (Backwards through the line)
+            # Deductions
             net_od_ir = max(0, req_boxes_ir - ch_buf_ir)
             net_od_or = max(0, req_boxes_or - ch_buf_or)
             
@@ -211,9 +231,11 @@ def generate_schedule(payload: ScheduleRequest):
             if net_face_ir > 0 or net_face_or > 0: face_req[fam] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': demands['channel']}
             if net_ht_ir > 0 or net_ht_or > 0: ht_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'channel': demands['channel']}
 
-        debug_logs.append(f"Net Pipeline Demand -> OD: {len(od_req)} parts | FACE: {len(face_req)} parts | HT: {len(ht_req)} parts")
+        debug_logs.append(f"Net Pipeline Demand -> OD: {len(od_req)} | FACE: {len(face_req)} | HT: {len(ht_req)}")
 
+        # ==========================================
         # 5. READ MACHINES & FURNACES
+        # ==========================================
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
         xls_prod, logs3 = load_excel_fast(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
@@ -264,10 +286,14 @@ def generate_schedule(payload: ScheduleRequest):
                                             boxes_hr = safe_float(row.get('STD/HR')) / rpb
                                         
                                         machines_data[m_type][m_num]['rates'][f"{fam}_{p_code}"] = boxes_hr
-                                        
-        debug_logs.append(f"Successfully mapped capacity for {len(machines_data['FACE'])} Face & {len(machines_data['OD'])} OD Grinding Machines.")
+            
+            # FREE MEMORY
+            del xls_prod
+            gc.collect()
 
+        # ==========================================
         # 6. ALLOCATE WITH DYNAMIC SETUP PENALTY
+        # ==========================================
         def allocate(m_type, demands):
             result = []
             assigned_parts = set()
@@ -286,7 +312,6 @@ def generate_schedule(payload: ScheduleRequest):
                         part_key = f"{fam}_{p_code}"
                         
                         if boxes_needed > 0 and part_key in rates and rates[part_key] > 0 and part_key not in assigned_parts:
-                            # Reduced setup penalty so it doesn't block out smaller batches
                             setup_time = 0.5 
                             if hours_left < setup_time: continue 
                             hours_left -= setup_time
@@ -319,7 +344,9 @@ def generate_schedule(payload: ScheduleRequest):
         final_face = allocate('FACE', face_req)
         final_od = allocate('OD', od_req)
 
+        # ==========================================
         # 7. HEAT TREATMENT ALLOCATION
+        # ==========================================
         result_ht = {}
         for fam, reqs in ht_req.items():
             if reqs['IR'] <= 0 and reqs['OR'] <= 0: continue

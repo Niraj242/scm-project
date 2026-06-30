@@ -78,6 +78,7 @@ const SHOScheduling = () => {
     setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
   };
 
+
   const fetchSchedule = async () => {
     setIsLoadingPlan(true);
     const API = 'https://scm-backend-pshv.onrender.com';
@@ -88,11 +89,22 @@ const SHOScheduling = () => {
         body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: unlockedBlocks })
       });
       const result = await response.json();
-      if (response.ok) setScheduleData(result.data); 
-      else alert("Error: " + (result.detail || result.message)); 
-    } catch (e) { alert("Failed to connect to backend. Ensure server is active."); } 
+      
+      // THIS WILL PRINT THE EXACT PYTHON PROCESS TO YOUR BROWSER
+      console.log("=== BACKEND DIAGNOSTICS ===");
+      if (result.debug_logs) {
+          result.debug_logs.forEach(log => console.log(log));
+      }
+
+      if (response.ok && result.status === 'success') { 
+        setScheduleData(result.data); 
+      } else { 
+        alert("Error: " + (result.detail || result.message)); 
+      }
+    } catch (e) { alert("Failed to connect to backend."); } 
     finally { setIsLoadingPlan(false); }
   };
+
 
   const columns = SECTOR_COLUMNS[sector];
   const totalCols = (columns.length * 2) + 1;

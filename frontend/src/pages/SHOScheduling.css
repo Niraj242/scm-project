@@ -253,3 +253,111 @@
   border-radius: 3px;
   margin-right: 4px;
 }
+/* ADD TO THE BOTTOM OF EXISTING CSS */
+
+.tab-buttons {
+  display: flex;
+  margin-bottom: 10px;
+  gap: 5px;
+}
+.tab-buttons button {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: bold;
+  border: 1px solid #aaa;
+  border-bottom: none;
+  background-color: #e9ecef;
+  cursor: pointer;
+}
+.tab-buttons button.active {
+  background-color: white;
+  border-top: 3px solid #0056b3;
+  color: #004085;
+}
+
+/* SCHEDULE IMAGE LAYOUT */
+.image-layout-container {
+  background-color: white;
+  border: 2px solid #000;
+  overflow-x: auto;
+  font-family: 'Arial', sans-serif;
+  margin-top: 10px;
+}
+
+.schedule-master-header {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 20px;
+  background-color: #eef8ff;
+  border-bottom: 3px solid #0056b3;
+  color: #004085;
+  font-weight: bold;
+  font-size: 20px;
+}
+
+.schedule-grid-wrapper {
+  display: flex;
+  min-width: 1300px;
+}
+
+.schedule-column {
+  flex: 1;
+  border-right: 2px solid #0056b3;
+}
+.schedule-column:last-child {
+  border-right: none;
+  flex: 1.6; /* HT requires more space */
+}
+
+.img-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.img-table th, .img-table td {
+  border: 1px solid #999;
+  padding: 4px;
+}
+
+.col-main-title {
+  color: #004085;
+  font-size: 16px;
+  text-align: center;
+  background-color: #eef8ff;
+  padding: 8px;
+}
+.ht-title { text-align: left; padding-left: 20px; }
+
+.sub-header th {
+  color: #004085;
+  font-weight: bold;
+  text-align: center;
+  background-color: #eef8ff;
+}
+
+.machine-name-row td {
+  background-color: #d1ecf1;
+  color: #004085;
+  font-weight: bold;
+  text-align: left;
+  padding-left: 10px;
+  font-size: 13px;
+}
+
+.part-name { text-align: left; padding-left: 10px; font-weight: bold; }
+.center-text { text-align: center; font-weight: bold; }
+.text-red { color: red; }
+.empty-corner { border-top: none; border-left: none; background: white !important;}
+
+.inner-ht-table { width: 100%; border-collapse: collapse; }
+.inner-ht-table td { border: 1px solid #999; padding: 4px; }
+.inner-ht-table .machine-name-row td { text-align: center; padding-left: 0; }
+.nested-td { padding: 0; vertical-align: top; }
+
+.p-badge {
+  background-color: yellow;
+  border: 1px solid #000;
+  padding: 0 4px;
+  margin-right: 5px;
+  font-size: 10px;
+}

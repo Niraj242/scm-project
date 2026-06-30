@@ -17,6 +17,8 @@ ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
+FAM_REGEX = re.compile(r'(\d{3,5})')
+
 class ScheduleRequest(BaseModel):
     sector: str
     date: str
@@ -30,15 +32,24 @@ def health_check():
 
 def parse_family(prod_text):
     text = str(prod_text).strip().upper()
-    if not text or text in ["NAN", "NONE", ""]: 
-        return "UNKNOWN"
+    if "INDUSTRILA" in text: text = text.replace("INDUSTRILA", "INDUSTRIAL")
+    if "AUTOMOTIVE" in text: return None
+    if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN"
     
-    # Simple extraction: Just grab the 3 to 5 digit bearing number
-    match = re.search(r'(\d{3,5})', text)
-    if match:
-        return match.group(1)
+    t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
+    words = t_norm.split()
+    
+    match = FAM_REGEX.search(text)
+    base = match.group(1) if match else text.split()[0].split('-')[0]
+    
+    if "BT" in words or text.startswith("BT") or "-BT" in text or " BT" in text: base = f"BT-{base}"
+    elif "BB" in words or text.startswith("BB") or "-BB" in text or " BB" in text: base = f"BB-{base}"
+    
+    if "UC" in text:
+        match_uc = re.search(r'(UC\s*\d+)', text)
+        if match_uc: base = match_uc.group(1).replace(" ", "")
         
-    return text.split()[0].split('-')[0]
+    return base
 
 def safe_float(val):
     if pd.isna(val) or val is None: return 0.0
@@ -111,8 +122,7 @@ def generate_schedule(payload: ScheduleRequest):
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None:
-                    if c1 is not None or c2 is not None:
-                        debug_logs.append(f"[ZEROSET] MATCHED DAY {req_d} (Col {c1}) & DAY {nxt_d} (Col {c2}) in sheet '{sheet_name}'.")
+                    debug_logs.append(f"[ZEROSET] MATCHED DAY {req_d} (Col {c1}) & DAY {nxt_d} (Col {c2}) in sheet '{sheet_name}'.")
                     for idx in range(r_idx + 1, len(df_zero)):
                         raw_type = df_zero.iloc[idx, type_col_idx]
                         fam = parse_family(raw_type)
@@ -166,21 +176,21 @@ def generate_schedule(payload: ScheduleRequest):
 
         debug_logs.append(f"Successfully linked buffers to {len(buffers_by_fam)} families.")
 
-        # 4. CALCULATE NET DEMAND PER STAGE 
+        # 4. CALCULATE NET DEMAND PER STAGE WITH UNIT CONVERSION
         od_req, face_req, ht_req = {}, {}, {}
 
         for fam, demands in channel_demands.items():
-            rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
-            rpb_or = box_matrix.get(fam, {}).get('OR', 100)
+            rpb_ir = box_matrix.get(fam, {}).get('IR', 100) or 100
+            rpb_or = box_matrix.get(fam, {}).get('OR', 100) or 100
             
-            req_boxes_ir = demands['IR'] / rpb_ir if rpb_ir else 0
-            req_boxes_or = demands['OR'] / rpb_or if rpb_or else 0
+            req_boxes_ir = demands['IR'] / rpb_ir
+            req_boxes_or = demands['OR'] / rpb_or
             
             def get_buf_boxes(stage, p_code, req_boxes, rpb):
                 raw_buf = buffers_by_fam.get(fam, {}).get(stage, {}).get(p_code, 0)
                 if payload.unit_mode == 'Days': return raw_buf * req_boxes
                 elif payload.unit_mode == 'Rings': return raw_buf / rpb if rpb else 0
-                else: return raw_buf 
+                else: return raw_buf  # Boxes mode
                 
             ch_buf_ir = get_buf_boxes('CH', 'IR', req_boxes_ir, rpb_ir)
             ch_buf_or = get_buf_boxes('CH', 'OR', req_boxes_or, rpb_or)
@@ -260,7 +270,7 @@ def generate_schedule(payload: ScheduleRequest):
             del xls_prod
             gc.collect()
 
-        # 6. ALLOCATE TO MACHINES
+        # 6. ALLOCATE TO MACHINES WITH PROPER LABELS
         def allocate(m_type, demands):
             result = []
             assigned_parts = set()
@@ -318,8 +328,8 @@ def generate_schedule(payload: ScheduleRequest):
             fur = furnace_map.get(fam, "AICHELIN.(896)")
             if fur not in result_ht: result_ht[fur] = []
             
-            rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
-            rpb_or = box_matrix.get(fam, {}).get('OR', 100)
+            rpb_ir = box_matrix.get(fam, {}).get('IR', 100) or 100
+            rpb_or = box_matrix.get(fam, {}).get('OR', 100) or 100
             
             total_rings = (reqs['IR'] * rpb_ir) + (reqs['OR'] * rpb_or)
             w_ir = weight_matrix.get(f"{fam}_IR", 0.1)

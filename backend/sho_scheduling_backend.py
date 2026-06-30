@@ -5,6 +5,7 @@ import pandas as pd
 import numpy as np
 import requests
 import io
+import time
 from datetime import datetime, timedelta
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -55,32 +56,55 @@ def safe_float(val):
         if s_val in ['nan', 'none', '', 'null']:
             return 0.0
         f_val = float(s_val)
-        # Final safety net for math.nan
         return 0.0 if math.isnan(f_val) else f_val
     except Exception:
         return 0.0
 
+# --- BULLETPROOF EXCEL DOWNLOADER ---
 def load_excel_fast(url, file_label="Unknown"):
     logs = []
     if not url or url.strip() == "":
         logs.append(f"[{file_label}] FAILED: URL is empty.")
         return None, logs
-    try:
-        logs.append(f"[{file_label}] Attempting to fetch URL...")
-        resp = requests.get(url, timeout=30)
-        if resp.status_code != 200:
-            return None, logs
-        content = io.BytesIO(resp.content)
-        try: 
-            xls = pd.ExcelFile(content, engine='calamine')
-            logs.append(f"[{file_label}] SUCCESS (calamine).")
-            return xls, logs
-        except Exception: 
-            xls = pd.ExcelFile(content)
-            return xls, logs
-    except Exception as e:
-        logs.append(f"[{file_label}] FAILED: {str(e)}")
-        return None, logs
+        
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            logs.append(f"[{file_label}] Attempt {attempt + 1}: Fetching URL...")
+            # Use stream=True and longer timeout to prevent premature connection closures
+            resp = requests.get(url, timeout=60, stream=True)
+            
+            if resp.status_code != 200:
+                logs.append(f"[{file_label}] FAILED HTTP {resp.status_code}")
+                time.sleep(2)
+                continue
+                
+            # Safely download in chunks
+            content = io.BytesIO()
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    content.write(chunk)
+            
+            content.seek(0)
+            logs.append(f"[{file_label}] Downloaded {content.getbuffer().nbytes} bytes.")
+            
+            try: 
+                xls = pd.ExcelFile(content, engine='calamine')
+                logs.append(f"[{file_label}] SUCCESS (calamine).")
+                return xls, logs
+            except Exception: 
+                xls = pd.ExcelFile(content)
+                logs.append(f"[{file_label}] SUCCESS (openpyxl).")
+                return xls, logs
+                
+        except Exception as e:
+            logs.append(f"[{file_label}] ERROR: {str(e)}")
+            if attempt == max_retries - 1:
+                logs.append(f"[{file_label}] GIVEN UP after {max_retries} attempts.")
+                return None, logs
+            time.sleep(2)
+            
+    return None, logs
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -124,9 +148,6 @@ def generate_schedule(payload: ScheduleRequest):
                 if r_idx is not None and type_col_idx is not None:
                     if c1 is not None or c2 is not None:
                         debug_logs.append(f"[ZEROSET] MATCHED DAY {req_d} (Col {c1}) & DAY {nxt_d} (Col {c2}) in sheet '{sheet_name}'.")
-                    else:
-                        debug_logs.append(f"[ZEROSET] Found row but COULD NOT FIND day {req_d} or {nxt_d} in sheet '{sheet_name}'.")
-                        
                     for idx in range(r_idx + 1, len(df_zero)):
                         raw_type = df_zero.iloc[idx, type_col_idx]
                         fam = parse_family(raw_type)

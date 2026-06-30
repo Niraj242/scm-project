@@ -122,7 +122,6 @@ def generate_schedule(payload: ScheduleRequest):
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None:
-                    debug_logs.append(f"[ZEROSET] MATCHED DAY {req_d} (Col {c1}) & DAY {nxt_d} (Col {c2}) in sheet '{sheet_name}'.")
                     for idx in range(r_idx + 1, len(df_zero)):
                         raw_type = df_zero.iloc[idx, type_col_idx]
                         fam = parse_family(raw_type)
@@ -174,11 +173,8 @@ def generate_schedule(payload: ScheduleRequest):
                     sub_col = 'OR' if suffix.endswith('_OR') else 'IR'
                     buffers_by_fam[fam][stage][sub_col] += buf_val
 
-        debug_logs.append(f"Successfully linked buffers to {len(buffers_by_fam)} families.")
-
-        # 4. CALCULATE NET DEMAND PER STAGE WITH UNIT CONVERSION
+        # 4. CALCULATE NET DEMAND PER STAGE
         od_req, face_req, ht_req = {}, {}, {}
-
         for fam, demands in channel_demands.items():
             rpb_ir = box_matrix.get(fam, {}).get('IR', 100) or 100
             rpb_or = box_matrix.get(fam, {}).get('OR', 100) or 100
@@ -186,20 +182,20 @@ def generate_schedule(payload: ScheduleRequest):
             req_boxes_ir = demands['IR'] / rpb_ir
             req_boxes_or = demands['OR'] / rpb_or
             
-            def get_buf_boxes(stage, p_code, req_boxes, rpb):
+            def get_buf(stage, p_code, req_boxes, rpb):
                 raw_buf = buffers_by_fam.get(fam, {}).get(stage, {}).get(p_code, 0)
                 if payload.unit_mode == 'Days': return raw_buf * req_boxes
                 elif payload.unit_mode == 'Rings': return raw_buf / rpb if rpb else 0
-                else: return raw_buf  # Boxes mode
+                return raw_buf 
                 
-            ch_buf_ir = get_buf_boxes('CH', 'IR', req_boxes_ir, rpb_ir)
-            ch_buf_or = get_buf_boxes('CH', 'OR', req_boxes_or, rpb_or)
+            ch_buf_ir = get_buf('CH', 'IR', req_boxes_ir, rpb_ir)
+            ch_buf_or = get_buf('CH', 'OR', req_boxes_or, rpb_or)
             
-            od_buf_ir = get_buf_boxes('OD', 'IR', req_boxes_ir, rpb_ir)
-            od_buf_or = get_buf_boxes('OD', 'OR', req_boxes_or, rpb_or)
+            od_buf_ir = get_buf('OD', 'IR', req_boxes_ir, rpb_ir)
+            od_buf_or = get_buf('OD', 'OR', req_boxes_or, rpb_or)
             
-            face_buf_ir = get_buf_boxes('FACE', 'IR', req_boxes_ir, rpb_ir)
-            face_buf_or = get_buf_boxes('FACE', 'OR', req_boxes_or, rpb_or)
+            face_buf_ir = get_buf('FACE', 'IR', req_boxes_ir, rpb_ir)
+            face_buf_or = get_buf('FACE', 'OR', req_boxes_or, rpb_or)
 
             net_od_ir = max(0, req_boxes_ir - ch_buf_ir)
             net_od_or = max(0, req_boxes_or - ch_buf_or)
@@ -214,9 +210,9 @@ def generate_schedule(payload: ScheduleRequest):
             if net_face_ir > 0 or net_face_or > 0: face_req[fam] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': demands['channel']}
             if net_ht_ir > 0 or net_ht_or > 0: ht_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'channel': demands['channel']}
 
-        debug_logs.append(f"Net Pipeline Demand -> OD: {len(od_req)} | FACE: {len(face_req)} | HT: {len(ht_req)}")
+        debug_logs.append(f"Net Demands Calculated -> OD: {len(od_req)} families | FACE: {len(face_req)} families | HT: {len(ht_req)} families")
 
-        # 5. READ MACHINES & FURNACES
+        # 5. READ MACHINES & FURNACES (BULLETPROOF PARSING)
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
         xls_prod, logs3 = load_excel_fast(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
@@ -237,40 +233,67 @@ def generate_schedule(payload: ScheduleRequest):
                         fam = parse_family(r.iloc[0])
                         if fam and fam != "UNKNOWN": furnace_map[fam] = str(r.iloc[1]).strip()
             
+            # --- DYNAMIC MACHINE HUNTING ---
             for sheet in xls_prod.sheet_names:
                 if sheet in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.']: continue
                 df_m = pd.read_excel(xls_prod, sheet_name=sheet, header=None)
                 str_matrix = df_m.fillna('').astype(str).values
+                
                 for r in range(str_matrix.shape[0]):
-                    for c in range(str_matrix.shape[1]):
-                        if str_matrix[r, c].strip().upper() == 'MACHINE':
-                            m_num = str(df_m.iloc[r, c+1]).strip()
-                            m_type = str(df_m.iloc[r, c+2]).strip().upper()
+                    row_text = " ".join(str_matrix[r]).upper()
+                    if 'MACHINE' in row_text:
+                        # Extract non-empty cells in this row to find Name and Type securely
+                        cells = [c.strip() for c in str_matrix[r] if c.strip()]
+                        
+                        m_num = cells[1] if len(cells) > 1 else f"Unknown_{r}"
+                        m_type = "UNKNOWN"
+                        if "FACE" in row_text: m_type = "FACE"
+                        elif "OD" in row_text: m_type = "OD"
+                        
+                        if m_type in ['FACE', 'OD']:
+                            if m_num not in machines_data[m_type]:
+                                machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 16.0}
                             
-                            if m_type in ['FACE', 'OD']:
-                                if m_num not in machines_data[m_type]:
-                                    machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 16.0}
-                                
-                                headers = [str(col_val).strip().upper() for col_val in df_m.iloc[r+1].values]
-                                block = df_m.iloc[r+2:r+20].copy()
+                            # Hunt for the 'TYPE' and 'PART' headers in the next 5 rows
+                            header_idx = -1
+                            for offset in range(1, 6):
+                                if r + offset >= str_matrix.shape[0]: break
+                                h_row = [str(x).strip().upper() for x in df_m.iloc[r + offset].values]
+                                if 'TYPE' in h_row:
+                                    header_idx = r + offset
+                                    break
+                            
+                            if header_idx != -1:
+                                headers = [str(x).strip().upper() for x in df_m.iloc[header_idx].values]
+                                block = df_m.iloc[header_idx+1 : header_idx+20].copy()
                                 block.columns = headers
                                 
-                                if 'TYPE' in block.columns and 'PART' in block.columns:
+                                mapped_rates = 0
+                                if 'TYPE' in block.columns:
                                     for _, row in block.dropna(subset=['TYPE']).iterrows():
                                         fam = parse_family(row['TYPE'])
                                         if not fam or fam == "UNKNOWN": continue
-                                        p_code = 'OR' if '100' in str(row['PART']) else 'IR'
+                                        
+                                        part_val = str(row.get('PART', '')).strip()
+                                        p_code = 'OR' if '100' in part_val else 'IR'
                                         
                                         boxes_hr = safe_float(row.get('BOXES/HR', 0))
-                                        if boxes_hr == 0 and pd.notna(row.get('STD/HR')):
+                                        if boxes_hr == 0 and 'STD/HR' in block.columns:
                                             rpb = safe_float(row.get('RINGS/BOX', 100)) or 100
                                             boxes_hr = safe_float(row.get('STD/HR')) / rpb
-                                        
-                                        machines_data[m_type][m_num]['rates'][f"{fam}_{p_code}"] = boxes_hr
+                                            
+                                        if boxes_hr > 0:
+                                            machines_data[m_type][m_num]['rates'][f"{fam}_{p_code}"] = boxes_hr
+                                            mapped_rates += 1
+                                            
+                            debug_logs.append(f"[SHO_PRODUCTION] Found {m_type} Machine: {m_num}. Mapped {mapped_rates} rates.")
+
             del xls_prod
             gc.collect()
 
-        # 6. ALLOCATE TO MACHINES WITH PROPER LABELS
+        debug_logs.append(f"Total Machines Mapped -> FACE: {len(machines_data['FACE'])} | OD: {len(machines_data['OD'])}")
+
+        # 6. ALLOCATE TO MACHINES 
         def allocate(m_type, demands):
             result = []
             assigned_parts = set()
@@ -278,7 +301,9 @@ def generate_schedule(payload: ScheduleRequest):
             
             for m_num, m_info in machines_data[m_type].items():
                 rates = m_info.get('rates', {})
-                if not rates: continue
+                if not rates: 
+                    debug_logs.append(f"[ALLOCATE] Skipping {m_num} ({m_type}) - No rates mapped.")
+                    continue
                 
                 selected_rows = []
                 hours_left = m_info['avail_hours']
@@ -298,8 +323,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 hours_left -= process_time
                                 reqs[p_code] = 0
                             else:
-                                boxes_made = hours_left * rates[part_key]
-                                reqs[p_code] -= boxes_made
+                                reqs[p_code] -= (hours_left * rates[part_key])
                                 hours_left = 0
                                 
                             assigned_parts.add(part_key)

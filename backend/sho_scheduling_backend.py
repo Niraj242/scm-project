@@ -25,10 +25,9 @@ class ScheduleRequest(BaseModel):
     entries: Dict[str, Any]
     unlocked_blocks: List[str]
 
+# --- CLEANED FAMILY PARSER ---
 def parse_family(prod_text):
     text = str(prod_text).strip().upper()
-    if "INDUSTRILA" in text: text = text.replace("INDUSTRILA", "INDUSTRIAL")
-    if "AUTOMOTIVE" in text: return None
     if not text or text in ["NAN", "NONE", ""]: return "UNKNOWN"
     
     t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
@@ -96,7 +95,7 @@ def generate_schedule(payload: ScheduleRequest):
         next_date = req_date + timedelta(days=1)
         req_d, nxt_d = str(req_date.day), str(next_date.day)
         
-        # 1. READ ZEROSET
+        # 1. READ ZEROSET (Pipeline Demand)
         channel_demands = {} 
         xls_zero, logs1 = load_excel_fast(ZEROSET_URL, "ZEROSET")
         debug_logs.extend(logs1)
@@ -125,7 +124,7 @@ def generate_schedule(payload: ScheduleRequest):
                     for idx in range(r_idx + 1, len(df_zero)):
                         raw_type = df_zero.iloc[idx, type_col_idx]
                         fam = parse_family(raw_type)
-                        if not fam: continue
+                        if not fam or fam == "UNKNOWN": continue
                         r1 = safe_float(df_zero.iloc[idx, c1]) * 1000 if c1 is not None else 0
                         r2 = safe_float(df_zero.iloc[idx, c2]) * 1000 if c2 is not None else 0
                         if r1 > 0 or r2 > 0:
@@ -140,9 +139,9 @@ def generate_schedule(payload: ScheduleRequest):
             df_box = pd.read_excel(xls_box, sheet_name='RING PER BOX.')
             for _, r in df_box.iterrows():
                 fam = parse_family(r.iloc[0])
-                if fam: box_matrix[fam] = {'OR': safe_float(r.get('O/R', 100)), 'IR': safe_float(r.get('I/R', 100))}
+                if fam and fam != "UNKNOWN": box_matrix[fam] = {'OR': safe_float(r.get('O/R', 100)), 'IR': safe_float(r.get('I/R', 100))}
 
-        # 3. PARSE UI BUFFER ENTRIES BY STAGE
+        # 3. PARSE UI BUFFER ENTRIES (FIXED TO MATCH UI KEYS EXACTLY)
         buffers_by_fam = {}
         BUFFER_MAP = {
             'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
@@ -151,22 +150,20 @@ def generate_schedule(payload: ScheduleRequest):
             'ht_buffer_1': ('type_5', 'HT'), 'ht_buffer_2': ('type_6', 'HT')
         }
 
-        # Loop over ALL payload entries looking for buffer inputs
-        for key, val in payload.entries.items():
-            for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
-                if key.startswith(buf_prefix + '_'):
-                    suffix = key[len(buf_prefix + '_'):] # e.g., 'CH01_IR'
-                    buf_val = safe_float(val)
+        for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
+            for key, val in payload.entries.items():
+                # Locate type fields: e.g., 'type_1_CH01_IR'
+                if key.startswith(type_prefix + '_'):
+                    suffix = key[len(type_prefix + '_'):] # Extract 'CH01_IR'
+                    fam = parse_family(val)
+                    if not fam or fam == "UNKNOWN": continue
+                    
+                    # Look up the matching buffer value
+                    buf_key = f"{buf_prefix}_{suffix}"
+                    buf_val = safe_float(payload.entries.get(buf_key, 0))
+                    
                     if buf_val <= 0: continue
                     
-                    # Fetch the corresponding TYPE input from UI
-                    type_val = payload.entries.get(f"{type_prefix}_{suffix}", "")
-                    fam = parse_family(type_val)
-                    
-                    if not fam or fam == "UNKNOWN":
-                        debug_logs.append(f"⚠️ Buffer of {buf_val} entered at {stage} ({suffix}) IGNORED: 'TYPE' row is empty in UI!")
-                        continue
-                        
                     if fam not in buffers_by_fam:
                         buffers_by_fam[fam] = {'CH': {'IR':0, 'OR':0}, 'OD': {'IR':0, 'OR':0}, 'FACE': {'IR':0, 'OR':0}, 'HT': {'IR':0, 'OR':0}}
                     
@@ -228,14 +225,14 @@ def generate_schedule(payload: ScheduleRequest):
                     if pd.notna(r.get('Type')):
                         part_code = 'OR' if str(r.get('ir/or')) == '100' else 'IR'
                         fam = parse_family(r.get('Type'))
-                        if fam: weight_matrix[f"{fam}_{part_code}"] = safe_float(r.get('weight per ring', 0.1))
+                        if fam and fam != "UNKNOWN": weight_matrix[f"{fam}_{part_code}"] = safe_float(r.get('weight per ring', 0.1))
 
             if 'Furnace Type Flexibility' in xls_prod.sheet_names:
                 df_f = pd.read_excel(xls_prod, sheet_name='Furnace Type Flexibility')
                 for _, r in df_f.iterrows():
                     if pd.notna(r.iloc[0]): 
                         fam = parse_family(r.iloc[0])
-                        if fam: furnace_map[fam] = str(r.iloc[1]).strip()
+                        if fam and fam != "UNKNOWN": furnace_map[fam] = str(r.iloc[1]).strip()
             
             for sheet in xls_prod.sheet_names:
                 if sheet in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.']: continue
@@ -251,7 +248,6 @@ def generate_schedule(payload: ScheduleRequest):
                                 if m_num not in machines_data[m_type]:
                                     machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 16.0}
                                 
-                                # FIX: Make column parsing case-insensitive by stripping and forcing uppercase
                                 headers = [str(col_val).strip().upper() for col_val in df_m.iloc[r+1].values]
                                 block = df_m.iloc[r+2:r+20].copy()
                                 block.columns = headers
@@ -259,7 +255,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 if 'TYPE' in block.columns and 'PART' in block.columns:
                                     for _, row in block.dropna(subset=['TYPE']).iterrows():
                                         fam = parse_family(row['TYPE'])
-                                        if not fam: continue
+                                        if not fam or fam == "UNKNOWN": continue
                                         p_code = 'OR' if '100' in str(row['PART']) else 'IR'
                                         
                                         boxes_hr = safe_float(row.get('BOXES/HR', 0))
@@ -271,7 +267,7 @@ def generate_schedule(payload: ScheduleRequest):
                                         
         debug_logs.append(f"Successfully mapped capacity for {len(machines_data['FACE'])} Face & {len(machines_data['OD'])} OD Grinding Machines.")
 
-        # 6. ALLOCATE WITH SETUP TIME PENALTY
+        # 6. ALLOCATE WITH DYNAMIC SETUP PENALTY
         def allocate(m_type, demands):
             result = []
             assigned_parts = set()
@@ -290,8 +286,10 @@ def generate_schedule(payload: ScheduleRequest):
                         part_key = f"{fam}_{p_code}"
                         
                         if boxes_needed > 0 and part_key in rates and rates[part_key] > 0 and part_key not in assigned_parts:
-                            if hours_left < 1: continue 
-                            hours_left -= 1.0 # 1 Hour setup time
+                            # Reduced setup penalty so it doesn't block out smaller batches
+                            setup_time = 0.5 
+                            if hours_left < setup_time: continue 
+                            hours_left -= setup_time
                             
                             process_time = boxes_needed / rates[part_key]
                             if process_time <= hours_left:

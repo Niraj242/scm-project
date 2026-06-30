@@ -5,7 +5,6 @@ const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
   const [sector, setSector] = useState('DGBB');
   
-  // FIX: Properly named bufferDate instead of selectedDate
   const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Days');
   
@@ -78,7 +77,6 @@ const SHOScheduling = () => {
     setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
   };
 
-
   const fetchSchedule = async () => {
     setIsLoadingPlan(true);
     const API = 'https://scm-backend-pshv.onrender.com';
@@ -90,7 +88,6 @@ const SHOScheduling = () => {
       });
       const result = await response.json();
       
-      // THIS WILL PRINT THE EXACT PYTHON PROCESS TO YOUR BROWSER
       console.log("=== BACKEND DIAGNOSTICS ===");
       if (result.debug_logs) {
           result.debug_logs.forEach(log => console.log(log));
@@ -101,30 +98,40 @@ const SHOScheduling = () => {
       } else { 
         alert("Error: " + (result.detail || result.message)); 
       }
-    } catch (e) { alert("Failed to connect to backend."); } 
-    finally { setIsLoadingPlan(false); }
+    } catch (e) { 
+      alert("Failed to connect to backend. Check your network or API URL."); 
+    } finally { 
+      setIsLoadingPlan(false); 
+    }
   };
-
 
   const columns = SECTOR_COLUMNS[sector];
   const totalCols = (columns.length * 2) + 1;
   const isCellBlocked = (section, col, subCol) => DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol) && !unlockedBlocks.includes(`${sector}_${section}_${col}_${subCol}`);
 
+  // Helpers to safely render HT tables even if array is empty
+  const htData = scheduleData?.heat_treatment || [];
+  const midPoint = Math.max(1, Math.ceil(htData.length / 2));
+  const htColumn1 = htData.slice(0, midPoint);
+  const htColumn2 = htData.slice(midPoint);
+
   return (
     <div className="sho-container">
-      {/* TABS */}
       <div className="tab-buttons">
         <button className={activeTab === 'buffer' ? 'active' : ''} onClick={() => setActiveTab('buffer')}>1. Buffer Entry</button>
         <button className={activeTab === 'schedule' ? 'active' : ''} onClick={() => setActiveTab('schedule')}>2. Production Schedule</button>
       </div>
 
-      {/* VIEW 1: EXACT BUFFER TABLE */}
       {activeTab === 'buffer' && (
         <>
           <div className="controls-panel">
             <div className="control-group">
               <label>Sector:</label>
-              <select value={sector} onChange={(e) => setSector(e.target.value)}><option value="DGBB">DGBB</option><option value="TRB">TRB</option><option value="HUB">HUB</option></select>
+              <select value={sector} onChange={(e) => setSector(e.target.value)}>
+                <option value="DGBB">DGBB</option>
+                <option value="TRB">TRB</option>
+                <option value="HUB">HUB</option>
+              </select>
             </div>
             <div className="control-group">
               <label>Date:</label>
@@ -132,9 +139,15 @@ const SHOScheduling = () => {
             </div>
             <div className="control-group">
               <label>Entry Unit:</label>
-              <select value={unitMode} onChange={(e) => setUnitMode(e.target.value)}><option value="Days">Buffer Days</option><option value="Boxes">Boxes</option><option value="Rings">No. of Rings</option></select>
+              <select value={unitMode} onChange={(e) => setUnitMode(e.target.value)}>
+                <option value="Days">Buffer Days</option>
+                <option value="Boxes">Boxes</option>
+                <option value="Rings">No. of Rings</option>
+              </select>
             </div>
-            <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>{isSaving ? "Saving..." : "Save Buffer Data"}</button>
+            <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>
+              {isSaving ? "Saving..." : "Save Buffer Data"}
+            </button>
           </div>
 
           <div className="table-scroll-container">
@@ -169,10 +182,16 @@ const SHOScheduling = () => {
 
                       return (
                         <React.Fragment key={`${row.key}-${col}`}>
-                          {irBlocked ? (row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block" onDoubleClick={() => unlockBlock(row.section, col, 'IR')}></td> : null) 
-                          : (<td className="input-cell"><input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/></td>)}
-                          {orBlocked ? (row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block border-thick-right" onDoubleClick={() => unlockBlock(row.section, col, 'OR')}></td> : null) 
-                          : (<td className="input-cell border-thick-right"><input type="text" value={tableData[`${row.key}_${col}_OR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}/></td>)}
+                          {irBlocked ? (
+                            row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block" onDoubleClick={() => unlockBlock(row.section, col, 'IR')}></td> : null
+                          ) : (
+                            <td className="input-cell"><input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/></td>
+                          )}
+                          {orBlocked ? (
+                            row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block border-thick-right" onDoubleClick={() => unlockBlock(row.section, col, 'OR')}></td> : null
+                          ) : (
+                            <td className="input-cell border-thick-right"><input type="text" value={tableData[`${row.key}_${col}_OR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}/></td>
+                          )}
                         </React.Fragment>
                       );
                     }) : columns.map(col => (
@@ -189,7 +208,6 @@ const SHOScheduling = () => {
         </>
       )}
 
-      {/* VIEW 2: SCHEDULE VIEW (Exact Image Match Layout) */}
       {activeTab === 'schedule' && (
         <>
           <div className="controls-panel" style={{ backgroundColor: '#eef8ff' }}>
@@ -224,8 +242,10 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
-                      {scheduleData.face_grinding.length === 0 && <tr><td colSpan="4" className="center-text">No parts scheduled.</td></tr>}
-                      {scheduleData.face_grinding.map((m, idx) => (
+                      {(!scheduleData.face_grinding || scheduleData.face_grinding.length === 0) && (
+                        <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
+                      )}
+                      {scheduleData.face_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
                           {m.rows.map((r, i) => (
@@ -255,8 +275,10 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
-                      {scheduleData.od_grinding.length === 0 && <tr><td colSpan="4" className="center-text">No parts scheduled.</td></tr>}
-                      {scheduleData.od_grinding.map((m, idx) => (
+                      {(!scheduleData.od_grinding || scheduleData.od_grinding.length === 0) && (
+                        <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
+                      )}
+                      {scheduleData.od_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
                           {m.rows.map((r, i) => (
@@ -275,7 +297,7 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                {/* 3. HEAT TREATMENT (Split 2 Columns) */}
+                {/* 3. HEAT TREATMENT */}
                 <div className="schedule-column ht-column">
                   <table className="img-table">
                     <thead>
@@ -290,7 +312,10 @@ const SHOScheduling = () => {
                         <td colSpan="4" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
-                              {scheduleData.heat_treatment.slice(0, Math.max(1, Math.ceil(scheduleData.heat_treatment.length/2))).map((f, idx) => (
+                              {htColumn1.length === 0 && (
+                                <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No HT scheduled.</td></tr>
+                              )}
+                              {htColumn1.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
                                     <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
@@ -312,7 +337,7 @@ const SHOScheduling = () => {
                         <td colSpan="4" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
-                              {scheduleData.heat_treatment.slice(Math.max(1, Math.ceil(scheduleData.heat_treatment.length/2))).map((f, idx) => (
+                              {htColumn2.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
                                     <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>

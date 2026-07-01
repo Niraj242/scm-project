@@ -79,7 +79,6 @@ const SHOScheduling = () => {
 
   const fetchSchedule = async () => {
     setIsLoadingPlan(true);
-    // YOUR ORIGINAL BACKEND URL IS RESTORED HERE
     const API = 'https://scm-backend-pshv.onrender.com';
     try {
       const response = await fetch(`${API}/api/schedule`, {
@@ -359,8 +358,32 @@ const SHOScheduling = () => {
                     </tbody>
                   </table>
                 </div>
-
               </div>
+              
+              {/* UNSCHEDULED ALERTS COMPONENT */}
+              {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
+                <div style={{ marginTop: '30px', borderTop: '2px dashed #ff4444', paddingTop: '20px' }}>
+                    <h3 style={{ color: '#ff4444', marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data)</h3>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
+                        <thead>
+                            <tr style={{ backgroundColor: '#ffe5e5' }}>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Stage</th>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Part</th>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Missed Boxes/Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {scheduleData.unscheduled.map((item, idx) => (
+                                <tr key={idx}>
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>{item.missed_boxes}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+              )}
             </div>
           )}
         </>

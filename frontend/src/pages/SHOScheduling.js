@@ -4,9 +4,8 @@ import './SHOScheduling.css';
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
   const [sector, setSector] = useState('DGBB');
-  const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
   
-  // Separate units for standard buffers vs HT buffers
+  const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Boxes');
   const [htUnitMode, setHtUnitMode] = useState('Rings');
   
@@ -18,7 +17,7 @@ const SHOScheduling = () => {
   const [scheduleData, setScheduleData] = useState(null);
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
 
-  const API = 'http://localhost:8000'; // Update this to your deployed FastAPI backend URL
+  const API = 'http://localhost:8000'; // Make sure the python file is running on this port!
 
   const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
@@ -66,9 +65,7 @@ const SHOScheduling = () => {
         if (data.ht_unit_mode) setHtUnitMode(data.ht_unit_mode);
       }
     } catch (e) {
-      console.warn("Backend uncontactable, resetting table.");
-      setTableData({});
-      setUnlockedBlocks([]);
+      console.warn("Backend not running, using empty table.", e);
     }
   };
 
@@ -90,7 +87,7 @@ const SHOScheduling = () => {
       if (response.ok) alert("Buffer Data saved safely to backend.");
       else alert("Failed to save buffer data.");
     } catch (e) {
-      alert("Error contacting backend.");
+      alert("Error contacting backend. Make sure Python is running.");
     }
     setIsSaving(false);
   };
@@ -102,22 +99,6 @@ const SHOScheduling = () => {
   const unlockBlock = (section, col, subCol) => {
     const blockKey = `${sector}_${section}_${col}_${subCol}`;
     if (!unlockedBlocks.includes(blockKey)) setUnlockedBlocks([...unlockedBlocks, blockKey]);
-  };
-
-  const downloadCSV = () => {
-    let csv = "CHANNEL," + SECTOR_COLUMNS[sector].map(c => `${c} IR,${c} OR`).join(",") + "\n";
-    ROWS.forEach(row => {
-      let line = `${row.label},`;
-      SECTOR_COLUMNS[sector].forEach(col => {
-        line += `${tableData[`${row.key}_${col}_IR`] || ''},${tableData[`${row.key}_${col}_OR`] || ''},`;
-      });
-      csv += line + "\n";
-    });
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `Buffer_${sector}_${bufferDate}.csv`;
-    link.click();
   };
 
   const fetchSchedule = async () => {
@@ -142,7 +123,7 @@ const SHOScheduling = () => {
         alert("Error: " + (result.detail || "Failed to schedule.")); 
       }
     } catch (e) { 
-      alert("Failed to connect to backend."); 
+      alert("Failed to connect to backend. Is uvicorn/python running?"); 
     } finally { 
       setIsLoadingPlan(false); 
     }
@@ -199,7 +180,6 @@ const SHOScheduling = () => {
                 <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>
                 {isSaving ? "Saving..." : "Save to Backend"}
                 </button>
-                <button className="btn-export" onClick={downloadCSV}>Download CSV</button>
             </div>
           </div>
 
@@ -358,7 +338,7 @@ const SHOScheduling = () => {
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
-                                      <td className="part-name">{r.part}</td>
+                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
                                       <td className="center-text">{r.rate}</td>
@@ -379,7 +359,7 @@ const SHOScheduling = () => {
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
-                                      <td className="part-name">{r.part}</td>
+                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
                                       <td className="center-text">{r.rate}</td>

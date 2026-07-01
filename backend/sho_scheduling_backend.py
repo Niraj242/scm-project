@@ -112,26 +112,12 @@ def get_rate_for_part(fam, p_code, rates):
     if fam.startswith("T") and f"T_{p_code}" in rates: return rates[f"T_{p_code}"]
     return 0.0
 
-def is_sheet_in_sector(sheet_name, sector):
-    """Filters channels so we only schedule the active sector."""
-    sn = str(sheet_name).strip().upper()
-    if sector == 'DGBB':
-        # Matches 1, 2, 3... or CH01, CH02, SABB...
-        if 'T' in sn or 'HUB' in sn: return False
-        return True
-    elif sector == 'TRB':
-        return 'T' in sn and 'HUB' not in sn
-    elif sector == 'HUB':
-        return 'HUB' in sn
-    return True
-
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         next_date = req_date + timedelta(days=1)
-        active_sector = payload.sector.upper()
         
         # ==========================================
         # 1. PARSE ZEROSET (PIPELINE DEMAND)
@@ -142,12 +128,8 @@ def generate_schedule(payload: ScheduleRequest):
         
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
-                if not is_sheet_in_sector(sheet_name, active_sector):
-                    continue
-                    
                 r_idx, type_col_idx, c1, c2 = None, None, None, None
                 
-                # Identify Header Row
                 for i in range(min(25, len(df_zero))):
                     row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
                     row_joined = " ".join(row_strs)
@@ -173,7 +155,7 @@ def generate_schedule(payload: ScheduleRequest):
                         row_strs = [str(x).strip().upper() for x in df_zero.iloc[idx].values]
                         row_joined = " ".join(row_strs)
                         
-                        # STRICT FILTER: Ignore non-demand rows so quantities aren't doubled
+                        # Strict ignore of summary rows to prevent false quantity inflation
                         bad_words = ['MTD', 'WIP', 'ACTUAL', 'CUM', 'SHORT', 'ACHIEVE', 'BAL', 'STOCK']
                         if any(bw in row_joined for bw in bad_words):
                             continue
@@ -189,7 +171,6 @@ def generate_schedule(payload: ScheduleRequest):
                         val1 = safe_float(df_zero.iloc[idx, c1]) if c1 is not None else 0.0
                         val2 = safe_float(df_zero.iloc[idx, c2]) if c2 is not None else 0.0
                         
-                        # Shorthand for thousands if numbers are suspiciously low
                         r1 = val1 * 1000 if 0 < val1 <= 70 else val1
                         r2 = val2 * 1000 if 0 < val2 <= 70 else val2
                         combined_qty = r1 + r2
@@ -199,6 +180,7 @@ def generate_schedule(payload: ScheduleRequest):
                             if fam not in channel_demands: 
                                 channel_demands[fam] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
                             
+                            # Safely split IR and OR demands instead of overwriting
                             is_ir = " IR" in row_joined or "-IR" in row_joined or "INNER" in row_joined or "010" in row_joined
                             is_or = " OR" in row_joined or "-OR" in row_joined or "OUTER" in row_joined or "100" in row_joined
                             
@@ -211,7 +193,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 channel_demands[fam]['OR'] += combined_qty
                                 
                     if found_count > 0:
-                        debug_logs.append(f"[ZEROSET] {sheet_name}: Found {found_count} entries.")
+                        debug_logs.append(f"[ZEROSET] {sheet_name}: Exact match found. Parsed {found_count} entries.")
             del sheets_zero
             gc.collect()
 
@@ -234,7 +216,7 @@ def generate_schedule(payload: ScheduleRequest):
             gc.collect()
 
         # ==========================================
-        # 3. BUFFER MERGING & PULL CASCADING
+        # 3. BUFFER MERGING & CASCADING
         # ==========================================
         buffers_by_fam = {}
         BUFFER_MAP = {
@@ -282,7 +264,6 @@ def generate_schedule(payload: ScheduleRequest):
             face_buf_ir = get_buf_boxes('FACE', 'IR', req_boxes_ir, rpb_ir)
             face_buf_or = get_buf_boxes('FACE', 'OR', req_boxes_or, rpb_or)
 
-            # Strict Pull System Flow: Req <- Assembly/CH <- OD <- Face <- HT
             net_od_ir = max(0.0, req_boxes_ir - ch_buf_ir)
             net_od_or = max(0.0, req_boxes_or - ch_buf_or)
             net_face_ir = max(0.0, net_od_ir - od_buf_ir)
@@ -450,12 +431,12 @@ def generate_schedule(payload: ScheduleRequest):
         final_od = allocate_grinding('OD', od_req)
 
         # ==========================================
-        # 6. DYNAMIC HEAT TREATMENT (STRICT PRIMARY ASSIGNMENT)
+        # 6. DYNAMIC HEAT TREATMENT (STRICT PRIMARY)
         # ==========================================
         if not all_furnaces_set:
             all_furnaces_set.add("AICHELIN.(896)")
             
-        furnace_clocks = {f: {"avail_hours": 24.0, "current_fam": None, "rows": []} for f in all_furnaces_set}
+        furnace_clocks = {}
 
         for fam, data in sorted(ht_req.items(), key=lambda x: x[1]['rings']['IR'] + x[1]['rings']['OR'], reverse=True):
             rings_ir = data['rings']['IR']
@@ -469,7 +450,7 @@ def generate_schedule(payload: ScheduleRequest):
                 elif fam.startswith("T") and "T" in furnace_map: preferred_furnaces = furnace_map["T"]
                 
             if not preferred_furnaces: 
-                preferred_furnaces = list(all_furnaces_set)[:1] 
+                preferred_furnaces = ["AICHELIN.(896)"]
                 
             kg_per_hr = furnace_rates.get(fam, 400.0)
             if kg_per_hr == 400.0:
@@ -479,20 +460,22 @@ def generate_schedule(payload: ScheduleRequest):
             w_ir = weight_matrix.get(f"{fam}_IR", 0.15)
             w_or = weight_matrix.get(f"{fam}_OR", 0.15)
             
+            # 1. Select the primary furnace exclusively.
+            primary_fur = preferred_furnaces[0]
+            if primary_fur not in furnace_clocks: 
+                furnace_clocks[primary_fur] = {"avail_hours": 24.0, "current_fam": None, "rows": []}
+            
+            ctx = furnace_clocks[primary_fur]
+            
             for p_code, qty in [('IR', rings_ir), ('OR', rings_or)]:
                 if qty <= 0: continue
                 unit_weight = w_or if p_code == 'OR' else w_ir
                 total_weight_kg = qty * unit_weight
                 time_needed = total_weight_kg / kg_per_hr
                 
-                # STRICT PRIMARY ASSIGNMENT: Force everything to preferred_furnaces[0]
-                selected_fur = preferred_furnaces[0]
-                if selected_fur not in furnace_clocks: furnace_clocks[selected_fur] = {"avail_hours": 24.0, "current_fam": None, "rows": []}
-                
-                ctx = furnace_clocks[selected_fur]
                 setup_penalty = 2.0 if (ctx["current_fam"] and ctx["current_fam"] != fam) else 0.0
                 
-                # Apply time and quantities. If it pushes avail_hours below 0, it simply marks alert=True (Red in UI)
+                # 2. Assign entire amount to the primary furnace (no splitting).
                 ctx["avail_hours"] -= (time_needed + setup_penalty)
                 ctx["current_fam"] = fam
                 
@@ -501,7 +484,7 @@ def generate_schedule(payload: ScheduleRequest):
                     "qty": str(int(qty)), 
                     "cha": data['channel'],
                     "rate": str(round(qty * unit_weight / 24.0, 2)),
-                    "alert": ctx["avail_hours"] < 0 
+                    "alert": ctx["avail_hours"] < 0  # Turns text red in UI if it exceeds 24 hours
                 })
 
         ht_formatted = [

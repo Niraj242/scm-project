@@ -1,6 +1,5 @@
 import os
 import re
-import math
 import pandas as pd
 import requests
 import io
@@ -18,7 +17,30 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 FAM_REGEX = re.compile(r'(\d{3,5})')
 
-# Fixed Furnace Specs and Capacity Map
+# Hardcoded Matrix from User Chart Image - Excludes specific operations for specific channels
+OPERATION_EXCLUSIONS = {
+    '1': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '2': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '4': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '5': {'OD': ['IR']},
+    '8': {'OD': ['IR']},
+    '11': {'OD': ['IR']},
+    '12': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '13': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    'T1': {'OD': ['IR']},
+    'T2': {'OD': ['IR']},
+    'T3': {'OD': ['IR']},
+    'T4': {'OD': ['IR']},
+    'T5': {'OD': ['IR']},
+    'T6': {'OD': ['IR']},
+    'T7': {'OD': ['IR']},
+    'T8': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    'T9': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    'T10': {'OD': ['IR']},
+    'T11': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+}
+
+# The 7 specific furnaces requested by the user
 FURNACE_SPECS = {
     "AICHELIN.(896)": 350.0,
     "CASTLINK FURNACE( 1018 )": 250.0,
@@ -39,6 +61,12 @@ class ScheduleRequest(BaseModel):
 @router.get("/api/health")
 def health_check():
     return {"status": "ok"}
+
+def normalize_channel(ch_str):
+    ch = str(ch_str).strip().upper()
+    ch = ch.replace("CH", "").replace("CHANNEL", "").strip()
+    if ch.isdigit(): return str(int(ch))
+    return ch
 
 def parse_family(prod_text):
     text = str(prod_text).strip().upper()
@@ -64,12 +92,18 @@ def parse_family(prod_text):
     
     if "BT" in words or text.startswith("BT") or "-BT" in text or " BT" in text: base = f"BT-{base}"
     elif "BB" in words or text.startswith("BB") or "-BB" in text or " BB" in text: base = f"BB-{base}"
-    
-    if "UC" in text:
+    elif "UC" in text:
         match_uc = re.search(r'(UC\s*\d+)', text)
         if match_uc: base = match_uc.group(1).replace(" ", "")
         
     return base
+
+def extract_num(text):
+    match = re.search(r'(\d{4,5})', str(text))
+    if match: return match.group(1)
+    match_hub = re.search(r'HUB\s*(\d+\.?\d*)', str(text).upper())
+    if match_hub: return "HUB" + match_hub.group(1).replace(" ", "")
+    return str(text)
 
 def safe_float(val):
     if pd.isna(val) or val is None: return 0.0
@@ -86,8 +120,7 @@ def is_target_date(val, target_date):
         return val.day == target_date.day and val.month == target_date.month
         
     v_str = str(val).strip().upper()
-    for symbol in ['-', '/', '.', '_', ':', ' ']:
-        v_str = v_str.replace(symbol, ' ')
+    for symbol in ['-', '/', '.', '_', ':', ' ']: v_str = v_str.replace(symbol, ' ')
     tokens = v_str.split()
     
     day_str = str(target_date.day)
@@ -118,7 +151,6 @@ def get_rate_for_part(fam, p_code, rates):
     exact_key = f"{fam}_{p_code}"
     if exact_key in rates: return rates[exact_key]
     
-    # Fuzzy match numbers extracted from the family name
     num_match = re.search(r'(\d{3,5})', str(fam))
     if num_match:
         target_num = num_match.group(1)
@@ -132,15 +164,16 @@ def get_rate_for_part(fam, p_code, rates):
     if fam.startswith("HUB") and f"HUB_{p_code}" in rates: return rates[f"HUB_{p_code}"]
     if fam.startswith("THUB") and f"THUB_{p_code}" in rates: return rates[f"THUB_{p_code}"]
     if fam.startswith("T") and f"T_{p_code}" in rates: return rates[f"T_{p_code}"]
-    
     if f"{fam}_IR" in rates: return rates[f"{fam}_IR"]
     if f"{fam}_OR" in rates: return rates[f"{fam}_OR"]
 
-    return 15.0 
+    # NO MORE FAKE FALLBACKS. If we don't have the rate, we return 0.0 so it fails and goes to the Unscheduled list.
+    return 0.0 
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
+    unscheduled = [] # Re-added unscheduled tracking
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         next_date = req_date + timedelta(days=1)
@@ -172,7 +205,6 @@ def generate_schedule(payload: ScheduleRequest):
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None and (c1 is not None or c2 is not None):
-                    active_raw_type = None
                     for idx in range(r_idx + 1, len(df_zero)):
                         cell_val = df_zero.iloc[idx, type_col_idx]
                         if pd.notna(cell_val) and str(cell_val).strip() != "":
@@ -199,7 +231,7 @@ def generate_schedule(payload: ScheduleRequest):
             del sheets_zero
             gc.collect()
 
-        # 2. PARSE BOX MATRIX
+        # 2. PARSE BOX MATRIX (For exact ring to box division)
         box_matrix = {}
         sheets_box, _ = load_excel_all_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
         if sheets_box and 'RING PER BOX.' in sheets_box:
@@ -220,7 +252,7 @@ def generate_schedule(payload: ScheduleRequest):
             del sheets_box
             gc.collect()
 
-        # 3. COMPUTE BUFFERS
+        # 3. COMPUTE BUFFERS & CONVERT TO BOXES
         buffers_by_fam = {}
         BUFFER_MAP = {
             'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
@@ -238,7 +270,6 @@ def generate_schedule(payload: ScheduleRequest):
                     
                     fam = parse_family(val)
                     if not fam: continue
-                    
                     buf_val = safe_float(payload.entries.get(f"{buf_prefix}_{col_channel}_{sub_ring_type}", 0))
                     if buf_val <= 0: continue
                     
@@ -246,12 +277,12 @@ def generate_schedule(payload: ScheduleRequest):
                         buffers_by_fam[fam] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}, 'HT': {'IR': 0.0, 'OR': 0.0}}
                     buffers_by_fam[fam][stage][sub_ring_type] += buf_val
 
-        # SIMPLE INDEPENDENT REQUIREMENT SUBTRACTION
         face_req, od_req, ht_req = {}, {}, {}
         for fam, demands in channel_demands.items():
             rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
             rpb_or = box_matrix.get(fam, {}).get('OR', 100)
             
+            # Exact conversion of demand to boxes based on the Ring Per Box matrix
             req_boxes_ir = demands['IR'] / rpb_ir
             req_boxes_or = demands['OR'] / rpb_or
             
@@ -284,7 +315,7 @@ def generate_schedule(payload: ScheduleRequest):
             if net_ht_ir > 0 or net_ht_or > 0: 
                 ht_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'rings': {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}, 'channel': demands['channel']}
 
-        # 4. HIGH-SPEED PRODUCTION SHEET SCANNER
+        # 4. PARSE MACHINE PRODUCTION DATA
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
         sheets_prod, logs3 = load_excel_all_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
@@ -391,41 +422,60 @@ def generate_schedule(payload: ScheduleRequest):
             del sheets_prod
             gc.collect()
 
-        # 5. UNLIMITED GRINDING SCHEDULER (NO 3-ROW PART LIMIT)
+        # 5. ALLOCATE GRINDING WITH ACCURATE UNSCHEDULED TRACKING
         def allocate_grinding(m_type, demands_dict):
             allocated_result = {m_num: {"machine": m_num, "rows": []} for m_num in machines_data.get(m_type, {})}
             sorted_fams = sorted(demands_dict.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True)
-            working_demands = {fam: {'IR': data['IR'], 'OR': data['OR']} for fam, data in sorted_fams}
             
-            for m_num, m_info in machines_data.get(m_type, {}).items():
-                rates = m_info.get('rates', {})
-                hours_left = m_info['avail_hours'] 
-                current_fam = None
-                
-                for fam, _ in sorted_fams:
-                    if hours_left <= 0: break
-                    for p_code in ['IR', 'OR']:
-                        boxes_needed = working_demands[fam][p_code]
-                        if boxes_needed <= 0: continue
-                        
-                        rate = get_rate_for_part(fam, p_code, rates)
-                        if rate > 0:
-                            setup_cost = 1.0 if (current_fam and current_fam != fam) else 0.0
+            machine_clocks = {m_num: m_info['avail_hours'] for m_num, m_info in machines_data.get(m_type, {}).items()}
+            machine_last_fam = {m_num: None for m_num in machines_data.get(m_type, {})}
+            
+            for fam, data in sorted_fams:
+                ch_normalized = normalize_channel(data['channel'])
+                for p_code in ['IR', 'OR']:
+                    if ch_normalized in OPERATION_EXCLUSIONS and p_code in OPERATION_EXCLUSIONS[ch_normalized].get(m_type, []):
+                        continue 
+                            
+                    boxes_needed = data[p_code]
+                    if boxes_needed <= 0: continue
+                    
+                    # Gather all machines that CAN run this part (rate > 0)
+                    candidates = []
+                    for m_num, m_info in machines_data.get(m_type, {}).items():
+                        rate = get_rate_for_part(fam, p_code, m_info.get('rates', {}))
+                        if rate > 0 and machine_clocks[m_num] > 0:
+                            candidates.append((m_num, rate))
+                    
+                    placed = False
+                    if candidates:
+                        # Prioritize faster machines
+                        candidates.sort(key=lambda x: x[1], reverse=True) 
+                        for m_num, rate in candidates:
+                            if boxes_needed <= 0: break
+                            if machine_clocks[m_num] <= 0: continue
+                            
+                            hours_left = machine_clocks[m_num]
+                            current_fam = machine_last_fam[m_num]
+                            setup_cost = 2.0 if (current_fam and current_fam != fam) else 0.0
+                            
                             if hours_left <= setup_cost:
-                                hours_left = 0.0
-                                break
+                                machine_clocks[m_num] = 0.0
+                                continue
                                 
                             hours_left -= setup_cost
                             time_required = boxes_needed / rate
                             
                             if time_required <= hours_left:
-                                working_demands[fam][p_code] = 0.0
+                                boxes_needed = 0.0
                                 hours_left -= time_required
                             else:
-                                working_demands[fam][p_code] -= (hours_left * rate)
+                                boxes_needed -= (hours_left * rate)
                                 hours_left = 0.0
                                 
-                            current_fam = fam
+                            machine_clocks[m_num] = hours_left
+                            machine_last_fam[m_num] = fam
+                            placed = True
+                            
                             allocated_result[m_num]["rows"].append({
                                 "part": f"{fam} {p_code}",
                                 "std_box": str(round(rate, 1)),
@@ -434,7 +484,14 @@ def generate_schedule(payload: ScheduleRequest):
                                 "alert": False,
                                 "p_label": f"P{len(allocated_result[m_num]['rows']) + 1}"
                             })
-                            if hours_left <= 0: break
+                    
+                    # If there's still boxes needed, it means either:
+                    # 1. No machines had the rate data (Missing Rate)
+                    # 2. Machines had rate data, but ran out of 24h capacity (Capacity Exhausted)
+                    if boxes_needed > 0.5:
+                        reason = "Capacity Exhausted" if placed else "Missing Rate Data"
+                        unscheduled.append({ "stage": m_type, "part": f"{fam} {p_code}", "missed_boxes": f"{round(boxes_needed, 1)} bx ({reason})" })
+
             return list(allocated_result.values())
 
         final_face = allocate_grinding('FACE', face_req)
@@ -462,6 +519,7 @@ def generate_schedule(payload: ScheduleRequest):
                     for f_name in FURNACE_SPECS.keys():
                         if pf.upper()[:4] in f_name.upper():
                             matched_furnaces.append(f_name)
+                
                 if not matched_furnaces:
                     matched_furnaces = list(FURNACE_SPECS.keys())
                     
@@ -487,6 +545,7 @@ def generate_schedule(payload: ScheduleRequest):
                         break
                         
                 if not scheduled_flag:
+                    # If capacity exhausted on preferred furnaces, try remaining ones
                     for f_name in FURNACE_SPECS.keys():
                         if f_name in matched_furnaces: continue
                         ctx = furnace_clocks[f_name]
@@ -506,6 +565,10 @@ def generate_schedule(payload: ScheduleRequest):
                             })
                             scheduled_flag = True
                             break
+                
+                # If STILL not scheduled, record in Unscheduled array.
+                if not scheduled_flag:
+                    unscheduled.append({ "stage": "HT", "part": f"{fam} {p_code}", "missed_boxes": "Capacity Exceeded" })
 
         ht_formatted = []
         for fur, f_data in furnace_clocks.items():
@@ -522,7 +585,8 @@ def generate_schedule(payload: ScheduleRequest):
             "data": {
                 "face_grinding": final_face,
                 "od_grinding": final_od,
-                "heat_treatment": ht_formatted
+                "heat_treatment": ht_formatted,
+                "unscheduled": unscheduled
             }
         }
     except Exception as e:

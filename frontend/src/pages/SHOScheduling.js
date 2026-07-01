@@ -4,9 +4,11 @@ import './SHOScheduling.css';
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
   const [sector, setSector] = useState('DGBB');
-  
   const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
-  const [unitMode, setUnitMode] = useState('Days');
+  
+  // Separate units for standard buffers vs HT buffers
+  const [unitMode, setUnitMode] = useState('Boxes');
+  const [htUnitMode, setHtUnitMode] = useState('Rings');
   
   const [tableData, setTableData] = useState({});
   const [unlockedBlocks, setUnlockedBlocks] = useState([]); 
@@ -16,7 +18,8 @@ const SHOScheduling = () => {
   const [scheduleData, setScheduleData] = useState(null);
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
 
-  // -- CONSTANTS --
+  const API = 'http://localhost:8000'; // Update this to your deployed FastAPI backend URL
+
   const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
     TRB: ['T 1', 'T 2', 'T 3', 'T 4', 'T 5', 'T 6', 'T 7', 'T 8', 'T 9', 'T10'],
@@ -45,61 +48,101 @@ const SHOScheduling = () => {
     { label: 'HT. BUFFER', key: 'ht_buffer_1', section: 'HT', sectionIndex: 0 },
     { label: 'TYPE', key: 'type_5', section: 'HT', sectionIndex: 1 },
     { label: 'HT. BUFFER', key: 'ht_buffer_2', section: 'HT', sectionIndex: 2 },
-    { label: 'TYPE', key: 'type_6', section: 'HT', sectionIndex: 3 },
-    { label: '', key: 'spacer', section: 'NONE', sectionIndex: 0 },
-    { label: 'RUNNING', key: 'running', section: 'RUN', sectionIndex: 0 },
-    { label: 'NEXT TYPE', key: 'next_type_3', section: 'RUN', sectionIndex: 1 },
-    { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
+    { label: 'TYPE', key: 'type_6', section: 'HT', sectionIndex: 3 }
   ];
 
   useEffect(() => {
-    const storageKey = `sho_db_${sector}_${bufferDate}`;
-    const savedData = localStorage.getItem(storageKey);
-    if (savedData) {
-      const parsed = JSON.parse(savedData);
-      setTableData(parsed.entries || {});
-      setUnlockedBlocks(parsed.unlocked || []);
-    } else {
+    fetchBufferData();
+  }, [sector, bufferDate]);
+
+  const fetchBufferData = async () => {
+    try {
+      const response = await fetch(`${API}/api/buffer?sector=${sector}&date=${bufferDate}`);
+      if (response.ok) {
+        const data = await response.json();
+        setTableData(data.entries || {});
+        setUnlockedBlocks(data.unlocked_blocks || []);
+        if (data.unit_mode) setUnitMode(data.unit_mode);
+        if (data.ht_unit_mode) setHtUnitMode(data.ht_unit_mode);
+      }
+    } catch (e) {
+      console.warn("Backend uncontactable, resetting table.");
       setTableData({});
       setUnlockedBlocks([]);
     }
-  }, [sector, bufferDate]);
+  };
 
-  const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
+  const saveBufferData = async () => {
+    setIsSaving(true);
+    try {
+      const response = await fetch(`${API}/api/buffer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          sector, 
+          date: bufferDate, 
+          unit_mode: unitMode,
+          ht_unit_mode: htUnitMode,
+          entries: tableData, 
+          unlocked_blocks: unlockedBlocks 
+        })
+      });
+      if (response.ok) alert("Buffer Data saved safely to backend.");
+      else alert("Failed to save buffer data.");
+    } catch (e) {
+      alert("Error contacting backend.");
+    }
+    setIsSaving(false);
+  };
+
+  const handleInputChange = (rowKey, col, subCol, value) => {
+    setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
+  };
+
   const unlockBlock = (section, col, subCol) => {
     const blockKey = `${sector}_${section}_${col}_${subCol}`;
     if (!unlockedBlocks.includes(blockKey)) setUnlockedBlocks([...unlockedBlocks, blockKey]);
   };
 
-  const saveBufferData = () => {
-    setIsSaving(true);
-    localStorage.setItem(`sho_db_${sector}_${bufferDate}`, JSON.stringify({ entries: tableData, unlocked: unlockedBlocks }));
-    setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
+  const downloadCSV = () => {
+    let csv = "CHANNEL," + SECTOR_COLUMNS[sector].map(c => `${c} IR,${c} OR`).join(",") + "\n";
+    ROWS.forEach(row => {
+      let line = `${row.label},`;
+      SECTOR_COLUMNS[sector].forEach(col => {
+        line += `${tableData[`${row.key}_${col}_IR`] || ''},${tableData[`${row.key}_${col}_OR`] || ''},`;
+      });
+      csv += line + "\n";
+    });
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `Buffer_${sector}_${bufferDate}.csv`;
+    link.click();
   };
 
   const fetchSchedule = async () => {
     setIsLoadingPlan(true);
-    const API = 'https://scm-backend-pshv.onrender.com';
     try {
       const response = await fetch(`${API}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: unlockedBlocks })
+        body: JSON.stringify({ 
+          sector, 
+          date: scheduleDate, 
+          unit_mode: unitMode, 
+          ht_unit_mode: htUnitMode,
+          entries: tableData, 
+          unlocked_blocks: unlockedBlocks 
+        })
       });
       const result = await response.json();
-      
-      console.log("=== BACKEND DIAGNOSTICS ===");
-      if (result.debug_logs) {
-          result.debug_logs.forEach(log => console.log(log));
-      }
-
       if (response.ok && result.status === 'success') { 
         setScheduleData(result.data); 
       } else { 
-        alert("Error: " + (result.detail || result.message)); 
+        alert("Error: " + (result.detail || "Failed to schedule.")); 
       }
     } catch (e) { 
-      alert("Failed to connect to backend. Check your network or API URL."); 
+      alert("Failed to connect to backend."); 
     } finally { 
       setIsLoadingPlan(false); 
     }
@@ -109,7 +152,6 @@ const SHOScheduling = () => {
   const totalCols = (columns.length * 2) + 1;
   const isCellBlocked = (section, col, subCol) => DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol) && !unlockedBlocks.includes(`${sector}_${section}_${col}_${subCol}`);
 
-  // Helpers to safely render HT tables even if array is empty
   const htData = scheduleData?.heat_treatment || [];
   const midPoint = Math.max(1, Math.ceil(htData.length / 2));
   const htColumn1 = htData.slice(0, midPoint);
@@ -138,16 +180,27 @@ const SHOScheduling = () => {
               <input type="date" value={bufferDate} onChange={(e) => setBufferDate(e.target.value)} />
             </div>
             <div className="control-group">
-              <label>Entry Unit:</label>
+              <label>Std Buffer Unit:</label>
               <select value={unitMode} onChange={(e) => setUnitMode(e.target.value)}>
-                <option value="Days">Buffer Days</option>
                 <option value="Boxes">Boxes</option>
-                <option value="Rings">No. of Rings</option>
+                <option value="Days">Days</option>
+                <option value="Rings">Rings</option>
               </select>
             </div>
-            <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>
-              {isSaving ? "Saving..." : "Save Buffer Data"}
-            </button>
+            <div className="control-group">
+              <label>HT Buffer Unit:</label>
+              <select value={htUnitMode} onChange={(e) => setHtUnitMode(e.target.value)}>
+                <option value="Rings">No. of Rings</option>
+                <option value="Boxes">Boxes</option>
+                <option value="Days">Days</option>
+              </select>
+            </div>
+            <div className="button-group">
+                <button className="btn-save" onClick={saveBufferData} disabled={isSaving}>
+                {isSaving ? "Saving..." : "Save to Backend"}
+                </button>
+                <button className="btn-export" onClick={downloadCSV}>Download CSV</button>
+            </div>
           </div>
 
           <div className="table-scroll-container">
@@ -155,7 +208,7 @@ const SHOScheduling = () => {
               <thead>
                 <tr>
                   <th colSpan="3" className="text-blue text-left pl-2">SKF INDIA LTD.</th>
-                  <th colSpan={totalCols - 6} className="text-blue">CHANNEL BUFFER STATUS<br/>{sector}</th>
+                  <th colSpan={totalCols - 6} className="text-blue">CHANNEL BUFFER STATUS - {sector}</th>
                   <th colSpan="3" className="text-blue text-right pr-2">DATE :- {bufferDate.split('-').reverse().join('/')}</th>
                 </tr>
                 <tr className="header-row">
@@ -174,9 +227,9 @@ const SHOScheduling = () => {
               </thead>
               <tbody>
                 {ROWS.map((row) => (
-                  <tr key={row.key} className={row.key === 'spacer' ? 'spacer-row border-thick-bottom' : ''}>
+                  <tr key={row.key}>
                     <td className="row-label font-bold border-thick-right">{row.label}</td>
-                    {row.key !== 'spacer' ? columns.map(col => {
+                    {columns.map(col => {
                       const irBlocked = isCellBlocked(row.section, col, 'IR');
                       const orBlocked = isCellBlocked(row.section, col, 'OR');
 
@@ -194,12 +247,7 @@ const SHOScheduling = () => {
                           )}
                         </React.Fragment>
                       );
-                    }) : columns.map(col => (
-                      <React.Fragment key={`spacer-${col}`}>
-                        <td className="spacer-cell border-thick-bottom"></td>
-                        <td className="spacer-cell border-thick-right border-thick-bottom"></td>
-                      </React.Fragment>
-                    ))}
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -212,18 +260,18 @@ const SHOScheduling = () => {
         <>
           <div className="controls-panel" style={{ backgroundColor: '#eef8ff' }}>
             <div className="control-group">
-              <label>Select Date to Schedule:</label>
+              <label>Target Plan Date:</label>
               <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
             </div>
             <button className="btn-save" style={{backgroundColor: '#28a745', borderColor: '#1e7e34'}} onClick={fetchSchedule} disabled={isLoadingPlan}>
-              {isLoadingPlan ? "Fetching Excel Files & Calculating..." : "Generate Production Schedule"}
+              {isLoadingPlan ? "Mapping Plan..." : "Generate Production Schedule"}
             </button>
           </div>
           
           {scheduleData && (
             <div className="image-layout-container">
               <div className="schedule-master-header">
-                <div className="header-title">Face & OD Grinding Schedule</div>
+                <div className="header-title">Master Grinding & HT Schedule</div>
                 <div className="header-date">Date :- {scheduleDate.split('-').reverse().join('/')}</div>
               </div>
 
@@ -242,15 +290,12 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
-                      {(!scheduleData.face_grinding || scheduleData.face_grinding.length === 0) && (
-                        <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
-                      )}
                       {scheduleData.face_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
                           {m.rows.map((r, i) => (
                             <tr key={i}>
-                              <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
+                              <td className="part-name">{r.part}</td>
                               <td className="center-text">{r.std_box}</td>
                               <td className="center-text">{r.p_2nd}</td>
                               <td className="center-text">{r.p_3rd}</td>
@@ -275,17 +320,12 @@ const SHOScheduling = () => {
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
-                      {(!scheduleData.od_grinding || scheduleData.od_grinding.length === 0) && (
-                        <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
-                      )}
                       {scheduleData.od_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
                           <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
                           {m.rows.map((r, i) => (
                             <tr key={i}>
-                              <td className={`part-name ${r.alert ? 'text-red' : ''}`}>
-                                {r.p_label && <span className="p-badge">{r.p_label}</span>} {r.part}
-                              </td>
+                              <td className="part-name">{r.part}</td>
                               <td className="center-text">{r.std_box}</td>
                               <td className="center-text">{r.p_2nd}</td>
                               <td className="center-text">{r.p_3rd}</td>
@@ -308,13 +348,9 @@ const SHOScheduling = () => {
                     </thead>
                     <tbody className="ht-flex-body">
                       <tr>
-                        {/* Furnace Column 1 */}
                         <td colSpan="4" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
-                              {htColumn1.length === 0 && (
-                                <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No HT scheduled.</td></tr>
-                              )}
                               {htColumn1.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
@@ -322,7 +358,7 @@ const SHOScheduling = () => {
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
-                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
+                                      <td className="part-name">{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
                                       <td className="center-text">{r.rate}</td>
@@ -333,7 +369,6 @@ const SHOScheduling = () => {
                             </tbody>
                           </table>
                         </td>
-                        {/* Furnace Column 2 */}
                         <td colSpan="4" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
@@ -344,7 +379,7 @@ const SHOScheduling = () => {
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
-                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
+                                      <td className="part-name">{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
                                       <td className="center-text">{r.rate}</td>
@@ -359,7 +394,6 @@ const SHOScheduling = () => {
                     </tbody>
                   </table>
                 </div>
-
               </div>
             </div>
           )}

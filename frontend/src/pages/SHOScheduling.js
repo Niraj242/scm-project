@@ -317,14 +317,14 @@ const SHOScheduling = () => {
                               {htColumn1.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
+                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>TOTAL KG</td>
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
                                       <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
-                                      <td className="center-text">{r.rate}</td>
+                                      <td className="center-text font-bold">{r.rate}</td>
                                     </tr>
                                   ))}
                                 </React.Fragment>
@@ -339,14 +339,14 @@ const SHOScheduling = () => {
                               {htColumn2.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
+                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>TOTAL KG</td>
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
                                       <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
-                                      <td className="center-text">{r.rate}</td>
+                                      <td className="center-text font-bold">{r.rate}</td>
                                     </tr>
                                   ))}
                                 </React.Fragment>
@@ -369,7 +369,7 @@ const SHOScheduling = () => {
                             <tr style={{ backgroundColor: '#ffe5e5' }}>
                                 <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Stage</th>
                                 <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Part</th>
-                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Missed Boxes/Status</th>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Missed Boxes / Status</th>
                             </tr>
                         </thead>
                         <tbody>

@@ -96,7 +96,6 @@ def parse_family(prod_text):
         
     return base
 
-# Forces strict numeric matching (0350 -> 350) to prevent Missing Rate bugs
 def normalize_fam_key(text):
     match = re.search(r'(\d+)', str(text))
     return str(int(match.group(1))) if match else str(text).strip().upper()
@@ -110,23 +109,27 @@ def safe_float(val):
     except Exception:
         return 0.0
 
+# EXTREMELY STRICT DATE MATCHER TO KILL PHANTOM DEMANDS
 def is_target_date(val, target_date):
     if val is None or pd.isna(val): return False
+    
+    # If it's literally a Pandas/Python Date object
     if isinstance(val, (datetime, pd.Timestamp)):
         return val.day == target_date.day and val.month == target_date.month
         
     v_str = str(val).strip().upper()
-    for symbol in ['-', '/', '.', '_', ':', ' ']: v_str = v_str.replace(symbol, ' ')
-    tokens = v_str.split()
-    
     day_str = str(target_date.day)
     day_padded = f"{target_date.day:02d}"
+    month_str = target_date.strftime("%b").upper()
     
-    if day_str in tokens or day_padded in tokens:
-        month_str = target_date.strftime("%b").upper()
-        if any(m in v_str for m in ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]):
-            return month_str in v_str
+    # If the column header is EXACTLY the day number (e.g. "1", "01", "15")
+    if v_str == day_str or v_str == day_padded:
         return True
+        
+    # If it's a string like "1-JUL", "01 JUL", etc.
+    if (day_str in v_str or day_padded in v_str) and month_str in v_str:
+        return True
+        
     return False
 
 def load_excel_all_sheets(url, file_label="Unknown"):
@@ -152,7 +155,7 @@ def generate_schedule(payload: ScheduleRequest):
         next_date = req_date + timedelta(days=1)
         
         # ========================================================
-        # 1. PARSE ZEROSET DEMANDS
+        # 1. PARSE ZEROSET DEMANDS (Strict Date Matching)
         # ========================================================
         channel_demands = {} 
         sheets_zero, logs1 = load_excel_all_sheets(ZEROSET_URL, "ZEROSET")
@@ -175,8 +178,10 @@ def generate_schedule(payload: ScheduleRequest):
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
                         for j, val in enumerate(df_zero.iloc[i].values):
-                            if is_target_date(val, req_date): c1 = j
-                            if is_target_date(val, next_date): c2 = j
+                            # Ensure we don't accidentally match columns BEFORE the Type column
+                            if type_col_idx is not None and j > type_col_idx:
+                                if is_target_date(val, req_date): c1 = j
+                                if is_target_date(val, next_date): c2 = j
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None and (c1 is not None or c2 is not None):
@@ -314,14 +319,14 @@ def generate_schedule(payload: ScheduleRequest):
                 ht_req[f_key] = {'IR': net_ht_ir, 'OR': net_ht_or, 'rings': {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}, 'channel': demands['channel'], 'raw_fam': demands['raw_fam']}
 
         # ========================================================
-        # 4. PARSE MACHINE PRODUCTION DATA
+        # 4. PARSE MACHINE PRODUCTION DATA & STRICT WEIGHTS
         # ========================================================
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
         sheets_prod, logs3 = load_excel_all_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
         
         if sheets_prod:
-            # 4a. STRICT WEIGHTS PARSER (Types, IR/OR, Weight Per Ring)
+            # 4a. EXACT WEIGHTS PARSER (No default values. Strictly uses Excel)
             if 'WEIGHTS' in sheets_prod:
                 df_w = sheets_prod['WEIGHTS'].fillna('').astype(str)
                 type_c, iror_c, wt_c = -1, -1, -1
@@ -330,7 +335,7 @@ def generate_schedule(payload: ScheduleRequest):
                     row_vals = [x.strip().upper() for x in df_w.iloc[r].values]
                     for c, val in enumerate(row_vals):
                         if 'TYPE' in val: type_c = c
-                        elif 'IR/OR' in val or 'IR / OR' in val: iror_c = c
+                        elif 'IR/OR' in val.replace(' ', '') or 'IR' in val or 'OR' in val: iror_c = c
                         elif 'WEIGHT' in val: wt_c = c
                     
                     if type_c != -1 and iror_c != -1 and wt_c != -1:
@@ -344,13 +349,13 @@ def generate_schedule(payload: ScheduleRequest):
                             if not fam: continue
                             
                             p_code = None
-                            if '100' in r_iror or 'OR' in r_iror: p_code = 'OR'
+                            if '100' in r_iror or 'OR' in r_iror or '010' in r_iror: p_code = 'OR'
                             elif '120' in r_iror or 'IR' in r_iror: p_code = 'IR'
                             
                             wt_val = safe_float(r_wt)
                             if p_code and wt_val > 0:
                                 weight_matrix[f"{normalize_fam_key(fam)}_{p_code}"] = wt_val
-                        break # Done parsing weights
+                        break
 
             # 4b. FURNACE MAP PARSER
             fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper()), None)
@@ -388,7 +393,6 @@ def generate_schedule(payload: ScheduleRequest):
                             if m_num not in machines_data[m_type]:
                                 machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 24.0}
                                 
-                            # Scan vertically up to 10 rows to find all necessary headers
                             type_c, part_c, rate_c, rpb_c = -1, -1, -1, -1
                             rate_is_rings = False
                             data_start_r = -1
@@ -512,7 +516,7 @@ def generate_schedule(payload: ScheduleRequest):
         final_od = allocate_grinding('OD', od_req)
 
         # ========================================================
-        # 6. HEAT TREATMENT ROUTING (Chunking Logic + Real Weights)
+        # 6. HEAT TREATMENT ROUTING (Strict Sheet Data ONLY)
         # ========================================================
         furnace_clocks = {f: {"avail_hours": 20.5, "current_fam": None, "rows": [], "capacity": cap} for f, cap in FURNACE_SPECS.items()}
 
@@ -520,8 +524,12 @@ def generate_schedule(payload: ScheduleRequest):
             for p_code, total_qty in [('IR', data['rings']['IR']), ('OR', data['rings']['OR'])]:
                 if total_qty <= 0: continue
                 
-                # Fetch EXACT weights parsed from the WEIGHTS sheet
-                unit_weight = weight_matrix.get(f"{f_key}_{p_code}", 0.15)
+                # Zero Fake Data: Must fetch weight strictly from sheet
+                unit_weight = weight_matrix.get(f"{f_key}_{p_code}", 0.0)
+                
+                if unit_weight == 0.0:
+                    unscheduled.append({ "stage": "HT", "part": f"{data['raw_fam']} {p_code}", "missed_boxes": "Missing Weight Data in Sheet" })
+                    continue
                 
                 preferred_furnaces = furnace_map.get(f_key, [])
                 matched_furnaces = []

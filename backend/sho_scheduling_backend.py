@@ -1,10 +1,8 @@
 import os
 import re
-import math
 import pandas as pd
 import requests
 import io
-import time
 import gc
 from datetime import datetime, timedelta
 from fastapi import APIRouter
@@ -19,6 +17,39 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 FAM_REGEX = re.compile(r'(\d{3,5})')
 
+OPERATION_EXCLUSIONS = {
+    '1': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '2': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '4': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '5': {'OD': ['IR']},
+    '8': {'OD': ['IR']},
+    '11': {'OD': ['IR']},
+    '12': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '13': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    'T1': {'OD': ['IR']},
+    'T2': {'OD': ['IR']},
+    'T3': {'OD': ['IR']},
+    'T4': {'OD': ['IR']},
+    'T5': {'OD': ['IR']},
+    'T6': {'OD': ['IR']},
+    'T7': {'OD': ['IR']},
+    'T8': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    'T9': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    'T10': {'OD': ['IR']},
+    'T11': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+}
+
+# Strictly defined furnaces
+FURNACE_SPECS = {
+    "AICHELIN.(896)": 350.0,
+    "CASTLINK FURNACE( 1018 )": 250.0,
+    "ROLLER FURNACE ( 148 )": 250.0,
+    "SIMPLICITY FURNACE(1238)": 180.0,
+    "BIRLEC FURNACE   ( 1158 )": 170.0,
+    "SHOEI FURNACE    ( 1062 )": 350.0,
+    "AICHELIN UNITHERM ( 2033 )": 250.0
+}
+
 class ScheduleRequest(BaseModel):
     sector: str
     date: str
@@ -30,151 +61,200 @@ class ScheduleRequest(BaseModel):
 def health_check():
     return {"status": "ok"}
 
+def normalize_channel(ch_str):
+    ch = str(ch_str).strip().upper()
+    ch = ch.replace("CH", "").replace("CHANNEL", "").strip()
+    if ch.isdigit(): return str(int(ch))
+    return ch
+
 def parse_family(prod_text):
     text = str(prod_text).strip().upper()
-    if not text or text in ["NAN", "NONE", ""]: return None
-    match = re.search(r'(\d{3,5})', text)
-    if match: return match.group(1)
-    return text.split()[0].split('-')[0]
+    if "INDUSTRILA" in text: text = text.replace("INDUSTRILA", "INDUSTRIAL")
+    if "AUTOMOTIVE" in text: return None
+    if not text or text in ["NAN", "NONE", "", "UNKNOWN"]: return None
+    
+    if "HUB" in text:
+        match_hub = re.search(r'(T?\s*HUB\s*\d+\.?\d*)', text)
+        if match_hub: return match_hub.group(1).replace(" ", "")
+        return "HUB"
+        
+    if text.startswith("T ") or re.match(r'^T\d+', text):
+        match_t = re.search(r'(T\s*\d+)', text)
+        if match_t: return match_t.group(1).replace(" ", "")
+        return "T"
+
+    t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
+    words = t_norm.split()
+    
+    match = FAM_REGEX.search(text)
+    base = match.group(1) if match else text.split()[0].split('-')[0]
+    
+    if "BT" in words or text.startswith("BT") or "-BT" in text or " BT" in text: base = f"BT-{base}"
+    elif "BB" in words or text.startswith("BB") or "-BB" in text or " BB" in text: base = f"BB-{base}"
+    elif "UC" in text:
+        match_uc = re.search(r'(UC\s*\d+)', text)
+        if match_uc: base = match_uc.group(1).replace(" ", "")
+        
+    return base
+
+def normalize_fam_key(text):
+    match = re.search(r'(\d+)', str(text))
+    return str(int(match.group(1))) if match else str(text).strip().upper()
 
 def safe_float(val):
     if pd.isna(val) or val is None: return 0.0
     try:
         s_val = str(val).replace(',', '').strip().lower()
         if s_val in ['nan', 'none', '', 'null']: return 0.0
-        f_val = float(s_val)
-        return 0.0 if math.isnan(f_val) else f_val
+        return float(s_val)
     except Exception:
         return 0.0
 
-def parse_qty(val):
-    """Safely parse quantities. If the Zeroset uses decimals (1.5 for 1500), convert it."""
-    v = safe_float(val)
-    if 0 < v <= 50: return v * 1000 
-    return v
-
-def load_excel_fast(url, file_label="Unknown"):
-    logs = []
-    if not url or url.strip() == "":
-        logs.append(f"[{file_label}] FAILED: URL is empty.")
-        return None, logs
+# STRICT DATE MATCHER: Prevents phantom columns from being scheduled
+def is_target_date(val, target_date):
+    if val is None or pd.isna(val): return False
     
-    for attempt in range(3):
+    # 1. If pandas natively reads it as a datetime
+    if isinstance(val, (datetime, pd.Timestamp)):
+        return val.day == target_date.day and val.month == target_date.month
+        
+    v_str = str(val).strip().upper()
+    day_str = str(target_date.day)
+    day_padded = f"{target_date.day:02d}"
+    month_str = target_date.strftime("%b").upper() # e.g. "JUL"
+    
+    # 2. String matches: Requires BOTH day and month to prevent false positives (like picking up column "1")
+    if (day_str in v_str or day_padded in v_str) and (month_str in v_str):
+        return True
+        
+    return False
+
+def load_excel_all_sheets(url, file_label="Unknown"):
+    logs = []
+    if not url or url.strip() == "": return None, logs
+    try:
+        resp = requests.get(url, timeout=30)
+        if resp.status_code != 200: return None, logs
+        content = io.BytesIO(resp.content)
         try:
-            logs.append(f"[{file_label}] Attempt {attempt + 1}: Fetching URL...")
-            resp = requests.get(url, timeout=30)
-            if resp.status_code != 200:
-                time.sleep(2)
-                continue
-                
-            content = io.BytesIO(resp.content)
-            logs.append(f"[{file_label}] Downloaded {len(resp.content)} bytes.")
-            try: 
-                xls = pd.ExcelFile(content, engine='calamine')
-                logs.append(f"[{file_label}] SUCCESS (calamine).")
-                return xls, logs
-            except Exception: 
-                xls = pd.ExcelFile(content)
-                logs.append(f"[{file_label}] SUCCESS (openpyxl).")
-                return xls, logs
-        except Exception as e:
-            logs.append(f"[{file_label}] ERROR: {str(e)}")
-            time.sleep(2)
-    return None, logs
+            return pd.read_excel(content, sheet_name=None, header=None, engine='calamine'), logs
+        except Exception:
+            return pd.read_excel(content, sheet_name=None, header=None), logs
+    except Exception as e:
+        return None, [f"[{file_label}] ERR: {str(e)}"]
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
+    unscheduled = [] 
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         next_date = req_date + timedelta(days=1)
-        req_d, nxt_d = str(req_date.day), str(next_date.day)
         
-        # ==========================================
-        # 1. READ ZEROSET (Pipeline Demand)
-        # ==========================================
+        # ========================================================
+        # 1. PARSE ZEROSET DEMANDS (Strict Date Parsing)
+        # ========================================================
         channel_demands = {} 
-        xls_zero, logs1 = load_excel_fast(ZEROSET_URL, "ZEROSET")
+        sheets_zero, logs1 = load_excel_all_sheets(ZEROSET_URL, "ZEROSET")
         debug_logs.extend(logs1)
         
-        if xls_zero:
-            for sheet_name in xls_zero.sheet_names:
-                df_zero = pd.read_excel(xls_zero, sheet_name=sheet_name, header=None)
+        if sheets_zero:
+            for sheet_name, df_zero in sheets_zero.items():
                 r_idx, type_col_idx, c1, c2 = None, None, None, None
                 
-                # Scan for Headers
-                for i, row in df_zero.iterrows():
-                    row_strs = [str(x).strip().upper() for x in row.values]
+                for i in range(min(25, len(df_zero))):
+                    row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
+                    row_joined = " ".join(row_strs)
+                    
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
                             if val in ["TYPE", "MF", "PART NO", "BRG NO"] or "TYPE" in val: 
                                 type_col_idx = j
                                 break
-                    if 'MTD' in " ".join(row_strs) or 'PKWIP' in " ".join(row_strs) or 'PLAN' in " ".join(row_strs):
+                                
+                    if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
-                        for j, val in enumerate(row.values):
-                            if pd.isna(val): continue
-                            v_str = str(val).strip()
-                            if v_str in [req_d, f"{req_d}.0"]: c1 = j
-                            if v_str in [nxt_d, f"{nxt_d}.0"]: c2 = j
+                        for j, val in enumerate(df_zero.iloc[i].values):
+                            # Ensure we are looking at columns AFTER the TYPE column for dates
+                            if type_col_idx is not None and j > type_col_idx:
+                                if is_target_date(val, req_date): c1 = j
+                                if is_target_date(val, next_date): c2 = j
                     if r_idx is not None and type_col_idx is not None: break
                         
-                if r_idx is not None and type_col_idx is not None:
-                    # CRITICAL FIX: Handle merged cells by forward-filling the TYPE column
-                    df_zero[type_col_idx] = df_zero[type_col_idx].ffill()
-                    
-                    found_count = 0
-                    if c1 is not None or c2 is not None:
-                        debug_logs.append(f"[ZEROSET] MATCHED DAY {req_d} & {nxt_d} in sheet '{sheet_name}'.")
-                    
+                if r_idx is not None and type_col_idx is not None and (c1 is not None or c2 is not None):
                     for idx in range(r_idx + 1, len(df_zero)):
-                        raw_type = df_zero.iloc[idx, type_col_idx]
-                        fam = parse_family(raw_type)
+                        cell_val = df_zero.iloc[idx, type_col_idx]
+                        if pd.notna(cell_val) and str(cell_val).strip() != "":
+                            active_raw_type = str(cell_val).strip().upper()
+                            
+                        if not active_raw_type: continue
+                        fam = parse_family(active_raw_type)
                         if not fam: continue
                         
-                        r1 = parse_qty(df_zero.iloc[idx, c1]) if c1 is not None else 0
-                        r2 = parse_qty(df_zero.iloc[idx, c2]) if c2 is not None else 0
+                        val1 = safe_float(df_zero.iloc[idx, c1]) if c1 is not None else 0.0
+                        val2 = safe_float(df_zero.iloc[idx, c2]) if c2 is not None else 0.0
                         
-                        if r1 > 0 or r2 > 0:
-                            found_count += 1
-                            if fam not in channel_demands: 
-                                channel_demands[fam] = {'IR': 0, 'OR': 0, 'channel': sheet_name}
+                        r1 = val1 * 1000 if 0 < val1 <= 70 else val1
+                        r2 = val2 * 1000 if 0 < val2 <= 70 else val2
+                        combined_qty = r1 + r2
+                        
+                        if combined_qty > 0:
+                            fam_key = normalize_fam_key(fam)
+                            if fam_key not in channel_demands: 
+                                channel_demands[fam_key] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip(), 'raw_fam': fam}
                             
-                            avg_d = (r1 + r2) / 2.0
-                            is_or = 'OR' in str(raw_type).upper()
-                            is_ir = 'IR' in str(raw_type).upper()
-                            
-                            # Use max to avoid double-counting WIP + PLAN rows for the same family
-                            if is_or:
-                                channel_demands[fam]['OR'] = max(channel_demands[fam]['OR'], avg_d)
-                            elif is_ir:
-                                channel_demands[fam]['IR'] = max(channel_demands[fam]['IR'], avg_d)
-                            else:
-                                channel_demands[fam]['IR'] = max(channel_demands[fam]['IR'], avg_d)
-                                channel_demands[fam]['OR'] = max(channel_demands[fam]['OR'], avg_d)
+                            is_ir = any(x in active_raw_type for x in ['IR', '120'])
+                            is_or = any(x in active_raw_type for x in ['OR', '100', '010'])
+                            if not is_ir and not is_or:
+                                is_ir, is_or = True, True
                                 
-                    if found_count > 0:
-                        debug_logs.append(f"[ZEROSET] Sheet '{sheet_name}' -> Read {found_count} demand entries.")
-                        
-            del xls_zero
+                            if is_ir: channel_demands[fam_key]['IR'] += combined_qty
+                            if is_or: channel_demands[fam_key]['OR'] += combined_qty
+                                
+            del sheets_zero
             gc.collect()
 
-        # ==========================================
-        # 2. READ BOXES MATRIX
-        # ==========================================
+        # ========================================================
+        # 2. PARSE BOX MATRIX
+        # ========================================================
         box_matrix = {}
-        xls_box, logs2 = load_excel_fast(BOX_RING_DATA_URL, "BOX_RING_DATA")
-        if xls_box and 'RING PER BOX.' in xls_box.sheet_names:
-            df_box = pd.read_excel(xls_box, sheet_name='RING PER BOX.')
-            for _, r in df_box.iterrows():
-                fam = parse_family(r.iloc[0])
-                if fam: box_matrix[fam] = {'OR': safe_float(r.get('O/R', 100)), 'IR': safe_float(r.get('I/R', 100))}
-            del xls_box
+        sheets_box, _ = load_excel_all_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
+        if sheets_box:
+            for s_name in ["BOX PER DAY DGBB", "BOX PER DAY TRB"]:
+                if s_name in sheets_box:
+                    df_f = sheets_box[s_name].fillna('').astype(str)
+                    for r in range(len(df_f)):
+                        for c in range(len(df_f.columns)):
+                            val = df_f.iloc[r, c].strip().upper()
+                            if not val or val in ['NAN', 'NONE']: continue
+                            match = re.search(r'\(\s*([\d\.]+)\s*/\s*([\d\.]+)\s*\)\s*([\d\.]+)K', val)
+                            if match:
+                                ir_bx, or_bx, qty = safe_float(match.group(1)), safe_float(match.group(2)), safe_float(match.group(3)) * 1000
+                                if ir_bx > 0 and or_bx > 0 and qty > 0:
+                                    fam = parse_family(val[:match.start()].strip())
+                                    if fam:
+                                        box_matrix[normalize_fam_key(fam)] = {'IR': qty/ir_bx, 'OR': qty/or_bx}
+
+            if 'RING PER BOX.' in sheets_box:
+                df_box = sheets_box['RING PER BOX.'].fillna('')
+                for idx in range(1, len(df_box)):
+                    row_vals = list(df_box.iloc[idx])
+                    for i in range(0, len(row_vals) - 2, 3):
+                        fam_raw = str(row_vals[i]).strip()
+                        if not fam_raw: continue
+                        fam = parse_family(fam_raw)
+                        if fam:
+                            or_qty, ir_qty = safe_float(row_vals[i+1]), safe_float(row_vals[i+2])
+                            f_key = normalize_fam_key(fam)
+                            if f_key not in box_matrix: box_matrix[f_key] = {}
+                            if or_qty > 0: box_matrix[f_key]['OR'] = or_qty
+                            if ir_qty > 0: box_matrix[f_key]['IR'] = ir_qty
+            del sheets_box
             gc.collect()
 
-        # ==========================================
-        # 3. PARSE UI BUFFER ENTRIES 
-        # ==========================================
+        # ========================================================
+        # 3. COMPUTE NET BUFFERS & DEMANDS
+        # ========================================================
         buffers_by_fam = {}
         BUFFER_MAP = {
             'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
@@ -186,216 +266,340 @@ def generate_schedule(payload: ScheduleRequest):
         for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
             for key, val in payload.entries.items():
                 if key.startswith(type_prefix + '_'):
-                    suffix = key[len(type_prefix + '_'):]
+                    parts = key.split('_')
+                    if len(parts) < 3: continue
+                    col_channel, sub_ring_type = parts[-2], parts[-1]
+                    
                     fam = parse_family(val)
                     if not fam: continue
-                    
-                    buf_val = safe_float(payload.entries.get(f"{buf_prefix}_{suffix}", 0))
+                    buf_val = safe_float(payload.entries.get(f"{buf_prefix}_{col_channel}_{sub_ring_type}", 0))
                     if buf_val <= 0: continue
                     
-                    if fam not in buffers_by_fam:
-                        buffers_by_fam[fam] = {'CH': {'IR':0, 'OR':0}, 'OD': {'IR':0, 'OR':0}, 'FACE': {'IR':0, 'OR':0}, 'HT': {'IR':0, 'OR':0}}
-                    
-                    sub_col = 'OR' if suffix.endswith('_OR') else 'IR'
-                    buffers_by_fam[fam][stage][sub_col] += buf_val
+                    f_key = normalize_fam_key(fam)
+                    if f_key not in buffers_by_fam:
+                        buffers_by_fam[f_key] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}, 'HT': {'IR': 0.0, 'OR': 0.0}}
+                    buffers_by_fam[f_key][stage][sub_ring_type] += buf_val
 
-        # ==========================================
-        # 4. STAGE DEDUCTIONS (THE PIPELINE)
-        # ==========================================
-        od_req, face_req, ht_req = {}, {}, {}
-
-        for fam, demands in channel_demands.items():
-            rpb_ir = box_matrix.get(fam, {}).get('IR', 100) or 100
-            rpb_or = box_matrix.get(fam, {}).get('OR', 100) or 100
+        face_req, od_req, ht_req = {}, {}, {}
+        for f_key, demands in channel_demands.items():
+            rpb_ir = box_matrix.get(f_key, {}).get('IR', 100.0)
+            rpb_or = box_matrix.get(f_key, {}).get('OR', 100.0)
             
             req_boxes_ir = demands['IR'] / rpb_ir
             req_boxes_or = demands['OR'] / rpb_or
             
-            def get_buf_boxes(stage, p_code, req_boxes, rpb):
-                raw_buf = buffers_by_fam.get(fam, {}).get(stage, {}).get(p_code, 0)
-                if payload.unit_mode == 'Days': return raw_buf * req_boxes
-                elif payload.unit_mode == 'Rings': return raw_buf / rpb
+            def get_buf_boxes(stage, side, base_boxes, rpb_rate):
+                raw_buf = buffers_by_fam.get(f_key, {}).get(stage, {}).get(side, 0)
+                if payload.unit_mode == 'Days': return raw_buf * base_boxes
+                elif payload.unit_mode == 'Rings': return raw_buf / rpb_rate
                 return raw_buf 
                 
             ch_buf_ir = get_buf_boxes('CH', 'IR', req_boxes_ir, rpb_ir)
             ch_buf_or = get_buf_boxes('CH', 'OR', req_boxes_or, rpb_or)
-            
             od_buf_ir = get_buf_boxes('OD', 'IR', req_boxes_ir, rpb_ir)
             od_buf_or = get_buf_boxes('OD', 'OR', req_boxes_or, rpb_or)
-            
             face_buf_ir = get_buf_boxes('FACE', 'IR', req_boxes_ir, rpb_ir)
             face_buf_or = get_buf_boxes('FACE', 'OR', req_boxes_or, rpb_or)
 
-            # Deductions (If no buffer, 100% of demand passes through)
-            net_od_ir = max(0, req_boxes_ir - ch_buf_ir)
-            net_od_or = max(0, req_boxes_or - ch_buf_or)
-            
-            net_face_ir = max(0, net_od_ir - od_buf_ir)
-            net_face_or = max(0, net_od_or - od_buf_or)
-            
-            net_ht_ir = max(0, net_face_ir - face_buf_ir)
-            net_ht_or = max(0, net_face_or - face_buf_or)
+            net_face_ir = max(0.0, req_boxes_ir - face_buf_ir)
+            net_face_or = max(0.0, req_boxes_or - face_buf_or)
+            net_od_ir = max(0.0, req_boxes_ir - od_buf_ir)
+            net_od_or = max(0.0, req_boxes_or - od_buf_or)
+            net_ht_ir = max(0.0, req_boxes_ir - ch_buf_ir)
+            net_ht_or = max(0.0, req_boxes_or - ch_buf_or)
 
-            if net_od_ir > 0 or net_od_or > 0: od_req[fam] = {'IR': net_od_ir, 'OR': net_od_or, 'channel': demands['channel']}
-            if net_face_ir > 0 or net_face_or > 0: face_req[fam] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': demands['channel']}
-            if net_ht_ir > 0 or net_ht_or > 0: ht_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'channel': demands['channel']}
-            
-            # Store raw ring count for HT 
-            if fam in ht_req:
-                ht_req[fam]['rings'] = {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}
+            if net_face_ir > 0 or net_face_or > 0: 
+                face_req[f_key] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': demands['channel'], 'raw_fam': demands['raw_fam']}
+            if net_od_ir > 0 or net_od_or > 0: 
+                od_req[f_key] = {'IR': net_od_ir, 'OR': net_od_or, 'channel': demands['channel'], 'raw_fam': demands['raw_fam']}
+            if net_ht_ir > 0 or net_ht_or > 0: 
+                ht_req[f_key] = {'IR': net_ht_ir, 'OR': net_ht_or, 'rings': {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}, 'channel': demands['channel'], 'raw_fam': demands['raw_fam']}
 
-        debug_logs.append(f"Net Pipeline Demand -> OD: {len(od_req)} | FACE: {len(face_req)} | HT: {len(ht_req)}")
-
-        # ==========================================
-        # 5. READ MACHINES & FURNACES
-        # ==========================================
+        # ========================================================
+        # 4. PARSE MACHINE PRODUCTION DATA & STRICT WEIGHTS
+        # ========================================================
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
-        xls_prod, logs3 = load_excel_fast(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
+        sheets_prod, logs3 = load_excel_all_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
         
-        if xls_prod:
-            if 'WEIGHTS' in xls_prod.sheet_names:
-                df_w = pd.read_excel(xls_prod, sheet_name='WEIGHTS')
-                for _, r in df_w.iterrows():
-                    if pd.notna(r.get('Type')):
-                        part_code = 'OR' if str(r.get('ir/or')) == '100' else 'IR'
-                        fam = parse_family(r.get('Type'))
-                        if fam: weight_matrix[f"{fam}_{part_code}"] = safe_float(r.get('weight per ring', 0.1))
+        if sheets_prod:
+            # 4a. EXACT WEIGHTS PARSER (No default values. Strictly uses Excel Types, IR/OR, Weight Per Ring)
+            if 'WEIGHTS' in sheets_prod:
+                df_w = sheets_prod['WEIGHTS'].fillna('').astype(str)
+                type_c, iror_c, wt_c = -1, -1, -1
+                
+                # Locate columns strictly by your exact headers
+                for r in range(min(15, len(df_w))):
+                    row_vals = [x.strip().upper() for x in df_w.iloc[r].values]
+                    for c, val in enumerate(row_vals):
+                        if 'TYPE' in val: type_c = c
+                        elif 'IR/OR' in val.replace(' ', '') or 'IR' in val or 'OR' in val: iror_c = c
+                        elif 'WEIGHT' in val: wt_c = c
+                    
+                    if type_c != -1 and iror_c != -1 and wt_c != -1:
+                        for dr in range(r + 1, len(df_w)):
+                            r_type = df_w.iloc[dr, type_c].strip()
+                            r_iror = df_w.iloc[dr, iror_c].strip()
+                            r_wt = df_w.iloc[dr, wt_c].strip()
+                            
+                            if not r_type or r_type == 'NAN': continue
+                            fam = parse_family(r_type)
+                            if not fam: continue
+                            
+                            p_code = None
+                            if '100' in r_iror or 'OR' in r_iror or '010' in r_iror: p_code = 'OR'
+                            elif '120' in r_iror or 'IR' in r_iror: p_code = 'IR'
+                            
+                            wt_val = safe_float(r_wt)
+                            if p_code and wt_val > 0:
+                                weight_matrix[f"{normalize_fam_key(fam)}_{p_code}"] = wt_val
+                        break
 
-            if 'Furnace Type Flexibility' in xls_prod.sheet_names:
-                df_f = pd.read_excel(xls_prod, sheet_name='Furnace Type Flexibility')
-                for _, r in df_f.iterrows():
-                    if pd.notna(r.iloc[0]): 
-                        fam = parse_family(r.iloc[0])
-                        if fam: furnace_map[fam] = str(r.iloc[1]).strip()
+            # 4b. FURNACE MAP PARSER
+            fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper()), None)
+            if fur_sheet_key:
+                df_f = sheets_prod[fur_sheet_key]
+                df_f.columns = [str(x).strip().upper() for x in df_f.iloc[0]]
+                for idx, r in df_f.iloc[1:].iterrows():
+                    fam = parse_family(r.get('TYPE', r.iloc[0] if len(r) > 0 else ''))
+                    if fam: 
+                        fur_col = next((c for c in df_f.columns if 'FURNACE' in c), None)
+                        fur_raw = str(r[fur_col]) if fur_col else str(r.iloc[1] if len(r) > 1 else '')
+                        furnaces = [f.strip() for f in re.split(r'[,/|]', fur_raw) if f.strip() and f.strip().upper() != 'NAN']
+                        if furnaces: furnace_map[normalize_fam_key(fam)] = furnaces
             
-            for sheet in xls_prod.sheet_names:
-                if sheet in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.']: continue
-                df_m = pd.read_excel(xls_prod, sheet_name=sheet, header=None)
-                str_matrix = df_m.fillna('').astype(str).values
-                for r in range(str_matrix.shape[0]):
-                    row_text = " ".join(str_matrix[r]).upper()
-                    if 'MACHINE' in row_text:
-                        cells = [c.strip() for c in str_matrix[r] if c.strip()]
-                        m_num = cells[1] if len(cells) > 1 else f"Unknown_{r}"
-                        
+            # 4c. EXHAUSTIVE GRINDING RATE PARSER
+            for sheet_name, df_m in sheets_prod.items():
+                if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.']: continue
+                
+                vals = df_m.values
+                num_rows = vals.shape[0]
+                
+                for r in range(num_rows):
+                    row = vals[r]
+                    has_machine = False
+                    row_cells = [str(val).strip() for val in row if pd.notna(val) and val != '']
+                    
+                    if any('MACHINE' in c.upper() or 'M/C' in c.upper() for c in row_cells):
+                        m_num = row_cells[1] if len(row_cells) > 1 else f"MC_{r}"
                         m_type = "UNKNOWN"
-                        if "FACE" in row_text: m_type = "FACE"
-                        elif "OD" in row_text: m_type = "OD"
                         
+                        if "FACE" in sheet_name.upper() or "DDS" in m_num.upper() or "BG" in m_num.upper(): m_type = "FACE"
+                        elif "OD" in sheet_name.upper() or "CL" in m_num.upper() or "CELL" in m_num.upper() or "+" in m_num: m_type = "OD"
+                            
                         if m_type in ['FACE', 'OD']:
                             if m_num not in machines_data[m_type]:
-                                machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 16.0}
-                            
-                            # Hunt for headers
-                            header_idx = -1
-                            for offset in range(1, 6):
-                                if r + offset >= str_matrix.shape[0]: break
-                                h_row = [str(x).strip().upper() for x in df_m.iloc[r + offset].values]
-                                if 'TYPE' in h_row:
-                                    header_idx = r + offset
-                                    break
-                            
-                            if header_idx != -1:
-                                headers = [str(x).strip().upper() for x in df_m.iloc[header_idx].values]
-                                block = df_m.iloc[header_idx+1 : header_idx+20].copy()
-                                block.columns = headers
+                                machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 24.0}
                                 
-                                if 'TYPE' in block.columns:
-                                    for _, row in block.dropna(subset=['TYPE']).iterrows():
-                                        fam = parse_family(row['TYPE'])
-                                        if not fam: continue
+                            type_c, part_c, rate_c, rpb_c = -1, -1, -1, -1
+                            rate_is_rings = False
+                            data_start_r = -1
+                            
+                            for offset in range(1, 10):
+                                if r + offset >= num_rows: break
+                                scan_row = [str(x).strip().upper() for x in vals[r + offset]]
+                                
+                                for idx, val in enumerate(scan_row):
+                                    if 'TYPE' in val or 'BEARING' in val: type_c = idx
+                                    elif 'PART' in val: part_c = idx
+                                    elif 'BOXES/HR' in val or 'BOX/HR' in val or 'BOXES/HOUR' in val: 
+                                        rate_c, rate_is_rings = idx, False
+                                    elif 'STD' in val or 'RINGS/HR' in val or 'RINGS / HR' in val:
+                                        if rate_c == -1: rate_c, rate_is_rings = idx, True
+                                    elif 'RING' in val and 'BOX' in val: rpb_c = idx
+                                
+                                if type_c != -1 and rate_c != -1:
+                                    data_start_r = r + offset + 1
+                                    break
+                                    
+                            if data_start_r != -1:
+                                for dr in range(data_start_r, min(data_start_r + 50, num_rows)): 
+                                    b_row = vals[dr]
+                                    if type_c >= len(b_row) or pd.isna(b_row[type_c]) or str(b_row[type_c]).strip() == '': continue
                                         
-                                        p_code = 'OR' if '100' in str(row.get('PART', '')) else 'IR'
-                                        boxes_hr = safe_float(row.get('BOXES/HR', 0))
-                                        if boxes_hr == 0 and 'STD/HR' in block.columns:
-                                            rpb = safe_float(row.get('RINGS/BOX', 100)) or 100
-                                            boxes_hr = safe_float(row.get('STD/HR')) / rpb
-                                            
-                                        if boxes_hr > 0:
-                                            machines_data[m_type][m_num]['rates'][f"{fam}_{p_code}"] = boxes_hr
-
-            del xls_prod
+                                    fam = parse_family(str(b_row[type_c]).strip())
+                                    if not fam: continue
+                                    
+                                    part_val = str(b_row[part_c]).strip().upper() if part_c != -1 and part_c < len(b_row) else ""
+                                    p_codes = []
+                                    if '100' in part_val or 'OR' in part_val or '010' in part_val: p_codes.append('OR')
+                                    if '120' in part_val or 'IR' in part_val: p_codes.append('IR')
+                                    if not p_codes: p_codes = ['IR', 'OR']
+                                    
+                                    rate_val = safe_float(b_row[rate_c]) if rate_c != -1 and rate_c < len(b_row) else 0.0
+                                    
+                                    if rate_val > 0:
+                                        f_key = normalize_fam_key(fam)
+                                        if rate_is_rings:
+                                            rpb_val = safe_float(b_row[rpb_c]) if rpb_c != -1 and rpb_c < len(b_row) else 0.0
+                                            for pc in p_codes:
+                                                final_rpb = rpb_val if rpb_val > 0 else box_matrix.get(f_key, {}).get(pc, 100.0)
+                                                machines_data[m_type][m_num]['rates'][f"{f_key}_{pc}"] = rate_val / final_rpb
+                                        else:
+                                            for pc in p_codes:
+                                                machines_data[m_type][m_num]['rates'][f"{f_key}_{pc}"] = rate_val
+            del sheets_prod
             gc.collect()
 
-        # ==========================================
-        # 6. GRINDING ALLOCATION
-        # ==========================================
-        def allocate(m_type, demands_dict):
-            allocated_result = []
+        # ========================================================
+        # 5. GRINDING ALLOCATION
+        # ========================================================
+        def allocate_grinding(m_type, demands_dict):
+            allocated_result = {m_num: {"machine": m_num, "rows": []} for m_num in machines_data.get(m_type, {})}
             sorted_fams = sorted(demands_dict.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True)
-            working_demands = {fam: {'IR': data['IR'], 'OR': data['OR']} for fam, data in sorted_fams}
             
-            for m_num, m_info in machines_data.get(m_type, {}).items():
-                rates = m_info.get('rates', {})
-                selected_rows = []
-                hours_left = m_info['avail_hours']
-                
-                for fam, _ in sorted_fams:
-                    if hours_left <= 0 or len(selected_rows) >= 2: break
-                    for p_code in ['IR', 'OR']:
-                        boxes_needed = working_demands[fam][p_code]
-                        if boxes_needed <= 0: continue
-                        
-                        part_key = f"{fam}_{p_code}"
-                        if part_key in rates and rates[part_key] > 0:
-                            rate = rates[part_key]
+            machine_clocks = {m_num: m_info['avail_hours'] for m_num, m_info in machines_data.get(m_type, {}).items()}
+            machine_last_fam = {m_num: None for m_num in machines_data.get(m_type, {})}
+            
+            for f_key, data in sorted_fams:
+                ch_normalized = normalize_channel(data['channel'])
+                for p_code in ['IR', 'OR']:
+                    if ch_normalized in OPERATION_EXCLUSIONS and p_code in OPERATION_EXCLUSIONS[ch_normalized].get(m_type, []):
+                        continue 
                             
-                            setup_time = 0.5
-                            if hours_left <= setup_time: continue
-                            hours_left -= setup_time
+                    boxes_needed = data[p_code]
+                    if boxes_needed <= 0: continue
+                    
+                    candidates = []
+                    for m_num, m_info in machines_data.get(m_type, {}).items():
+                        rate = m_info.get('rates', {}).get(f"{f_key}_{p_code}", 0.0)
+                        if rate > 0 and machine_clocks[m_num] > 0:
+                            candidates.append((m_num, rate))
+                    
+                    placed = False
+                    if candidates:
+                        candidates.sort(key=lambda x: x[1], reverse=True) 
+                        for m_num, rate in candidates:
+                            if boxes_needed <= 0: break
+                            if machine_clocks[m_num] <= 0: continue
                             
+                            hours_left = machine_clocks[m_num]
+                            current_fam = machine_last_fam[m_num]
+                            setup_cost = 2.0 if (current_fam and current_fam != f_key) else 0.0
+                            
+                            if hours_left <= setup_cost:
+                                machine_clocks[m_num] = 0.0
+                                continue
+                                
+                            hours_left -= setup_cost
                             time_required = boxes_needed / rate
+                            
                             if time_required <= hours_left:
-                                working_demands[fam][p_code] = 0.0
+                                boxes_needed = 0.0
                                 hours_left -= time_required
                             else:
-                                working_demands[fam][p_code] -= (hours_left * rate)
+                                boxes_needed -= (hours_left * rate)
                                 hours_left = 0.0
                                 
-                            selected_rows.append({
-                                "part": f"{fam} {p_code}",
+                            machine_clocks[m_num] = hours_left
+                            machine_last_fam[m_num] = f_key
+                            placed = True
+                            
+                            allocated_result[m_num]["rows"].append({
+                                "part": f"{data['raw_fam']} {p_code}",
                                 "std_box": str(round(rate, 1)),
-                                "p_2nd": "1" if len(selected_rows) == 0 else "",
-                                "p_3rd": "1" if len(selected_rows) == 1 else "",
+                                "p_2nd": "1" if len(allocated_result[m_num]["rows"]) == 0 else "",
+                                "p_3rd": "1" if len(allocated_result[m_num]["rows"]) == 1 else "",
                                 "alert": False,
-                                "p_label": f"P{len(selected_rows) + 1}"
+                                "p_label": f"P{len(allocated_result[m_num]['rows']) + 1}"
                             })
-                            if hours_left <= 0 or len(selected_rows) >= 2: break
+                    
+                    if boxes_needed > 0.5:
+                        reason = "Capacity Exhausted" if placed else "Missing Machine Rate (0.0)"
+                        unscheduled.append({ "stage": m_type, "part": f"{data['raw_fam']} {p_code}", "missed_boxes": f"{round(boxes_needed, 1)} boxes - {reason}" })
+
+            return list(allocated_result.values())
+
+        final_face = allocate_grinding('FACE', face_req)
+        final_od = allocate_grinding('OD', od_req)
+
+        # ========================================================
+        # 6. HEAT TREATMENT ROUTING (Strict Sheet Data ONLY)
+        # ========================================================
+        furnace_clocks = {f: {"avail_hours": 20.5, "current_fam": None, "rows": [], "capacity": cap} for f, cap in FURNACE_SPECS.items()}
+
+        for f_key, data in sorted(ht_req.items(), key=lambda x: x[1]['rings']['IR'] + x[1]['rings']['OR'], reverse=True):
+            for p_code, total_qty in [('IR', data['rings']['IR']), ('OR', data['rings']['OR'])]:
+                if total_qty <= 0: continue
                 
-                if selected_rows:
-                    allocated_result.append({"machine": m_num, "rows": selected_rows})
-            return allocated_result
+                # Zero Fake Data: Fetch exactly from parsed WEIGHTS sheet
+                unit_weight = weight_matrix.get(f"{f_key}_{p_code}", 0.0)
+                
+                if unit_weight == 0.0:
+                    unscheduled.append({ "stage": "HT", "part": f"{data['raw_fam']} {p_code}", "missed_boxes": "Missing Weight Data in Sheet" })
+                    continue
+                
+                preferred_furnaces = furnace_map.get(f_key, [])
+                matched_furnaces = []
+                for pf in preferred_furnaces:
+                    for f_name in FURNACE_SPECS.keys():
+                        if pf.upper()[:4] in f_name.upper(): matched_furnaces.append(f_name)
+                
+                if not matched_furnaces: matched_furnaces = list(FURNACE_SPECS.keys())
+                
+                remaining_qty = total_qty
+                
+                while remaining_qty > 0.5:
+                    best_furnace = None
+                    best_avail = -1
+                    
+                    for f_name in matched_furnaces:
+                        ctx = furnace_clocks[f_name]
+                        setup = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != f_key) else 0.0
+                        if (ctx["avail_hours"] - setup) > 0 and (ctx["avail_hours"] - setup) > best_avail:
+                            best_avail = ctx["avail_hours"] - setup
+                            best_furnace = f_name
+                            
+                    if not best_furnace:
+                        for f_name in FURNACE_SPECS.keys():
+                            if f_name in matched_furnaces: continue
+                            ctx = furnace_clocks[f_name]
+                            setup = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != f_key) else 0.0
+                            if (ctx["avail_hours"] - setup) > 0 and (ctx["avail_hours"] - setup) > best_avail:
+                                best_avail = ctx["avail_hours"] - setup
+                                best_furnace = f_name
+                    
+                    if not best_furnace:
+                        unscheduled.append({ "stage": "HT", "part": f"{data['raw_fam']} {p_code}", "missed_boxes": "Capacity Exceeded" })
+                        break 
+                        
+                    ctx = furnace_clocks[best_furnace]
+                    kg_per_hr = FURNACE_SPECS[best_furnace]
+                    setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != f_key) else 0.0
+                    
+                    remaining_weight_kg = remaining_qty * unit_weight
+                    time_needed = remaining_weight_kg / kg_per_hr
+                    
+                    if time_needed <= (ctx["avail_hours"] - setup_penalty):
+                        ctx["avail_hours"] -= (time_needed + setup_penalty)
+                        ctx["current_fam"] = f_key
+                        ctx["rows"].append({
+                            "part": f"{data['raw_fam']}-{p_code}", 
+                            "qty": str(int(remaining_qty)), 
+                            "cha": data['channel'],
+                            "rate": f"{round(remaining_weight_kg, 1)} kg",
+                            "alert": False 
+                        })
+                        remaining_qty = 0
+                    else:
+                        max_weight = (ctx["avail_hours"] - setup_penalty) * kg_per_hr
+                        max_qty = max_weight / unit_weight
+                        
+                        ctx["avail_hours"] = 0.0
+                        ctx["current_fam"] = f_key
+                        ctx["rows"].append({
+                            "part": f"{data['raw_fam']}-{p_code}", 
+                            "qty": str(int(max_qty)), 
+                            "cha": data['channel'],
+                            "rate": f"{round(max_weight, 1)} kg",
+                            "alert": False 
+                        })
+                        remaining_qty -= max_qty
 
-        final_face = allocate('FACE', face_req)
-        final_od = allocate('OD', od_req)
-
-        # ==========================================
-        # 7. HEAT TREATMENT ALLOCATION
-        # ==========================================
-        result_ht = {}
-        for fam, data in ht_req.items():
-            rings_ir = data['rings']['IR']
-            rings_or = data['rings']['OR']
-            if rings_ir <= 0 and rings_or <= 0: continue
-            
-            fur = furnace_map.get(fam, "AICHELIN.(896)")
-            if fur not in result_ht: result_ht[fur] = []
-            
-            total_rings = rings_ir + rings_or
-            w_ir = weight_matrix.get(f"{fam}_IR", 0.1)
-            w_or = weight_matrix.get(f"{fam}_OR", 0.1)
-            total_weight = (rings_ir * w_ir) + (rings_or * w_or)
-            
-            result_ht[fur].append({
-                "part": fam,
-                "qty": str(int(total_rings)),
-                "cha": data['channel'],
-                "rate": str(round(total_weight, 2)),
-                "alert": False
-            })
-
-        ht_formatted = [{"furnace": fur, "capacity": "500", "rows": items[:5]} for fur, items in result_ht.items()]
+        ht_formatted = [
+            {"furnace": fur, "capacity": f"Total Cap: {int(f_data['capacity'])} kg/hr", "rows": f_data["rows"]}
+            for fur, f_data in furnace_clocks.items()
+        ]
 
         return {
             "status": "success",
@@ -403,10 +607,10 @@ def generate_schedule(payload: ScheduleRequest):
             "data": {
                 "face_grinding": final_face,
                 "od_grinding": final_od,
-                "heat_treatment": ht_formatted
+                "heat_treatment": ht_formatted,
+                "unscheduled": unscheduled
             }
         }
     except Exception as e:
         import traceback
-        debug_logs.append(f"CRITICAL ERROR: {traceback.format_exc()}")
-        return {"status": "error", "debug_logs": debug_logs, "detail": str(e)}
+        return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}

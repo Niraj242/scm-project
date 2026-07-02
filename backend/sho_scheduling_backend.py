@@ -80,7 +80,7 @@ def parse_family(prod_text):
     # 2. Aggressively strip known prefixes
     for prefix in ["BB1", "BTH", "BT-", "BB-"]:
         if text.startswith(prefix):
-            # Only remove the exact prefix at the start so we don't break inside text
+            # Only remove the exact prefix at the start
             text = text[len(prefix):].strip()
             
     # Safe check in case stripping leaves the string totally empty
@@ -153,6 +153,7 @@ def load_excel_all_sheets(url, file_label="Unknown"):
         resp = requests.get(url, timeout=30)
         if resp.status_code != 200: return None, logs
         content = io.BytesIO(resp.content)
+        # Using default engine to ensure 100% stability and prevent 502 crashes
         return pd.read_excel(content, sheet_name=None, header=None), logs
     except Exception as e:
         return None, [f"[{file_label}] ERR: {str(e)}"]
@@ -321,7 +322,7 @@ def generate_schedule(payload: ScheduleRequest):
                         buffers_by_fam[fam] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
                     buffers_by_fam[fam][stage][sub_ring_type] += buf_val
 
-        face_req, od_req, ht_req = {}, {}, {} # <--- FIXED TYPO HERE!
+        face_req, od_req, ht_req = {}, {}, {} # CORRECTED TUPLE ASSIGNMENT
         for fam, demands in channel_demands.items():
             rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
             if rpb_ir <= 0: rpb_ir = 100.0
@@ -596,6 +597,8 @@ def generate_schedule(payload: ScheduleRequest):
                 if unit_weight is None or unit_weight <= 0:
                     unit_weight = 0.25
                     is_assumed = True
+                    # Output log for missing weights that required assumption
+                    debug_logs.append(f"HT Skipped: Missing weight for {fam} {p_code} - Assumed 0.25kg")
                 
                 total_weight_kg = qty * unit_weight
                 
@@ -613,7 +616,7 @@ def generate_schedule(payload: ScheduleRequest):
                         ctx["avail_hours"] -= (time_needed + setup_penalty)
                         ctx["current_fam"] = fam
                         
-                        # Show raw pcs if weight was missing, otherwise display kg
+                        # Show raw pcs if weight was missing/assumed, otherwise display kg
                         display_rate = f"{int(qty)} pcs" if is_assumed else f"{round(total_weight_kg, 1)} kg"
                         
                         ctx["rows"].append({

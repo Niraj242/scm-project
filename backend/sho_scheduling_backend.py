@@ -222,7 +222,6 @@ def generate_schedule(payload: ScheduleRequest):
         box_matrix = {}
         sheets_box, _ = load_excel_all_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
         if sheets_box:
-            # Fallback parsing first (e.g. BB1 4719 (19/40) 10K)
             for s_name in ["BOX PER DAY DGBB", "BOX PER DAY TRB"]:
                 if s_name in sheets_box:
                     df_f = sheets_box[s_name].fillna('').astype(str)
@@ -241,7 +240,6 @@ def generate_schedule(payload: ScheduleRequest):
                                     if fam:
                                         box_matrix[fam] = {'IR': qty/ir_bx, 'OR': qty/or_bx}
 
-            # Primary sheet overwrites fallbacks
             if 'RING PER BOX.' in sheets_box:
                 df_box = sheets_box['RING PER BOX.'].fillna('')
                 for idx in range(1, len(df_box)):
@@ -321,20 +319,49 @@ def generate_schedule(payload: ScheduleRequest):
             if net_ht_ir > 0 or net_ht_or > 0: 
                 ht_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'rings': {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}, 'channel': demands['channel']}
 
-        # 4. PARSE MACHINE PRODUCTION DATA (Robust rate matching)
+        # 4. PARSE MACHINE PRODUCTION DATA
         weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
         sheets_prod, logs3 = load_excel_all_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
         
         if sheets_prod:
+            # --- DYNAMIC WEIGHTS PARSER (FIXED) ---
             if 'WEIGHTS' in sheets_prod:
-                df_w = sheets_prod['WEIGHTS']
-                df_w.columns = [str(x).strip().upper() for x in df_w.iloc[0]]
-                for idx, r in df_w.iloc[1:].iterrows():
-                    if pd.notna(r.get('TYPE')):
-                        part_code = 'OR' if str(r.get('IR/OR')) == '100' else 'IR'
-                        fam = parse_family(r.get('TYPE'))
-                        if fam: weight_matrix[f"{fam}_{part_code}"] = safe_float(r.get('WEIGHT PER RING', 0.15))
+                df_w = sheets_prod['WEIGHTS'].fillna('').astype(str)
+                header_r = -1
+                type_c, iror_c, wt_c = -1, -1, -1
+                
+                # Scan down to find exactly where the headers actually are
+                for r in range(min(15, len(df_w))):
+                    row_vals = [x.strip().upper() for x in df_w.iloc[r].values]
+                    for c, val in enumerate(row_vals):
+                        if 'TYPE' in val: type_c = c
+                        elif 'IR/OR' in val or 'IR' in val or 'OR' in val: iror_c = c
+                        elif 'WEIGHT' in val: wt_c = c
+                    if type_c != -1 and iror_c != -1 and wt_c != -1:
+                        header_r = r
+                        break
+                
+                if header_r != -1:
+                    for r in range(header_r + 1, len(df_w)):
+                        r_type = df_w.iloc[r, type_c].strip()
+                        r_iror = df_w.iloc[r, iror_c].strip()
+                        r_wt = df_w.iloc[r, wt_c].strip()
+                        
+                        if not r_type or r_type == 'NAN': continue
+                        fam = parse_family(r_type)
+                        if not fam: continue
+                        
+                        # Properly parse 100 and 120
+                        p_code = None
+                        if '100' in r_iror or 'OR' in r_iror or '010' in r_iror: p_code = 'OR'
+                        elif '120' in r_iror or 'IR' in r_iror: p_code = 'IR'
+                        
+                        wt_val = safe_float(r_wt)
+                        if p_code and wt_val > 0:
+                            weight_matrix[f"{fam}_{p_code}"] = wt_val
+                            fam_key = normalize_fam_key(fam)
+                            weight_matrix[f"{fam_key}_{p_code}"] = wt_val
 
             fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper()), None)
             if fur_sheet_key:
@@ -514,7 +541,7 @@ def generate_schedule(payload: ScheduleRequest):
         final_face = allocate_grinding('FACE', face_req)
         final_od = allocate_grinding('OD', od_req)
 
-        # 6. HEAT TREATMENT ROUTING (Chunking Logic)
+        # 6. HEAT TREATMENT ROUTING
         furnace_clocks = {f: {"avail_hours": 20.5, "current_fam": None, "rows": [], "capacity": cap} for f, cap in FURNACE_SPECS.items()}
 
         for fam, data in sorted(ht_req.items(), key=lambda x: x[1]['rings']['IR'] + x[1]['rings']['OR'], reverse=True):
@@ -522,8 +549,9 @@ def generate_schedule(payload: ScheduleRequest):
             rings_or = data['rings']['OR']
             if rings_ir <= 0 and rings_or <= 0: continue
             
-            w_ir = weight_matrix.get(f"{fam}_IR", 0.15)
-            w_or = weight_matrix.get(f"{fam}_OR", 0.15)
+            # Fetch weights properly parsed from WEIGHTS sheet
+            w_ir = weight_matrix.get(f"{fam}_IR", weight_matrix.get(f"{normalize_fam_key(fam)}_IR", 0.15))
+            w_or = weight_matrix.get(f"{fam}_OR", weight_matrix.get(f"{normalize_fam_key(fam)}_OR", 0.15))
             
             for p_code, total_qty in [('IR', rings_ir), ('OR', rings_or)]:
                 if total_qty <= 0: continue
@@ -567,6 +595,7 @@ def generate_schedule(payload: ScheduleRequest):
                     kg_per_hr = FURNACE_SPECS[best_furnace]
                     setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != fam) else 0.0
                     
+                    # Convert Number of Rings to exact KG Weight
                     remaining_weight_kg = remaining_qty * unit_weight
                     time_needed = remaining_weight_kg / kg_per_hr
                     

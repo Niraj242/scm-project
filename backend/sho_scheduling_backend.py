@@ -18,8 +18,7 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 FAM_REGEX = re.compile(r'(\d{3,5})')
 
-# Hardcoded Matrix from User Chart Image (image_c7027f.png)
-# Channels mapped with banned operations. If "No", they appear here to be skipped.
+# Hardcoded Matrix from User Chart Image
 OPERATION_EXCLUSIONS = {
     '1': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
     '2': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
@@ -81,7 +80,11 @@ def parse_family(prod_text):
     # 2. Aggressively strip known prefixes
     for prefix in ["BB1", "BTH", "BT-", "BB-"]:
         if text.startswith(prefix):
-            text = text.replace(prefix, "").strip()
+            # Only remove the exact prefix at the start so we don't break inside text
+            text = text[len(prefix):].strip()
+            
+    # Safe check in case stripping leaves the string totally empty
+    if not text: return None
             
     if "HUB" in text:
         match_hub = re.search(r'(T?\s*HUB\s*\d+\.?\d*)', text)
@@ -97,7 +100,8 @@ def parse_family(prod_text):
     words = t_norm.split()
     
     match = FAM_REGEX.search(text)
-    base = match.group(1) if match else text.split()[0].split('-')[0]
+    # Safe fallback if split fails for some unforeseen string condition
+    base = match.group(1) if match else (text.split()[0].split('-')[0] if text.split() else text)
     
     if "BT" in words or text.startswith("BT") or " BT" in text: base = f"BT-{base}"
     elif "BB" in words or text.startswith("BB") or " BB" in text: base = f"BB-{base}"
@@ -149,10 +153,7 @@ def load_excel_all_sheets(url, file_label="Unknown"):
         resp = requests.get(url, timeout=30)
         if resp.status_code != 200: return None, logs
         content = io.BytesIO(resp.content)
-        try:
-            return pd.read_excel(content, sheet_name=None, header=None, engine='calamine'), logs
-        except Exception:
-            return pd.read_excel(content, sheet_name=None, header=None), logs
+        return pd.read_excel(content, sheet_name=None, header=None), logs
     except Exception as e:
         return None, [f"[{file_label}] ERR: {str(e)}"]
 
@@ -320,7 +321,7 @@ def generate_schedule(payload: ScheduleRequest):
                         buffers_by_fam[fam] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
                     buffers_by_fam[fam][stage][sub_ring_type] += buf_val
 
-        face_req, od_req, ht_req = {}, {}
+        face_req, od_req, ht_req = {}, {}, {} # <--- FIXED TYPO HERE!
         for fam, demands in channel_demands.items():
             rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
             if rpb_ir <= 0: rpb_ir = 100.0

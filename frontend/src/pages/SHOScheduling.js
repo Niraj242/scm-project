@@ -9,7 +9,6 @@ const SHOScheduling = () => {
   const [unitMode, setUnitMode] = useState('Days');
   
   const [tableData, setTableData] = useState({});
-  const [unlockedBlocks, setUnlockedBlocks] = useState([]); 
   const [isSaving, setIsSaving] = useState(false);
   
   const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().split('T')[0]);
@@ -23,10 +22,17 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
+  // Hardcoded permanent blocks based on operations matrix
   const DEFAULT_BLOCKED = {
-    DGBB: { OD: { CH01: ['IR'], CH03: ['IR', 'OR'], SABB: ['OR'], CH07: ['IR', 'OR'], CH11: ['IR', 'OR'] }, FACE: { CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], SABB: ['IR', 'OR'], CH07: ['IR', 'OR'], CH11: ['IR', 'OR'] } },
-    TRB: { OD: { 'T 3': ['IR', 'OR'], 'T 5': ['IR', 'OR'], 'T 6': ['IR', 'OR'], 'T 9': ['IR', 'OR'], 'T10': ['IR', 'OR'] }, FACE: { 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'], 'T10': ['IR', 'OR'] } },
-    HUB: { OD: { 'HUB 1.1': ['IR', 'OR'], 'T HUB 1.1': ['IR', 'OR'] }, FACE: {} }
+    DGBB: { 
+        OD: { CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH05: ['IR'], CH08: ['IR'], CH11: ['IR'] }, 
+        FACE: { CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'] } 
+    },
+    TRB: { 
+        OD: { 'T 1': ['IR'], 'T 2': ['IR'], 'T 3': ['IR'], 'T 4': ['IR'], 'T 5': ['IR'], 'T 6': ['IR'], 'T 7': ['IR'], 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'], 'T10': ['IR'] }, 
+        FACE: { 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'] } 
+    },
+    HUB: { OD: {}, FACE: {} }
   };
 
   const ROWS = [
@@ -58,22 +64,16 @@ const SHOScheduling = () => {
     if (savedData) {
       const parsed = JSON.parse(savedData);
       setTableData(parsed.entries || {});
-      setUnlockedBlocks(parsed.unlocked || []);
     } else {
       setTableData({});
-      setUnlockedBlocks([]);
     }
   }, [sector, bufferDate]);
 
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
-  const unlockBlock = (section, col, subCol) => {
-    const blockKey = `${sector}_${section}_${col}_${subCol}`;
-    if (!unlockedBlocks.includes(blockKey)) setUnlockedBlocks([...unlockedBlocks, blockKey]);
-  };
 
   const saveBufferData = () => {
     setIsSaving(true);
-    localStorage.setItem(`sho_db_${sector}_${bufferDate}`, JSON.stringify({ entries: tableData, unlocked: unlockedBlocks }));
+    localStorage.setItem(`sho_db_${sector}_${bufferDate}`, JSON.stringify({ entries: tableData }));
     setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
   };
 
@@ -84,7 +84,7 @@ const SHOScheduling = () => {
       const response = await fetch(`${API}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: unlockedBlocks })
+        body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: [] })
       });
       const result = await response.json();
       
@@ -107,7 +107,7 @@ const SHOScheduling = () => {
 
   const columns = SECTOR_COLUMNS[sector];
   const totalCols = (columns.length * 2) + 1;
-  const isCellBlocked = (section, col, subCol) => DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol) && !unlockedBlocks.includes(`${sector}_${section}_${col}_${subCol}`);
+  const isCellBlocked = (section, col, subCol) => DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol);
 
   const htData = scheduleData?.heat_treatment || [];
   const midPoint = Math.max(1, Math.ceil(htData.length / 2));
@@ -182,12 +182,12 @@ const SHOScheduling = () => {
                       return (
                         <React.Fragment key={`${row.key}-${col}`}>
                           {irBlocked ? (
-                            row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block" onDoubleClick={() => unlockBlock(row.section, col, 'IR')}></td> : null
+                            row.sectionIndex === 0 ? <td rowSpan={4} className="solid-blocked-cell" style={{backgroundColor: '#b3b3b3'}}></td> : null
                           ) : (
                             <td className="input-cell"><input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/></td>
                           )}
                           {orBlocked ? (
-                            row.sectionIndex === 0 ? <td rowSpan={4} className="disabled-block border-thick-right" onDoubleClick={() => unlockBlock(row.section, col, 'OR')}></td> : null
+                            row.sectionIndex === 0 ? <td rowSpan={4} className="solid-blocked-cell border-thick-right" style={{backgroundColor: '#b3b3b3'}}></td> : null
                           ) : (
                             <td className="input-cell border-thick-right"><input type="text" value={tableData[`${row.key}_${col}_OR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'OR', e.target.value)}/></td>
                           )}
@@ -232,25 +232,29 @@ const SHOScheduling = () => {
                 <div className="schedule-column">
                   <table className="img-table">
                     <thead>
-                      <tr><th colSpan="4" className="col-main-title">Face Grinding</th></tr>
+                      <tr><th colSpan="6" className="col-main-title">Face Grinding</th></tr>
                       <tr className="sub-header">
-                        <th rowSpan="2" className="empty-corner"></th>
-                        <th rowSpan="2">STD BOX</th>
+                        <th rowSpan="2" className="empty-corner">PART</th>
+                        <th rowSpan="2">QTY (Rings)</th>
+                        <th rowSpan="2">BOX/Q</th>
+                        <th rowSpan="2">TIMING (Hrs)</th>
                         <th colSpan="2">Shift Priority</th>
                       </tr>
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
                       {(!scheduleData.face_grinding || scheduleData.face_grinding.length === 0) && (
-                        <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
+                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
                       )}
                       {scheduleData.face_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
-                          <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
+                          <tr className="machine-name-row"><td colSpan="6">{m.machine}</td></tr>
                           {m.rows.map((r, i) => (
                             <tr key={i}>
-                              <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
-                              <td className="center-text">{r.std_box}</td>
+                              <td className="part-name">{r.part}</td>
+                              <td className="center-text" style={{fontWeight: 'bold', color: '#0056b3'}}>{r.qty}</td>
+                              <td className="center-text font-bold">{r.std_box}</td>
+                              <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
                               <td className="center-text">{r.p_2nd}</td>
                               <td className="center-text">{r.p_3rd}</td>
                             </tr>
@@ -265,27 +269,29 @@ const SHOScheduling = () => {
                 <div className="schedule-column">
                   <table className="img-table">
                     <thead>
-                      <tr><th colSpan="4" className="col-main-title">OD Grinding</th></tr>
+                      <tr><th colSpan="6" className="col-main-title">OD Grinding</th></tr>
                       <tr className="sub-header">
-                        <th rowSpan="2" className="empty-corner"></th>
-                        <th rowSpan="2">STD BOX</th>
+                        <th rowSpan="2" className="empty-corner">PART</th>
+                        <th rowSpan="2">QTY (Rings)</th>
+                        <th rowSpan="2">BOX/Q</th>
+                        <th rowSpan="2">TIMING (Hrs)</th>
                         <th colSpan="2">Shift Priority</th>
                       </tr>
                       <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
                       {(!scheduleData.od_grinding || scheduleData.od_grinding.length === 0) && (
-                        <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
+                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
                       )}
                       {scheduleData.od_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
-                          <tr className="machine-name-row"><td colSpan="4">{m.machine}</td></tr>
+                          <tr className="machine-name-row"><td colSpan="6">{m.machine}</td></tr>
                           {m.rows.map((r, i) => (
                             <tr key={i}>
-                              <td className={`part-name ${r.alert ? 'text-red' : ''}`}>
-                                {r.p_label && <span className="p-badge">{r.p_label}</span>} {r.part}
-                              </td>
-                              <td className="center-text">{r.std_box}</td>
+                              <td className="part-name">{r.part}</td>
+                              <td className="center-text" style={{fontWeight: 'bold', color: '#0056b3'}}>{r.qty}</td>
+                              <td className="center-text font-bold">{r.std_box}</td>
+                              <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
                               <td className="center-text">{r.p_2nd}</td>
                               <td className="center-text">{r.p_3rd}</td>
                             </tr>
@@ -307,24 +313,20 @@ const SHOScheduling = () => {
                     </thead>
                     <tbody className="ht-flex-body">
                       <tr>
-                        {/* Furnace Column 1 */}
                         <td colSpan="4" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
-                              {htColumn1.length === 0 && (
-                                <tr><td colSpan="4" className="center-text" style={{padding: "15px"}}>No HT scheduled.</td></tr>
-                              )}
                               {htColumn1.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>TOTAL KG</td>
+                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
                                       <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
-                                      <td className="center-text font-bold">{r.rate}</td>
+                                      <td className="center-text">{r.rate}</td>
                                     </tr>
                                   ))}
                                 </React.Fragment>
@@ -332,21 +334,20 @@ const SHOScheduling = () => {
                             </tbody>
                           </table>
                         </td>
-                        {/* Furnace Column 2 */}
                         <td colSpan="4" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
                               {htColumn2.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>TOTAL KG</td>
+                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
                                       <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
                                       <td className="center-text">{r.cha}</td>
-                                      <td className="center-text font-bold">{r.rate}</td>
+                                      <td className="center-text">{r.rate}</td>
                                     </tr>
                                   ))}
                                 </React.Fragment>
@@ -358,12 +359,13 @@ const SHOScheduling = () => {
                     </tbody>
                   </table>
                 </div>
+
               </div>
-              
-              {/* UNSCHEDULED ALERTS COMPONENT */}
+
+              {/* UNSCHEDULED ALERTS */}
               {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
-                <div style={{ marginTop: '30px', borderTop: '2px dashed #ff4444', paddingTop: '20px' }}>
-                    <h3 style={{ color: '#ff4444', marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data)</h3>
+                <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff5f5', border: '1px solid #ffcccc', borderRadius: '5px' }}>
+                    <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data)</h3>
                     <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
                         <thead>
                             <tr style={{ backgroundColor: '#ffe5e5' }}>

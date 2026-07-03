@@ -43,9 +43,9 @@ def save_monthly_tracking(data):
     except Exception as e:
         print(f"Error saving monthly tracking: {e}")
 
-# Matrix exact matches from user image (Removed setup text / mapped correct blocked items)
+# Matrix exact matches from user image
 OPERATION_EXCLUSIONS = {
-    '1': {'FACE': ['IR'], 'OD': ['IR']},
+    '1': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
     '2': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
     '4': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
     '5': {'OD': ['IR']},
@@ -107,44 +107,27 @@ def parse_family(prod_text):
     if not text or text in ["NAN", "NONE", "", "UNKNOWN", "TYPE"]: 
         return None
     
-    if "BB1B420205" in text: 
-        return "UC205"
-    
-    for prefix in ["BB1", "BTH", "BT-", "BB-"]:
-        if text.startswith(prefix):
-            text = text[len(prefix):].strip()
-            
-    if not text: 
-        return None
-            
+    # Highly robust normalization to base numerical family (resolves Change 4)
     if "HUB" in text:
         match_hub = re.search(r'(T?\s*HUB\s*\d+\.?\d*)', text)
-        if match_hub: 
-            return match_hub.group(1).replace(" ", "")
+        if match_hub: return match_hub.group(1).replace(" ", "")
         return "HUB"
         
     if text.startswith("T ") or re.match(r'^T\d+', text):
         match_t = re.search(r'(T\s*\d+)', text)
-        if match_t: 
-            return match_t.group(1).replace(" ", "")
+        if match_t: return match_t.group(1).replace(" ", "")
         return "T"
-
-    t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
-    words = t_norm.split()
-    
-    match = FAM_REGEX.search(text)
-    base = match.group(1) if match else (text.split()[0].split('-')[0] if text.split() else text)
-    
-    if "BT" in words or text.startswith("BT") or " BT" in text: 
-        base = f"BT-{base}"
-    elif "BB" in words or text.startswith("BB") or " BB" in text: 
-        base = f"BB-{base}"
-    elif "UC" in text:
-        match_uc = re.search(r'(UC\s*\d+)', text)
-        if match_uc: 
-            base = match_uc.group(1).replace(" ", "")
         
-    return base
+    if "UC" in text or "BB1B" in text:
+        match_uc = re.search(r'(\d{3,5})', text)
+        if match_uc: return match_uc.group(1)
+
+    # Extract base number from everything else (BB-6205, BT-6205, 6205A -> 6205)
+    match = FAM_REGEX.search(text)
+    if match:
+        return match.group(1)
+        
+    return text.split()[0].split('-')[0] if text.split() else text
 
 def extract_num(text):
     match = re.search(r'(\d{3,5})', str(text))
@@ -222,7 +205,6 @@ def get_rate_for_part(fam, p_code, rates):
     return 0.0 
 
 def format_time(rel_hrs):
-    # Transforms relative hours (0 to 24) into a 07:00 formatted shift string
     total_minutes = int(round(rel_hrs * 60))
     base_hour = 7
     h = (base_hour + (total_minutes // 60)) % 24
@@ -317,6 +299,7 @@ def generate_schedule(payload: ScheduleRequest):
         box_matrix = {}
         sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
         if sheets_box:
+            # Change 5: Highest Priority is RING PER BOX sheet
             if 'RING PER BOX.' in sheets_box:
                 df_box = sheets_box['RING PER BOX.'].fillna('')
                 for idx in range(2, len(df_box)):
@@ -338,12 +321,13 @@ def generate_schedule(payload: ScheduleRequest):
                                 if ir_qty > 0: 
                                     box_matrix[fam]['IR'] = ir_qty
             
+            # Lower priority fallbacks for boxes
             for fb_sheet in ['BOX PER DAY DGBB', 'BOX PER DAY TRB']:
                 if fb_sheet in sheets_box:
                     df_fb = sheets_box[fb_sheet].fillna('')
                     type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
                     for r_idx in range(min(20, len(df_fb))):
-                        norm_strs = [re.sub(r'[\s./]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
+                        norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
                         t_c = next((j for j, h in enumerate(norm_strs) if 'TYPE' in h or 'BEARING' in h), -1)
                         i_c = next((j for j, h in enumerate(norm_strs) if 'IR' in h and 'BOX' in h), -1)
                         o_c = next((j for j, h in enumerate(norm_strs) if 'OR' in h and 'BOX' in h), -1)
@@ -358,6 +342,7 @@ def generate_schedule(payload: ScheduleRequest):
                             if fam:
                                 if fam not in box_matrix: 
                                     box_matrix[fam] = {}
+                                # Only add if not already extracted from primary 'RING PER BOX.' sheet
                                 if 'IR' not in box_matrix[fam] or box_matrix[fam]['IR'] <= 0:
                                     if ir_col != -1: box_matrix[fam]['IR'] = safe_float(row_vals[ir_col])
                                     elif single_rpb_col != -1: box_matrix[fam]['IR'] = safe_float(row_vals[single_rpb_col])
@@ -393,6 +378,8 @@ def generate_schedule(payload: ScheduleRequest):
                         buffers_by_fam[fam] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
                     buffers_by_fam[fam][stage][sub_ring_type] += buf_val
 
+        # Process Requirement logic implements Pull-System Process Sequence (HT -> Face -> OD)
+        # Avoids unnecessary production (WIP) by explicitly netting against buffers
         def process_requirements_for_day(demands, in_out_buffers):
             f_req = {}
             o_req = {}
@@ -429,7 +416,6 @@ def generate_schedule(payload: ScheduleRequest):
                         in_out_buffers[fam][stage][side] = new_raw
                     return used_rings
                     
-                # Pull System Cascade logic (OD requires parts from Face, Face from HT)
                 net_od_ir = max(0.0, req_rings_ir - apply_buf('OD', 'IR', req_rings_ir, rpb_ir))
                 net_od_or = max(0.0, req_rings_or - apply_buf('OD', 'OR', req_rings_or, rpb_or))
                 
@@ -450,7 +436,7 @@ def generate_schedule(payload: ScheduleRequest):
         face_req_d1, od_req_d1, ht_req_d1 = process_requirements_for_day(channel_demands_day1, buffers_by_fam)
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
-        # 4. PRODUCTION RATES
+        # 4. PRODUCTION RATES & WEIGHTS
         weight_matrix = {}
         furnace_map = {}
         machines_data = {'FACE': {}, 'OD': {}}
@@ -469,7 +455,7 @@ def generate_schedule(payload: ScheduleRequest):
                         break
                 
                 if header_idx != -1:
-                    norm_w_headers = [re.sub(r'[\s./]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
+                    norm_w_headers = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
                     type_idx = next((j for j, h in enumerate(norm_w_headers) if 'TYPE' in h), -1)
                     ir_or_idx = next((j for j, h in enumerate(norm_w_headers) if 'IROR' in h or 'IR' in h), -1)
                     wt_idx = next((j for j, h in enumerate(norm_w_headers) if 'WEIGHT' in h), -1)
@@ -482,7 +468,8 @@ def generate_schedule(payload: ScheduleRequest):
                                 continue
                             
                             ir_or_val = str(row_vals[ir_or_idx]).strip() if ir_or_idx != -1 else ""
-                            part_code = 'OR' if '100' in ir_or_val else ('IR' if '120' in ir_or_val else None)
+                            # Change 2: Specific weight parsing based on 100/120 code
+                            part_code = 'OR' if '100' in ir_or_val else ('IR' if ('120' in ir_or_val or '010' in ir_or_val) else None)
                             if part_code and wt_idx != -1:
                                 wt_val = safe_float(row_vals[wt_idx])
                                 if wt_val > 0: 
@@ -538,11 +525,12 @@ def generate_schedule(payload: ScheduleRequest):
                             
                             if header_idx != -1:
                                 headers = [str(x).strip().upper() for x in df_m.iloc[header_idx].values]
-                                norm_headers = [re.sub(r'[\s./]', '', h) for h in headers]
+                                # Change 3: Enhanced header detection handling variants
+                                norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in headers]
                                 
                                 std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
-                                box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOXHR' in h or 'BOXESHR' in h), -1)
-                                ring_hr_idx = next((j for j, h in enumerate(norm_headers) if 'RINGHR' in h or 'RINGSHR' in h), -1)
+                                box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOXHR' in h or 'BOXESHR' in h or 'BOXPERHR' in h or 'BOXESPERHR' in h), -1)
+                                ring_hr_idx = next((j for j, h in enumerate(norm_headers) if 'RINGHR' in h or 'RINGSHR' in h or 'RINGPERHR' in h or 'RINGSPERHR' in h), -1)
                                 rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'BOX' in h and 'HR' not in h), -1)
                                 type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h), -1)
                                 part_idx = next((j for j, h in enumerate(norm_headers) if 'PART' in h and 'NO' not in h), -1)
@@ -567,6 +555,7 @@ def generate_schedule(payload: ScheduleRequest):
                                         if rpb <= 0: 
                                             rpb = box_matrix.get(fam, {}).get(pc, 0.0)
                                         
+                                        # Conversion: Priority to Rings/Hr based capacities (Change 5)
                                         if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0:
                                             rate_rings = safe_float(row_vals[ring_hr_idx])
                                         elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0:
@@ -586,6 +575,16 @@ def generate_schedule(payload: ScheduleRequest):
             machine_clocks = {m_num: m_info['avail_hours'] for m_num, m_info in machines_data.get(m_type, {}).items()}
             machine_last_fam = {m_num: None for m_num in machines_data.get(m_type, {})}
             
+            # Pre-calculate machine versatility for smarter allocation (Change 7)
+            machine_versatility = {m: 0 for m in machines_data.get(m_type, {})}
+            for d in [dict_d1, dict_d2]:
+                for f_cand, req_cand in d.items():
+                    for p_cand in ['IR', 'OR']:
+                        if req_cand[p_cand] > 0:
+                            for m in machine_versatility:
+                                if get_rate_for_part(f_cand, p_cand, machines_data[m_type][m].get('rates', {})) > 0:
+                                    machine_versatility[m] += 1
+
             def process_priority_pass(demands_dict, is_day_2=False):
                 sorted_fams = sorted(demands_dict.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True)
                 for fam, data in sorted_fams:
@@ -604,18 +603,23 @@ def generate_schedule(payload: ScheduleRequest):
                             if rate_rings > 0 and machine_clocks[m_num] > 0:
                                 candidates.append((m_num, rate_rings))
                         
-                        # LOAD BALANCING: Evaluate expected completion time. Prevents piling solely onto the fastest overloaded machine.
-                        def get_end_time(m_key, rate):
+                        # LOAD BALANCING (Change 6 & 7): Maximize global throughput, save versatile machines
+                        def get_machine_score(m_key, rate):
                             hrs = machine_clocks[m_key]
-                            if hrs <= 0: return 999.0
+                            if hrs <= 0: return 99999.0
                             setup = 2.0 if machine_last_fam[m_key] and machine_last_fam[m_key] != fam else 0.0
-                            if hrs <= setup: return 999.0
+                            if hrs <= setup: return 99999.0
+                            
                             start_t = 24.0 - hrs + setup
-                            return start_t + (rings_needed / rate)
+                            end_time = start_t + (rings_needed / rate)
+                            # Add minor penalty for versatile machines to encourage using dedicated machines first
+                            penalty = machine_versatility.get(m_key, 0) * 0.1 
+                            return end_time + penalty
 
-                        candidates.sort(key=lambda x: get_end_time(x[0], x[1]))
+                        candidates.sort(key=lambda x: get_machine_score(x[0], x[1]))
                         
                         placed = False
+                        # Change 1: Loop has no artificial 3-job limit
                         for m_num, rate_rings in candidates:
                             if rings_needed <= 0: break
                             if machine_clocks[m_num] <= 0: continue
@@ -640,7 +644,6 @@ def generate_schedule(payload: ScheduleRequest):
                                 time_required = hrs_left
                                 hrs_left = 0.0
                                 
-                            # TIMING CALCULATION (Removed bracketed setup text)
                             start_rel = 24.0 - machine_clocks[m_num]
                             if setup_cost > 0:
                                 start_rel += setup_cost
@@ -653,7 +656,8 @@ def generate_schedule(payload: ScheduleRequest):
                             placed = True
                             
                             rpb = box_matrix.get(fam, {}).get(p_code, 0)
-                            display_val = f"{int(produced_rings)} (Q)" if rpb <= 0 else str(round(produced_rings / rpb, 1))
+                            # Change 5: Round UP to the nearest whole box
+                            display_val = f"{math.ceil(produced_rings / rpb)}" if rpb > 0 else f"{int(produced_rings)} (Q)"
                             
                             if fam in monthly_data[month_str]:
                                 monthly_data[month_str][fam]["produced"] += produced_rings
@@ -674,7 +678,7 @@ def generate_schedule(payload: ScheduleRequest):
                             reason = "Capacity Exhausted" if placed else "Missing Machine Rate"
                             
                             rpb = box_matrix.get(fam, {}).get(p_code, 0)
-                            missed_val = f"{int(rings_needed)} rings" if rpb <= 0 else f"{round(rings_needed / rpb, 1)} box"
+                            missed_val = f"{int(rings_needed)} rings" if rpb <= 0 else f"{math.ceil(rings_needed / rpb)} box"
                             
                             unscheduled.append({ 
                                 "stage": m_type, 
@@ -699,13 +703,15 @@ def generate_schedule(payload: ScheduleRequest):
                     if not preferred_furnaces: 
                         preferred_furnaces = list(FURNACE_SPECS.keys())
                     
+                    # Change 2: Strict Weight Check without assumed weight
                     unit_weight = weight_matrix.get(f"{fam}_{p_code}")
-                    is_assumed = False
                     if unit_weight is None or unit_weight <= 0:
-                        unit_weight = 0.25
-                        is_assumed = True
-                        if not is_day_2: 
-                            debug_logs.append(f"HT Skipped: Missing weight for {fam} {p_code} - Assumed 0.25kg")
+                        unscheduled.append({ 
+                            "stage": "HT", 
+                            "part": f"{fam} {p_code} ({'Day 2' if is_day_2 else 'Day 1'})", 
+                            "missed_boxes": "Missing Weight - Part skipped" 
+                        })
+                        continue
                     
                     total_weight_kg = qty_rings * unit_weight
                     scheduled_flag = False
@@ -721,7 +727,6 @@ def generate_schedule(payload: ScheduleRequest):
                         setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != fam) else 0.0
                         
                         if (ctx["avail_hours"] - setup_penalty) >= time_needed:
-                            # Timing calculation applied to HT
                             start_rel = 24.0 - ctx["avail_hours"] + setup_penalty
                             end_rel = start_rel + time_needed
                             timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
@@ -729,7 +734,7 @@ def generate_schedule(payload: ScheduleRequest):
                             ctx["avail_hours"] -= (time_needed + setup_penalty)
                             ctx["current_fam"] = fam
                             
-                            display_rate = f"{int(qty_rings)} pcs" if is_assumed else f"{round(total_weight_kg, 1)} kg"
+                            display_rate = f"{round(total_weight_kg, 1)} kg"
                             
                             ctx["rows"].append({
                                 "part": f"{fam}-{p_code}" + (" (D2)" if is_day_2 else ""), 

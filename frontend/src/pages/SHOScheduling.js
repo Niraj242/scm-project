@@ -22,11 +22,11 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
-  // Hardcoded permanent blocks based on operations matrix
+  // Hardcoded permanent blocks based strictly on the uploaded image matrix
   const DEFAULT_BLOCKED = {
     DGBB: { 
-        OD: { CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH05: ['IR'], CH08: ['IR'], CH11: ['IR'] }, 
-        FACE: { CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'] } 
+        OD: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH05: ['IR'], CH08: ['IR'], CH11: ['IR'] }, 
+        FACE: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'] } 
     },
     TRB: { 
         OD: { 'T 1': ['IR'], 'T 2': ['IR'], 'T 3': ['IR'], 'T 4': ['IR'], 'T 5': ['IR'], 'T 6': ['IR'], 'T 7': ['IR'], 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'], 'T10': ['IR'] }, 
@@ -307,24 +307,25 @@ const SHOScheduling = () => {
                   <table className="img-table">
                     <thead>
                       <tr>
-                        <th colSpan="4" className="col-main-title ht-title">HEAT TREATMENT</th>
-                        <th colSpan="4" className="col-main-title ht-title">DATE - {scheduleDate.split('-').reverse().join('/')}</th>
+                        <th colSpan="5" className="col-main-title ht-title">HEAT TREATMENT</th>
+                        <th colSpan="5" className="col-main-title ht-title">DATE - {scheduleDate.split('-').reverse().join('/')}</th>
                       </tr>
                     </thead>
                     <tbody className="ht-flex-body">
                       <tr>
-                        <td colSpan="4" className="nested-td">
+                        <td colSpan="5" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
                               {htColumn1.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
+                                    <td>{f.furnace}</td><td>QTY</td><td>Timing</td><td>Cha</td><td>{f.capacity}</td>
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
                                       <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
+                                      <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
                                       <td className="center-text">{r.cha}</td>
                                       <td className="center-text">{r.rate}</td>
                                     </tr>
@@ -334,18 +335,19 @@ const SHOScheduling = () => {
                             </tbody>
                           </table>
                         </td>
-                        <td colSpan="4" className="nested-td">
+                        <td colSpan="5" className="nested-td">
                           <table className="inner-ht-table">
                             <tbody>
                               {htColumn2.map((f, idx) => (
                                 <React.Fragment key={idx}>
                                   <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Cha</td><td>{f.capacity}</td>
+                                    <td>{f.furnace}</td><td>QTY</td><td>Timing</td><td>Cha</td><td>{f.capacity}</td>
                                   </tr>
                                   {f.rows.map((r, i) => (
                                     <tr key={i}>
                                       <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
                                       <td className="center-text">{r.qty}</td>
+                                      <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
                                       <td className="center-text">{r.cha}</td>
                                       <td className="center-text">{r.rate}</td>
                                     </tr>
@@ -395,3 +397,4 @@ const SHOScheduling = () => {
 };
 
 export default SHOScheduling;
+

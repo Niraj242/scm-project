@@ -43,9 +43,9 @@ def save_monthly_tracking(data):
     except Exception as e:
         print(f"Error saving monthly tracking: {e}")
 
-# Hardcoded Matrix from User Chart Image
+# Matrix exact matches from user image (Removed setup text / mapped correct blocked items)
 OPERATION_EXCLUSIONS = {
-    '1': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
+    '1': {'FACE': ['IR'], 'OD': ['IR']},
     '2': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
     '4': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
     '5': {'OD': ['IR']},
@@ -429,12 +429,15 @@ def generate_schedule(payload: ScheduleRequest):
                         in_out_buffers[fam][stage][side] = new_raw
                     return used_rings
                     
-                net_face_ir = max(0.0, req_rings_ir - apply_buf('FACE', 'IR', req_rings_ir, rpb_ir))
-                net_face_or = max(0.0, req_rings_or - apply_buf('FACE', 'OR', req_rings_or, rpb_or))
-                net_od_ir = max(0.0, net_face_ir - apply_buf('OD', 'IR', net_face_ir, rpb_ir))
-                net_od_or = max(0.0, net_face_or - apply_buf('OD', 'OR', net_face_or, rpb_or))
-                net_ht_ir = max(0.0, net_od_ir - apply_buf('CH', 'IR', net_od_ir, rpb_ir))
-                net_ht_or = max(0.0, net_od_or - apply_buf('CH', 'OR', net_od_or, rpb_or))
+                # Pull System Cascade logic (OD requires parts from Face, Face from HT)
+                net_od_ir = max(0.0, req_rings_ir - apply_buf('OD', 'IR', req_rings_ir, rpb_ir))
+                net_od_or = max(0.0, req_rings_or - apply_buf('OD', 'OR', req_rings_or, rpb_or))
+                
+                net_face_ir = max(0.0, net_od_ir - apply_buf('FACE', 'IR', net_od_ir, rpb_ir))
+                net_face_or = max(0.0, net_od_or - apply_buf('FACE', 'OR', net_od_or, rpb_or))
+                
+                net_ht_ir = max(0.0, net_face_ir - apply_buf('CH', 'IR', net_face_ir, rpb_ir))
+                net_ht_or = max(0.0, net_face_or - apply_buf('CH', 'OR', net_face_or, rpb_or))
 
                 if net_face_ir > 0 or net_face_or > 0: 
                     f_req[fam] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': data['channel']}
@@ -601,8 +604,16 @@ def generate_schedule(payload: ScheduleRequest):
                             if rate_rings > 0 and machine_clocks[m_num] > 0:
                                 candidates.append((m_num, rate_rings))
                         
-                        # LOAD BALANCING: Sort by most available hours first, then by speed
-                        candidates.sort(key=lambda x: (machine_clocks[x[0]], x[1]), reverse=True)
+                        # LOAD BALANCING: Evaluate expected completion time. Prevents piling solely onto the fastest overloaded machine.
+                        def get_end_time(m_key, rate):
+                            hrs = machine_clocks[m_key]
+                            if hrs <= 0: return 999.0
+                            setup = 2.0 if machine_last_fam[m_key] and machine_last_fam[m_key] != fam else 0.0
+                            if hrs <= setup: return 999.0
+                            start_t = 24.0 - hrs + setup
+                            return start_t + (rings_needed / rate)
+
+                        candidates.sort(key=lambda x: get_end_time(x[0], x[1]))
                         
                         placed = False
                         for m_num, rate_rings in candidates:
@@ -629,25 +640,21 @@ def generate_schedule(payload: ScheduleRequest):
                                 time_required = hrs_left
                                 hrs_left = 0.0
                                 
-                            # TIMING CALCULATION
+                            # TIMING CALCULATION (Removed bracketed setup text)
                             start_rel = 24.0 - machine_clocks[m_num]
-                            setup_str = ""
                             if setup_cost > 0:
-                                setup_str = f" [Set: {format_time(start_rel)}-{format_time(start_rel + setup_cost)}]"
                                 start_rel += setup_cost
                             
                             end_rel = start_rel + time_required
-                            timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}{setup_str}"
+                            timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
 
                             machine_clocks[m_num] = hrs_left
                             machine_last_fam[m_num] = fam
                             placed = True
                             
-                            # Formatting Display (Box or Qty)
                             rpb = box_matrix.get(fam, {}).get(p_code, 0)
                             display_val = f"{int(produced_rings)} (Q)" if rpb <= 0 else str(round(produced_rings / rpb, 1))
                             
-                            # Update monthly tracker with what actually got scheduled
                             if fam in monthly_data[month_str]:
                                 monthly_data[month_str][fam]["produced"] += produced_rings
                             
@@ -714,6 +721,11 @@ def generate_schedule(payload: ScheduleRequest):
                         setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != fam) else 0.0
                         
                         if (ctx["avail_hours"] - setup_penalty) >= time_needed:
+                            # Timing calculation applied to HT
+                            start_rel = 24.0 - ctx["avail_hours"] + setup_penalty
+                            end_rel = start_rel + time_needed
+                            timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
+
                             ctx["avail_hours"] -= (time_needed + setup_penalty)
                             ctx["current_fam"] = fam
                             
@@ -724,6 +736,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 "qty": str(int(qty_rings)), 
                                 "cha": data['channel'],
                                 "rate": display_rate, 
+                                "timing": timing_display,
                                 "alert": False 
                             })
                             scheduled_flag = True

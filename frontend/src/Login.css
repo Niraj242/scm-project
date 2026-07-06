@@ -1,24 +1,247 @@
-.login-container {
-  width: 300px;
-  margin: 120px auto;
-  padding: 20px;
-  border: 1px solid #ccc;
-  border-radius: 8px;
-  text-align: center;
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
 }
 
-.login-container input,
-.login-container select {
-  width: 100%;
-  margin: 10px 0;
-  padding: 8px;
+body {
+    font-family: "Segoe UI", sans-serif;
+    background: #eef3f9;
 }
 
-.login-container button {
-  width: 100%;
-  padding: 10px;
-  background-color: #2563eb;
-  color: white;
-  border: none;
-  cursor: pointer;
+.login-page {
+    display: flex;
+    min-height: 100vh;
+}
+
+/* ===========================
+   LEFT PANEL
+=========================== */
+
+.login-left {
+    flex: 1.3;
+    background: #ffffff;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 70px;
+    position: relative;
+    overflow: hidden;
+}
+
+/* Decorative curves */
+
+.login-left::before {
+    content: "";
+    position: absolute;
+    width: 700px;
+    height: 700px;
+    border-radius: 50%;
+    border: 2px solid rgba(11, 94, 215, 0.08);
+    bottom: -420px;
+    left: -280px;
+}
+
+.login-left::after {
+    content: "";
+    position: absolute;
+    width: 900px;
+    height: 900px;
+    border-radius: 50%;
+    border: 2px solid rgba(11, 94, 215, 0.05);
+    bottom: -520px;
+    left: -360px;
+}
+
+.brand-box {
+    max-width: 560px;
+    position: relative;
+    z-index: 2;
+}
+
+.skf-logo {
+    width: 340px;
+    height: auto;
+    margin-bottom: -35px;
+    display: block;
+}
+
+.brand-box h2 {
+    font-size: 50px;
+    color: #0B5ED7;
+    font-weight: 700;
+    line-height: 1.25;
+    margin-bottom: 28px;
+}
+
+.brand-box p {
+    color: #4B5563;
+    font-size: 22px;
+    line-height: 1.8;
+}
+
+/* ===========================
+   RIGHT PANEL
+=========================== */
+
+.login-right {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: linear-gradient(135deg, #0B5ED7, #003C9E);
+    position: relative;
+    overflow: hidden;
+}
+
+/* Background circles */
+
+.login-right::before {
+    content: "";
+    position: absolute;
+    width: 600px;
+    height: 600px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.05);
+    top: -250px;
+    right: -180px;
+}
+
+.login-right::after {
+    content: "";
+    position: absolute;
+    width: 500px;
+    height: 500px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.04);
+    bottom: -220px;
+    left: -180px;
+}
+
+/* ===========================
+   LOGIN CARD
+=========================== */
+
+.login-card {
+    width: 450px;
+    background: #ffffff;
+    border-radius: 24px;
+    padding: 50px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.22);
+    position: relative;
+    z-index: 2;
+}
+
+.login-card h2 {
+    font-size: 44px;
+    color: #0B5ED7;
+    margin-bottom: 10px;
+    font-weight: 700;
+}
+
+.login-card p {
+    color: #6B7280;
+    font-size: 18px;
+    margin-bottom: 35px;
+}
+
+/* ===========================
+   INPUTS
+=========================== */
+
+.login-card input {
+    width: 100%;
+    padding: 17px 20px;
+    margin-bottom: 22px;
+    border: 1px solid #D7DFEA;
+    border-radius: 12px;
+    background: #FAFBFD;
+    font-size: 16px;
+    transition: .3s;
+}
+
+.login-card input:focus {
+    outline: none;
+    border-color: #0B5ED7;
+    background: white;
+    box-shadow: 0 0 0 5px rgba(11,94,215,.15);
+}
+
+/* ===========================
+   BUTTON
+=========================== */
+
+.login-card button {
+    width: 100%;
+    padding: 16px;
+    border: none;
+    border-radius: 12px;
+    background: linear-gradient(90deg,#0B5ED7,#1F6FFF);
+    color: white;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: .3s;
+    letter-spacing: .4px;
+}
+
+.login-card button:hover {
+    transform: translateY(-3px);
+    background: linear-gradient(90deg,#004FC5,#0B5ED7);
+    box-shadow: 0 12px 30px rgba(11,94,215,.35);
+}
+
+/* ===========================
+   RESPONSIVE
+=========================== */
+
+@media (max-width:1100px){
+
+    .login-page{
+        flex-direction:column;
+    }
+
+    .login-left{
+        padding:50px;
+    }
+
+    .login-right{
+        padding:50px 20px;
+    }
+
+    .login-card{
+        width:100%;
+        max-width:500px;
+    }
+
+    .brand-box{
+        text-align:center;
+    }
+
+    .skf-logo{
+        margin:0 auto 40px;
+    }
+
+}
+
+@media (max-width:700px){
+
+    .login-left{
+        display:none;
+    }
+
+    .login-right{
+        width:100%;
+        min-height:100vh;
+    }
+
+    .login-card{
+        width:92%;
+        padding:35px;
+    }
+
+    .login-card h2{
+        font-size:34px;
+    }
+
 }

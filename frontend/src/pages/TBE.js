@@ -11,6 +11,7 @@ const TBE = () => {
   const [loading, setLoading] = useState(false);
   const [isInitializing, setIsInitializing] = useState(false);
   const [error, setError] = useState('');
+  const [showCalcHelp, setShowCalcHelp] = useState(false);
   
   // Drilldown Breakout States
   const [selectedFamily, setSelectedFamily] = useState(null); 
@@ -156,7 +157,10 @@ const TBE = () => {
       
       if (json.status === 'initializing') {
         setIsInitializing(true);
-        setSummaryData([]);
+      console.log("API returned:", json.data.length);
+      console.table(json.data);
+
+       setSummaryData(json.data || []);
         if (timerRef.current) clearTimeout(timerRef.current);
         timerRef.current = setTimeout(fetchTBEDashboard, 4000);
       } else {
@@ -218,38 +222,73 @@ const TBE = () => {
   };
 
   // Check if calculator should be visible
-  const isCalcActive = Object.keys(selectedCells).length > 0 || calcResult !== null;
+const isCalcActive = true;
 
   return (
-    <div className="traceability-container" style={{ fontFamily: 'Segoe UI, Roboto, sans-serif' }}>
-      <div className="header-section" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '15px' }}>
+    <div className="traceability-container">
+      <div className="header-section">
         <div>
           <h1>Transit Buffer Entry Tracking Log</h1>
           <p className="sub-tag">Synchronized Channel & Ring Family Sequencing Matrices</p>
         </div>
         
         {/* --- CALCULATOR WIDGET --- */}
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: '10px', padding: '6px 14px', 
-          background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '6px', 
-          boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-          visibility: isCalcActive ? 'visible' : 'hidden',
-          transition: 'opacity 0.2s'
-        }}>
-          <span style={{ fontFamily: 'monospace', fontWeight: 'bold', fontSize: '1.2em', color: '#0f172a', minWidth: '100px', textAlign: 'right' }}>
-            {calcResult !== null ? calcResult.toLocaleString() : ''}
-            {currentOperation ? ` ${currentOperation} ` : ''}
-            {(selectionTotal !== 0 || calcResult === null) ? selectionTotal.toLocaleString() : ''}
-          </span>
-          <div style={{ display: 'flex', gap: '4px' }}>
-            <button style={{ padding: '2px 8px', border: '1px solid #cbd5e1', background: '#fff', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => handleCalcOp('+')}>+</button>
-            <button style={{ padding: '2px 8px', border: '1px solid #cbd5e1', background: '#fff', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => handleCalcOp('-')}>-</button>
-            <button style={{ padding: '2px 8px', border: '1px solid #cbd5e1', background: '#fff', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => handleCalcOp('*')}>*</button>
-            <button style={{ padding: '2px 8px', border: '1px solid #cbd5e1', background: '#fff', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => handleCalcOp('/')}>/</button>
-            <button style={{ padding: '2px 8px', border: '1px solid #3b82f6', background: '#eff6ff', color: '#1d4ed8', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => handleCalcOp('=')}>=</button>
-            <button style={{ padding: '2px 8px', border: '1px solid #f87171', background: '#fef2f2', color: '#b91c1c', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }} onClick={() => handleCalcOp('C')}>C</button>
-          </div>
-        </div>
+<div className="calculator-area">
+
+  <button
+    className="calc-help-btn"
+    onClick={() => setShowCalcHelp(true)}
+  >
+    ℹ Calculator Guide
+  </button>
+
+  <div className={`calc-widget ${isCalcActive ? 'calc-widget-visible' : 'calc-widget-hidden'}`}>
+    <span className="calc-display">
+      {calcResult !== null ? calcResult.toLocaleString() : ''}
+      {currentOperation ? ` ${currentOperation} ` : ''}
+      {(selectionTotal !== 0 || calcResult === null)
+        ? selectionTotal.toLocaleString()
+        : ''}
+    </span>
+
+    <div className="calc-buttons">
+      <button className="calc-btn" onClick={() => handleCalcOp('+')}>+</button>
+      <button className="calc-btn" onClick={() => handleCalcOp('-')}>-</button>
+      <button className="calc-btn" onClick={() => handleCalcOp('*')}>*</button>
+      <button className="calc-btn" onClick={() => handleCalcOp('/')}>/</button>
+      <button className="calc-btn calc-btn-eq" onClick={() => handleCalcOp('=')}>=</button>
+      <button className="calc-btn calc-btn-clear" onClick={() => handleCalcOp('C')}>C</button>
+    </div>
+  </div>
+
+  {showCalcHelp && (
+    <div className="calc-modal-overlay">
+      <div className="calc-modal">
+
+        <h3>Calculator Guide</h3>
+
+        <ul>
+          <li>Click and drag over quantity cells.</li>
+          <li>Selected quantities are automatically added.</li>
+          <li>Use +, −, × and ÷ buttons for calculations.</li>
+          <li>Press = to calculate.</li>
+          <li>Press C to clear the calculator.</li>
+          <li>The calculator always displays the latest selected total.</li>
+        </ul>
+
+        <button
+          className="calc-close-btn"
+          onClick={() => setShowCalcHelp(false)}
+        >
+          Close
+        </button>
+
+      </div>
+    </div>
+  )}
+
+</div>
+        
 
         <div className="control-actions">
           <input 
@@ -259,7 +298,7 @@ const TBE = () => {
             value={startDate} 
             onChange={(e) => setStartDate(e.target.value)} 
           />
-          <span style={{margin: '0 5px', color: '#64748b'}}>to</span>
+          <span className="date-range-separator">to</span>
           <input 
             type="date" 
             className="search-box" 
@@ -268,7 +307,7 @@ const TBE = () => {
             onChange={(e) => setEndDate(e.target.value)} 
           />
 
-          <button className="back-btn" style={{margin: '0 10px'}} onClick={fetchTBEDashboard} disabled={loading}>
+          <button className="back-btn reload-btn" onClick={fetchTBEDashboard} disabled={loading}>
             {loading ? 'Refreshing...' : '🔄 Reload'}
           </button>
           
@@ -295,37 +334,37 @@ const TBE = () => {
 
       {!loading && !isInitializing && (
         /* Dynamic container giving constrained height + elegant card framing shadow */
-        <div className="table-wrapper" style={{ maxHeight: '680px', overflowY: 'auto', border: '1px solid #cbd5e1', borderRadius: '8px', boxShadow: '0 4px 12px rgba(0,0,0,0.08)', position: 'relative' }}>
-          <table className="trace-table" style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'center' }}>
+        <div className="table-wrapper">
+          <table className="trace-table">
             <thead>
               {/* Row 1 Sticky Headers with high-contrast distinct section colors */}
-              <tr className="super-header" style={{ height: '42px' }}>
-                <th colSpan="4" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#334155', color: '#ffffff', border: '1px solid #475569', fontWeight: '600', padding: '10px' }}>Connection Mapping</th>
-                <th colSpan="3" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#0284c7', color: '#ffffff', border: '1px solid #0369a1', fontWeight: '600', padding: '10px' }}>SHO Department & Scrap (Split)</th>
-                <th colSpan="2" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#ea580c', color: '#ffffff', border: '1px solid #c2410c', fontWeight: '600', padding: '10px' }}>Transit Buffer (Split)</th>
-                <th colSpan="3" style={{ position: 'sticky', top: 0, zIndex: 10, background: '#16a34a', color: '#ffffff', border: '1px solid #15803d', fontWeight: '600', padding: '10px' }}>Channel Section (Combined Rollup)</th>
-                <th style={{ position: 'sticky', top: 0, zIndex: 10, background: '#475569', color: '#ffffff', border: '1px solid #576880', fontWeight: '600', padding: '10px' }}>Status Tracker</th>
+              <tr className="super-header">
+                <th colSpan="4" className="th-meta">Connection Mapping</th>
+                <th colSpan="3" className="th-sho">SHO Department & Scrap (Split)</th>
+                <th colSpan="2" className="th-tb">Transit Buffer (Split)</th>
+                <th colSpan="3" className="th-ch">Channel Section (Combined Rollup)</th>
+                <th className="th-status">Status Tracker</th>
               </tr>
               {/* Row 2 Sticky Headers with corresponding matching tint colors */}
-              <tr className="sub-header" style={{ height: '38px' }}>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Channel Ref</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>MO</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Family</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Ring Type</th>
+              <tr className="sub-header">
+                <th className="sub-meta">Channel Ref</th>
+                <th className="sub-meta">MO</th>
+                <th className="sub-meta">Ring Family</th>
+                <th className="sub-meta">Ring Type</th>
                 
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>Qty</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>In Date</th>
+                <th className="sub-sho">Qty</th>
+                <th className="sub-sho">In Date</th>
                 {/* NEW SCRAP COLUMN INJECTED HERE */}
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', padding: '10px', fontSize: '0.9em' }}>Scrap Qty</th>
+                <th className="sub-scrap">Scrap Qty</th>
 
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Qty</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
+                <th className="sub-tb">Qty</th>
+                <th className="sub-tb">Out Date</th>
                 
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Qty</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>In Date</th>
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>Out Date</th>
+                <th className="sub-ch">Qty</th>
+                <th className="sub-ch">In Date</th>
+                <th className="sub-ch">Out Date</th>
                 
-                <th style={{ position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>Tracking Status</th>
+                <th className="sub-status">Tracking Status</th>
               </tr>
             </thead>
             <tbody>
@@ -333,22 +372,19 @@ const TBE = () => {
                 const channelSpan = getChannelRowSpan(sortedSummary, idx);
                 const familySpan = getFamilyRowSpan(sortedSummary, idx);
                 const uniqueKey = `${row.channel_ref || 'b'}-${row.product_variant || 'b'}-${row.ring_type || 'b'}-${idx}`;
-                
-                // Beautiful subtle zebra lines for alternate rows
-                const rowBg = idx % 2 === 0 ? '#ffffff' : '#fdfdfd';
 
                 return (
-                  <tr key={uniqueKey} className="data-row" style={{ backgroundColor: rowBg, transition: 'background 0.2s' }}>
+                  <tr key={uniqueKey} className="data-row">
                     {/* Channel Column */}
                     {channelSpan > 0 && (
-                      <td rowSpan={channelSpan} className="merged-mo-cell fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f1f5f9', color: '#334155', verticalAlign: 'middle' }}>
+                      <td rowSpan={channelSpan} className="merged-mo-cell fw-bold">
                         {row.channel_ref || '-'}
                       </td>
                     )}
                     
                     {/* MO Column */}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-mo-cell text-muted" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f8fafc', fontSize: '0.9em', verticalAlign: 'middle' }}>
+                      <td rowSpan={familySpan} className="merged-mo-cell text-muted">
                         {row.mo_ref || '-'}
                       </td>
                     )}
@@ -360,37 +396,28 @@ const TBE = () => {
                         className="fw-bold text-primary clickable-family-cell"
                         title="Click to view full variant routing entries"
                         onClick={() => setSelectedFamily({ ch: row.channel_ref, fam: row.product_variant })}
-                        style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0f9ff', color: '#0284c7', cursor: 'pointer', verticalAlign: 'middle', textDecoration: 'underline' }}
                       >
                         {row.product_variant}
                       </td>
                     )}
                     
                     {/* Ring Type Column */}
-                    <td className="fw-bold" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#1e293b' }}>{row.ring_type}</td>
+                    <td className="fw-bold cell-ring-type">{row.ring_type}</td>
                     
                     {/* SHO Split */}
                     <td 
                       onMouseDown={(e) => handleMouseDown(e, `sho-${idx}`, row.sho_qty)}
                       onMouseEnter={(e) => handleMouseEnter(e, `sho-${idx}`, row.sho_qty)}
-                      style={{ 
-                        border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', 
-                        background: selectedCells[`sho-${idx}`] !== undefined ? '#bae6fd' : '#f0f9ff',
-                        userSelect: 'none', cursor: 'cell' 
-                      }}>
+                      className={`cell-selectable cell-sho ${selectedCells[`sho-${idx}`] !== undefined ? 'cell-sho-selected' : ''}`}>
                       {row.sho_qty ? Number(row.sho_qty).toLocaleString() : '0'}
                     </td>
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#0369a1', background: '#f0f9ff' }}>{row.sho_in || '-'}</td>
+                    <td className="cell-plain-sho">{row.sho_in || '-'}</td>
                     
                     {/* SCRAP Split */}
                     <td 
                       onMouseDown={(e) => handleMouseDown(e, `scrap-${idx}`, row.scrap_qty)}
                       onMouseEnter={(e) => handleMouseEnter(e, `scrap-${idx}`, row.scrap_qty)}
-                      style={{ 
-                        border: '1px solid #e2e8f0', padding: '11px 10px', color: '#b91c1c', 
-                        background: selectedCells[`scrap-${idx}`] !== undefined ? '#fecaca' : '#fef2f2',
-                        userSelect: 'none', cursor: 'cell', fontWeight: 'bold'
-                      }}>
+                      className={`cell-selectable cell-scrap ${selectedCells[`scrap-${idx}`] !== undefined ? 'cell-scrap-selected' : ''}`}>
                       {row.scrap_qty ? Number(row.scrap_qty).toLocaleString() : '0'}
                     </td>
 
@@ -398,39 +425,30 @@ const TBE = () => {
                     <td 
                       onMouseDown={(e) => handleMouseDown(e, `tb-${idx}`, row.tb_qty)}
                       onMouseEnter={(e) => handleMouseEnter(e, `tb-${idx}`, row.tb_qty)}
-                      style={{ 
-                        border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', 
-                        background: selectedCells[`tb-${idx}`] !== undefined ? '#fed7aa' : '#fff7ed',
-                        userSelect: 'none', cursor: 'cell'
-                      }}>
+                      className={`cell-selectable cell-tb ${selectedCells[`tb-${idx}`] !== undefined ? 'cell-tb-selected' : ''}`}>
                       {row.tb_qty ? Number(row.tb_qty).toLocaleString() : '0'}
                     </td>
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px', color: '#c2410c', background: '#fff7ed' }}>{row.tb_out || '-'}</td>
+                    <td className="cell-plain-tb">{row.tb_out || '-'}</td>
                     
                     {/* Channel Section */}
                     {familySpan > 0 && (
                       <td 
                         rowSpan={familySpan} 
-                        className="merged-channel-cell fw-bold text-success" 
+                        className={`merged-channel-cell fw-bold cell-selectable cell-ch-qty ${selectedCells[`ch-${idx}`] !== undefined ? 'cell-ch-qty-selected' : ''}`}
                         onMouseDown={(e) => handleMouseDown(e, `ch-${idx}`, row.ch_qty)}
-                        onMouseEnter={(e) => handleMouseEnter(e, `ch-${idx}`, row.ch_qty)}
-                        style={{ 
-                          border: '1px solid #e2e8f0', padding: '11px 10px', 
-                          background: selectedCells[`ch-${idx}`] !== undefined ? '#bbf7d0' : '#f0fdf4', 
-                          color: '#16a34a', verticalAlign: 'middle', userSelect: 'none', cursor: 'cell'
-                        }}>
+                        onMouseEnter={(e) => handleMouseEnter(e, `ch-${idx}`, row.ch_qty)}>
                         {row.ch_qty ? Number(row.ch_qty).toLocaleString() : '0'}
                       </td>
                     )}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_in || '-'}</td>
+                      <td rowSpan={familySpan} className="merged-channel-cell cell-plain-ch">{row.ch_in || '-'}</td>
                     )}
                     {familySpan > 0 && (
-                      <td rowSpan={familySpan} className="merged-channel-cell" style={{ border: '1px solid #e2e8f0', padding: '11px 10px', background: '#f0fdf4', color: '#1e293b', verticalAlign: 'middle' }}>{row.ch_out || '-'}</td>
+                      <td rowSpan={familySpan} className="merged-channel-cell cell-plain-ch">{row.ch_out || '-'}</td>
                     )}
                     
                     {/* Status Tracker */}
-                    <td style={{ border: '1px solid #e2e8f0', padding: '11px 10px' }}>
+                    <td>
                       <span className={`status-badge ${row.status ? row.status.toLowerCase().replace(/\s+/g, '-') : 'in-process'}`}>
                         {row.status || 'In Process'}
                       </span>
@@ -440,7 +458,7 @@ const TBE = () => {
               })}
               {sortedSummary.length === 0 && (
                 <tr>
-                  <td colSpan="13" className="empty-state" style={{ padding: '30px', color: '#64748b', fontStyle: 'italic' }}>
+                  <td colSpan="13" className="empty-state">
                     No records found matching the current search criteria or date range.
                   </td>
                 </tr>
@@ -470,43 +488,38 @@ const TBE = () => {
               ) : detailData.length === 0 ? (
                 <div className="empty-state">No independent deployment logs located for this variant structure within chosen dates.</div>
               ) : (
-                <div className="modal-table-wrapper" style={{ maxHeight: '420px', overflowY: 'auto', border: '1px solid #e2e8f0', borderRadius: '6px' }}>
-                  <table className="detail-variant-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <div className="modal-table-wrapper">
+                  <table className="detail-variant-table">
                     <thead>
-                      <tr style={{ background: '#334155', color: '#ffffff', height: '40px' }}>
-                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>MO / Channel Reference</th>
-                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Department / Specific Location</th>
-                        <th style={{ textAlign: 'left', padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Product / Part Sub Variant</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>In Date</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Out Date</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Qty</th>
-                        <th style={{ padding: '10px', position: 'sticky', top: 0, background: '#334155', zIndex: 1 }}>Execution Status</th>
+                      <tr>
+                        <th className="text-start">MO / Channel Reference</th>
+                        <th className="text-start">Department / Specific Location</th>
+                        <th className="text-start">Product / Part Sub Variant</th>
+                        <th>In Date</th>
+                        <th>Out Date</th>
+                        <th>Qty</th>
+                        <th>Execution Status</th>
                       </tr>
                     </thead>
                     <tbody>
                       {detailData.map((vRow, vIdx) => (
-                        <tr key={vIdx} className="modal-data-row" style={{ background: vIdx % 2 === 0 ? '#ffffff' : '#f8fafc' }}>
-                          <td className="text-start text-muted" style={{ fontSize: '0.95em', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.mo_ref}</td>
-                          <td className="text-start" style={{ padding: '10px', borderBottom: '1px solid #e2e8f0' }}>
+                        <tr key={vIdx} className="modal-data-row">
+                          <td className="text-start text-muted">{vRow.mo_ref}</td>
+                          <td className="text-start">
                             <span className={`dept-tag ${vRow.department.toLowerCase().replace(/\s+/g, '-')}`}>
                               {vRow.department}
                             </span>
                           </td>
-                          <td className="text-start fw-bold" style={{ color: '#0f172a', padding: '10px', borderBottom: '1px solid #e2e8f0' }}>{vRow.variant}</td>
-                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.in_date}</td>
-                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>{vRow.out_date}</td>
+                          <td className="text-start fw-bold">{vRow.variant}</td>
+                          <td>{vRow.in_date}</td>
+                          <td>{vRow.out_date}</td>
                           <td 
-                            className="fw-bold" 
+                            className={`fw-bold cell-selectable cell-modal-qty ${selectedCells[`modal-qty-${vIdx}`] !== undefined ? 'cell-modal-qty-selected' : ''}`}
                             onMouseDown={(e) => handleMouseDown(e, `modal-qty-${vIdx}`, vRow.qty)}
-                            onMouseEnter={(e) => handleMouseEnter(e, `modal-qty-${vIdx}`, vRow.qty)}
-                            style={{ 
-                              padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center',
-                              background: selectedCells[`modal-qty-${vIdx}`] !== undefined ? '#bae6fd' : 'inherit',
-                              userSelect: 'none', cursor: 'cell' 
-                            }}>
+                            onMouseEnter={(e) => handleMouseEnter(e, `modal-qty-${vIdx}`, vRow.qty)}>
                             {Number(vRow.qty).toLocaleString()}
                           </td>
-                          <td style={{ padding: '10px', borderBottom: '1px solid #e2e8f0', textAlign: 'center' }}>
+                          <td>
                             <span className="execution-status-dot">{vRow.status}</span>
                           </td>
                         </tr>

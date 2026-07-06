@@ -1,123 +1,280 @@
-/* ================= PAGE LAYOUT ================= */
-.orders-page {
-  padding: 20px;
-  max-width: 1400px;
-  margin: 0 auto;
+*{
+  margin:0;
+  padding:0;
+  box-sizing:border-box;
 }
 
-/* ================= PAGE TITLE ================= */
-.orders-page h2 {
-  font-size: 36px;     /* 🔼 change ONLY this to grow/shrink title */
-  font-weight: 600;
-  text-align: center; /* ✅ center title */
-  margin-bottom: 20px;
+.orders-page{
+  max-width:1450px;
+  margin:auto;
+  padding:35px;
+  min-height:100vh;
+  background:#f5f8fc;
+  font-family:"Segoe UI",sans-serif;
 }
 
-/* ================= ORDER FORM ================= */
-.order-form {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
-  background: #f5f7fa;
-  padding: 15px;
-  border-radius: 8px;
-  margin-bottom: 20px;
-}
+/* ================= HEADER ================= */
 
-.order-form input {
-  padding: 8px;
-  font-size: 14px;
-}
-
-.order-form button {
-  grid-column: span 3;
-  padding: 10px;
-  background: #2563eb;
-  color: white;
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.order-form button:hover {
-  background: #1e40af;
+.orders-page h2{
+  text-align:center;
+  color:#0B5ED7;
+  font-size:38px;
+  margin-bottom:25px;
+  font-weight:700;
 }
 
 /* ================= SEARCH ================= */
-.search-input {
-  width: 100%;
-  max-width: 400px;
-  padding: 8px 12px;
-  margin: 12px 0 20px 0;
-  border: 1px solid #ccc;
-  border-radius: 6px;
-  font-size: 14px;
+
+.search-input{
+  width:100%;
+  max-width:420px;
+  padding:12px 16px;
+  margin:0 10px 20px 0;
+  border:1px solid #d8e2ef;
+  border-radius:10px;
+  background:#fff;
+  font-size:15px;
+  transition:.3s;
+}
+
+.search-input:focus{
+  outline:none;
+  border-color:#0B5ED7;
+  box-shadow:0 0 0 4px rgba(11,94,215,.12);
+}
+
+/* ================= FORM ================= */
+
+.order-form{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:15px;
+  background:#fff;
+  padding:22px;
+  margin:25px 0;
+  border-radius:16px;
+  box-shadow:0 8px 24px rgba(0,0,0,.06);
+}
+
+.order-form input,
+.order-form select{
+
+  width:100%;
+  padding:12px 14px;
+  border:1px solid #d8e2ef;
+  border-radius:10px;
+  font-size:14px;
+  background:#fafcff;
+
+}
+
+.order-form input:focus,
+.order-form select:focus{
+
+  outline:none;
+  border-color:#0B5ED7;
+  box-shadow:0 0 0 4px rgba(11,94,215,.12);
+
+}
+
+.order-form button{
+
+  grid-column:1/-1;
+
+  padding:14px;
+
+  border:none;
+
+  border-radius:10px;
+
+  background:#0B5ED7;
+
+  color:white;
+
+  font-size:16px;
+
+  font-weight:600;
+
+  cursor:pointer;
+
+  transition:.3s;
+
+}
+
+.order-form button:hover{
+
+  background:#004FC5;
+
+  transform:translateY(-2px);
+
 }
 
 /* ================= TABLE ================= */
-.orders-table {
-  width: 100%;
-  border-collapse: collapse;
-  background: white;
+
+.orders-table{
+
+  width:100%;
+
+  border-collapse:collapse;
+
+  background:white;
+
+  border-radius:16px;
+
+  overflow:hidden;
+
+  box-shadow:0 8px 24px rgba(0,0,0,.06);
+
 }
 
-.orders-table th,
-.orders-table td {
-  border: 1px solid #ddd;
-  padding: 8px;
-  text-align: left;
+.orders-table th{
+
+  background:#0f172a;
+
+  color:white;
+
+  padding:15px;
+
+  text-align:left;
+
+  cursor:pointer;
+
+  position:sticky;
+
+  top:0;
+
+  z-index:2;
+
+  font-size:14px;
+
 }
 
-.orders-table th {
-  background: #1e293b;
-  color: white;
-  cursor: pointer;
-  user-select: none;
-  position: relative;
+.orders-table th:hover{
+
+  background:#1e293b;
+
 }
 
-.orders-table th:hover {
-  background-color: #334155;
+.orders-table td{
+
+  padding:14px;
+
+  border-bottom:1px solid #edf2f7;
+
+  font-size:14px;
+
 }
 
-/* Sort indicator */
-.orders-table th::after {
-  content: " ⇅";
-  font-size: 12px;
-  color: #cbd5e1;
+.orders-table tr:nth-child(even){
+
+  background:#fafcff;
+
 }
 
-/* ================= ACTION BUTTONS ================= */
-.orders-table button {
-  padding: 4px 8px;
-  border-radius: 4px;
-  border: none;
-  cursor: pointer;
-  font-size: 13px;
+.orders-table tr:hover{
+
+  background:#eef6ff;
+
 }
 
-.orders-table button.edit {
-  background-color: #2563eb;
-  color: white;
+/* ================= BUTTONS ================= */
+
+.orders-table button{
+
+  border:none;
+
+  border-radius:8px;
+
+  padding:7px 12px;
+
+  cursor:pointer;
+
+  font-size:13px;
+
+  font-weight:600;
+
+  transition:.25s;
+
 }
 
-.orders-table button.edit:hover {
-  background-color: #1e40af;
+.orders-table button.edit{
+
+  background:#0B5ED7;
+
+  color:white;
+
 }
 
-.orders-table button.delete {
-  background-color: #dc2626;
-  color: white;
-  margin-left: 6px;
+.orders-table button.edit:hover{
+
+  background:#004FC5;
+
 }
 
-.orders-table button.delete:hover {
-  background-color: #991b1b;
+.orders-table button.delete{
+
+  background:#dc2626;
+
+  color:white;
+
+  margin-left:8px;
+
 }
 
-/* ================= EMPTY STATE ================= */
-.orders-table td[colspan] {
-  padding: 20px;
-  text-align: center;
-  color: #6b7280;
+.orders-table button.delete:hover{
+
+  background:#991b1b;
+
+}
+
+/* ================= EMPTY ================= */
+
+.orders-table td[colspan]{
+
+  text-align:center;
+
+  padding:30px;
+
+  color:#64748b;
+
+  font-style:italic;
+
+}
+
+/* ================= MOBILE ================= */
+
+@media(max-width:768px){
+
+.orders-page{
+
+  padding:20px;
+
+}
+
+.orders-page h2{
+
+  font-size:30px;
+
+}
+
+.order-form{
+
+  grid-template-columns:1fr;
+
+}
+
+.search-input{
+
+  max-width:100%;
+
+}
+
+.orders-table{
+
+  display:block;
+
+  overflow-x:auto;
+
+}
+
 }

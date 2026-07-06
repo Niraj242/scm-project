@@ -1,75 +1,75 @@
 /* =========================================================
    CONTAINER & HEADERS
    ========================================================= */
-.traceability-container {
-  padding: 24px;
-  background-color: #f8fafc;
-  min-height: 100vh;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+.traceability-container{
+    min-height:100vh;
+    padding:30px;
+    background:#f4f7fb;
+    font-family:"Segoe UI",sans-serif;
 }
 
-.header-section {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  margin-bottom: 24px;
+.header-section{
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    background:#fff;
+    padding:20px 25px;
+    border-radius:14px;
+    margin-bottom:25px;
+    box-shadow:0 8px 22px rgba(0,0,0,.06);
 }
 
-.header-section h1 {
-  font-size: 28px;
-  font-weight: 700;
-  color: #0f172a;
-  margin: 0 0 4px 0;
+.header-section h1{
+    font-size:34px;
+    color:#0B5ED7;
+    margin-bottom:5px;
 }
 
-.sub-tag {
-  color: #64748b;
-  font-size: 14px;
-  margin: 0;
+.sub-tag{
+    color:#64748b;
+    font-size:15px;
 }
-
 /* =========================================================
    CONTROL ACTIONS
    ========================================================= */
-.search-box {
-  padding: 10px 16px;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  width: 260px;
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
+.search-box{
+    width:280px;
+    padding:12px 16px;
+    border:1px solid #d9e2ef;
+    border-radius:10px;
+    background:#fff;
+    transition:.3s;
 }
 
-.search-box:focus {
-  border-color: #3b82f6;
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+.search-box:focus{
+    outline:none;
+    border-color:#0B5ED7;
+    box-shadow:0 0 0 4px rgba(11,94,215,.12);
 }
 
-.back-btn {
-  background-color: #f1f5f9;
-  border: 1px solid #cbd5e1;
-  padding: 8px 16px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-weight: 600;
-  color: #334155;
-  transition: background-color 0.2s;
+.back-btn{
+    padding:11px 18px;
+    border:none;
+    border-radius:10px;
+    background:#0B5ED7;
+    color:#fff;
+    font-weight:600;
+    cursor:pointer;
+    transition:.25s;
 }
 
-.back-btn:hover {
-  background-color: #e2e8f0;
+.back-btn:hover{
+    background:#004FC5;
 }
 
 /* =========================================================
    TABLE ARCHITECTURE (GRID MATRIX)
    ========================================================= */
-.table-wrapper {
-  background: #ffffff;
-  border-radius: 8px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-  overflow-x: auto;
-  margin-bottom: 32px;
+.table-wrapper{
+    background:#fff;
+    border-radius:16px;
+    overflow:hidden;
+    box-shadow:0 10px 28px rgba(0,0,0,.08);
 }
 
 .trace-table {
@@ -80,11 +80,14 @@
   color: #334155;
 }
 
-.trace-table th, 
-.trace-table td {
-  border: 1px solid #e2e8f0;
-  padding: 12px;
-  vertical-align: middle;
+.trace-table th{
+    padding:15px;
+    font-size:13px;
+    font-weight:600;
+}
+
+.trace-table td{
+    padding:13px;
 }
 
 /* Super Column Headers */
@@ -110,8 +113,12 @@
 }
 
 /* Row Hover Interaction */
-.data-row:hover td {
-  background-color: #f8fafc;
+.data-row{
+    transition:.2s;
+}
+
+.data-row:hover td{
+    background:#eef6ff;
 }
 
 /* Spanned Cells Lock overrides */
@@ -148,15 +155,11 @@
 /* =========================================================
    STATUS BADGES SYSTEM
    ========================================================= */
-.status-badge {
-  display: inline-block;
-  padding: 4px 12px;
-  border-radius: 9999px;
-  font-size: 11px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.2px;
-  white-space: nowrap;
+.status-badge{
+    padding:6px 14px;
+    border-radius:30px;
+    font-size:11px;
+    font-weight:700;
 }
 
 .status-badge.completed {
@@ -212,19 +215,12 @@
   border: 1px solid #f87171;
 }
 
-.initializing-box {
-  background-color: #eff6ff;
-  border: 1px solid #bfdbfe;
-  padding: 24px;
-  border-radius: 8px;
-  text-align: center;
-  margin-bottom: 24px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
+.initializing-box{
+    padding:35px;
+    border-radius:14px;
+    background:#fff;
+    box-shadow:0 8px 24px rgba(0,0,0,.06);
 }
-
 .initializing-box strong { 
   color: #1e3a8a; 
 }

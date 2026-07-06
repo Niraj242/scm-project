@@ -10,28 +10,28 @@ export default function MainDashboard() {
       title: "Transit Buffer Weighing Data",
       desc: "Transit Buffer Entry & Calibration tracking",
       path: "/tbe",
-      icon: "T",
+      icon: "📦",
     },
     
     {
       title: "MO Traceability",
       desc: "End-to-end manufacturing order tracking",
       path: "/traceability",
-      icon: "MO",
+      icon: "🔍",
     },
     
     {
       title: "After Channel Entries",
       desc: "Dismantling, Rework, Accurate & CPS Entry",
       path: "/afterchannel",
-      icon: "AC",
+      icon: "⚙️",
     },
     
     {
       title: "SHO Scheduling",
       desc: "HT and FOD Scheduling",
       path: "/sho_scheduling",
-      icon: "SHO",
+      icon: "📅",
     },
 
   ];

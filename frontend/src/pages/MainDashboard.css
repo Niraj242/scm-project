@@ -1,61 +1,265 @@
-.dashboard-container {
-  min-height: 100vh;
-  background: linear-gradient(135deg, #eef2ff, #f8fafc);
-  padding: 40px;
-  font-family: "Segoe UI", sans-serif;
+*{
+    margin:0;
+    padding:0;
+    box-sizing:border-box;
 }
 
-.dashboard-header {
-  text-align: center;
-  margin-bottom: 40px;
+body{
+    font-family:"Segoe UI",sans-serif;
+    background:#eef3f9;
 }
 
-.dashboard-header h1 {
-  font-size: 32px;
-  color: #1e293b;
-  margin-bottom: 10px;
+.dashboard-container{
+    min-height:100vh;
+    padding:45px;
+    background:
+    radial-gradient(circle at top right,#dbeafe 0%,transparent 35%),
+    radial-gradient(circle at bottom left,#e0f2fe 0%,transparent 30%),
+    #f8fbff;
 }
 
-.dashboard-header p {
-  color: #475569;
-  font-size: 16px;
+/* ================= HEADER ================= */
+
+.dashboard-header{
+    background:#ffffff;
+    border-radius:18px;
+    padding:35px 40px;
+    margin-bottom:40px;
+    box-shadow:0 10px 25px rgba(0,0,0,.06);
+    border-left:8px solid #0B5ED7;
 }
 
-.dashboard-grid {
-  display: grid;
-  /* Added max-width to prevent cards from stretching too wide on massive monitors */
-  max-width: 1200px;
-  margin: 0 auto; 
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 25px;
+.dashboard-header h1{
+    font-size:38px;
+    color:#0B5ED7;
+    margin-bottom:10px;
 }
 
-.dashboard-card {
-  background: white;
-  border-radius: 16px;
-  padding: 30px 20px;
-  text-align: center;
-  cursor: pointer;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.08);
-  transition: all 0.3s ease;
+.dashboard-header p{
+    color:#64748b;
+    font-size:17px;
 }
 
-.dashboard-card:hover {
-  transform: translateY(-8px);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+/* ================= GRID ================= */
+
+.dashboard-grid{
+
+    max-width:1300px;
+
+    margin:auto;
+
+    display:grid;
+
+    grid-template-columns:repeat(auto-fit,minmax(290px,1fr));
+
+    gap:30px;
+
 }
 
-.card-icon {
-  font-size: 40px;
-  margin-bottom: 15px;
+/* ================= CARD ================= */
+
+.dashboard-card{
+
+    position:relative;
+
+    background:rgba(255,255,255,.75);
+
+    backdrop-filter:blur(14px);
+
+    border:1px solid rgba(255,255,255,.6);
+
+    border-radius:22px;
+
+    padding:35px 30px;
+
+    cursor:pointer;
+
+    transition:.35s;
+
+    overflow:hidden;
+
+    box-shadow:0 15px 30px rgba(0,0,0,.08);
+
 }
 
-.dashboard-card h3 {
-  color: #0f172a;
-  margin-bottom: 10px;
+.dashboard-card::before{
+
+    content:"";
+
+    position:absolute;
+
+    width:180px;
+
+    height:180px;
+
+    background:#dbeafe;
+
+    border-radius:50%;
+
+    top:-80px;
+
+    right:-80px;
+
+    transition:.35s;
+
 }
 
-.dashboard-card p {
-  color: #64748b;
-  font-size: 14px;
+.dashboard-card:hover{
+
+    transform:translateY(-10px);
+
+    box-shadow:0 20px 40px rgba(11,94,215,.18);
+
+}
+
+.dashboard-card:hover::before{
+
+    transform:scale(1.3);
+
+}
+
+/* ================= ICON ================= */
+
+.card-icon{
+
+    width:75px;
+
+    height:75px;
+
+    border-radius:18px;
+
+    display:flex;
+
+    justify-content:center;
+
+    align-items:center;
+
+    background:linear-gradient(135deg,#0B5ED7,#4F8DFF);
+
+    color:white;
+
+    font-size:28px;
+
+    font-weight:bold;
+
+    margin-bottom:25px;
+
+    position:relative;
+
+    z-index:2;
+
+}
+
+.dashboard-card:nth-child(2) .card-icon{
+
+    background:linear-gradient(135deg,#10B981,#34D399);
+
+}
+
+.dashboard-card:nth-child(3) .card-icon{
+
+    background:linear-gradient(135deg,#F59E0B,#FBBF24);
+
+}
+
+.dashboard-card:nth-child(4) .card-icon{
+
+    background:linear-gradient(135deg,#8B5CF6,#A78BFA);
+
+}
+
+/* ================= TEXT ================= */
+
+.dashboard-card h3{
+
+    font-size:22px;
+
+    color:#0f172a;
+
+    margin-bottom:12px;
+
+    position:relative;
+
+    z-index:2;
+
+}
+
+.dashboard-card p{
+
+    color:#64748b;
+
+    font-size:15px;
+
+    line-height:1.7;
+
+    position:relative;
+
+    z-index:2;
+
+}
+
+/* ================= ARROW ================= */
+
+.dashboard-card::after{
+
+    content:"→";
+
+    position:absolute;
+
+    right:25px;
+
+    bottom:20px;
+
+    font-size:26px;
+
+    color:#0B5ED7;
+
+    opacity:.3;
+
+    transition:.3s;
+
+}
+
+.dashboard-card:hover::after{
+
+    right:18px;
+
+    opacity:1;
+
+}
+
+/* ================= RESPONSIVE ================= */
+
+@media(max-width:768px){
+
+.dashboard-container{
+
+    padding:25px;
+
+}
+
+.dashboard-header{
+
+    padding:25px;
+
+}
+
+.dashboard-header h1{
+
+    font-size:30px;
+
+}
+
+.dashboard-grid{
+
+    gap:20px;
+
+}
+
+.dashboard-card{
+
+    padding:28px;
+
+}
+
 }

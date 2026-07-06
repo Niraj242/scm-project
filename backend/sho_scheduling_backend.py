@@ -798,7 +798,12 @@ def generate_schedule(payload: ScheduleRequest):
                                 "missed_boxes": f"{missed_val} - Missing Machine Rate" 
                             })
 
-                sorted_parts = sorted(part_options.keys(), key=lambda k: (len(part_options[k]['machines']), -part_options[k]['needed']))
+                # Modification: Sort dynamically by part availability time chronologically to prevent machine wait-idle gaps 
+                sorted_parts = sorted(part_options.keys(), key=lambda k: (
+                    part_available_time.get((k[0], k[1], day_idx), 0.0), 
+                    len(part_options[k]['machines']), 
+                    -part_options[k]['needed']
+                ))
                 
                 machine_versatility = {m: 0 for m in m_state_dict}
                 for pk in sorted_parts:

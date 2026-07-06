@@ -497,8 +497,15 @@ const Afterchannel = () => {
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, activeTab)}>
               <fieldset className={`form-fieldset ${entryMode === 'OUT' ? 'form-fieldset-out' : ''}`}>
-                <legend>{activeTab.toUpperCase()} - {entryMode==='IN' ? 'Receiving Log' : 'Dispatch Log'}</legend>
-                <div className="form-grid-3">
+              <div className="form-card-title">
+  {activeTab.toUpperCase()} - {entryMode === "IN"
+      ? "Receiving Log"
+      : "Dispatch Log"}
+</div>
+
+<div className="form-card-body">
+
+  <div className="form-grid-3">
                     {entryMode === 'IN' ? (
                       <>
                         {activeTab === 'cps' && <div className="field-group"><label className="field-label">Item</label><select name="item" defaultValue={editingRecord?.item_type || ''} className="field-input"><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>}
@@ -523,6 +530,7 @@ const Afterchannel = () => {
                       </>
                     )}
                 </div>
+                </div>
               </fieldset>
               <button type="submit" className={`submit-btn ${entryMode === 'IN' ? 'submit-btn-in' : 'submit-btn-out'}`}>{editingRecord ? 'Update Entry' : 'Save Entry'}</button>
             </form>
@@ -540,15 +548,78 @@ const Afterchannel = () => {
               </div>
  
               {entryMode === 'IN' ? (
-                <fieldset className="form-fieldset">
-                  <legend>Dismantling - Receiving Log</legend>
-                  <div className="form-grid-3">
-                    <div className="field-group"><label className="field-label">In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} className="field-input" required/></div>
-                    <div className="field-group"><label className="field-label">Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} className="field-input"><option></option><option>1</option><option>2</option><option>3</option></select></div>
-                    <div className="field-group"><label className="field-label">Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} className="field-input"/></div>
-                    <div className="field-group"><label className="field-label">Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} className="field-input" required/></div>
-                  </div>
-                </fieldset>
+
+<fieldset className="form-fieldset">
+
+    <div className="form-card-title">
+        ACCURATE - RECEIVING LOG
+    </div>
+
+    <div className="form-card-body">
+
+       <div className="form-grid-3">
+
+    <div className="field-group">
+        <label className="field-label">In Date</label>
+        <input
+            type="date"
+            name="inDate"
+            defaultValue={editingRecord?.in_date || ""}
+            className="field-input"
+            required
+        />
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">Shift In</label>
+        <select
+            name="shiftIn"
+            defaultValue={editingRecord?.shift_in || ""}
+            className="field-input"
+        >
+            <option></option>
+            <option>1</option>
+            <option>2</option>
+            <option>3</option>
+        </select>
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">PC No</label>
+        <input
+            type="text"
+            name="pc"
+            defaultValue={editingRecord?.pc_no || ""}
+            className="field-input"
+        />
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">Material In From</label>
+        <input
+            list="depts-list"
+            name="materialInFrom"
+            defaultValue={editingRecord?.material_in_from || ""}
+            className="field-input"
+        />
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">Qty In</label>
+        <input
+            type="number"
+            name="qtyIn"
+            defaultValue={editingRecord?.qty_in || ""}
+            className="field-input"
+            required
+        />
+    </div>
+
+</div>
+
+    </div>
+
+</fieldset>
               ) : (
                 <fieldset className="form-fieldset form-fieldset-out">
                   <legend>Dismantling - Dispatch Log</legend>

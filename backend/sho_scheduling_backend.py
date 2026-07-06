@@ -22,6 +22,12 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 EXCEL_CACHE = {}
 CACHE_TTL = 600
 
+# Cache for parsed lookup dictionaries to prevent redundant O(N) worksheet scans
+PARSED_MASTER_DATA = {
+    "box_matrix": ({}, 0),  # (box_matrix_dict, cache_timestamp)
+    "production": ({}, {}, {'FACE': {}, 'OD': {}}, 0) # (weight_matrix, furnace_map, machines_data, cache_timestamp)
+}
+
 # --- 2. MONTHLY TRACKING STORAGE ---
 MONTHLY_FILE = "monthly_tracking.json"
 
@@ -108,69 +114,67 @@ def is_invalid_part(raw_text):
         if k in t: return True
     return False
 
-# Extremely robust lookup extraction favoring the numeric family
 def get_lookup_variants(raw_text):
+    """
+    Strict normalization logic. Only removes spaces, formatting, 
+    and suffixes, keeping the absolute base numeric family bounded.
+    """
     if is_invalid_part(raw_text): return []
-    variants = []
     t = str(raw_text).upper().strip()
     
     if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
-    if t.startswith("MF"): t = t[2:]
+    if t.startswith("MF"): t = t[2:].strip()
     
-    if '/' in t: 
+    # Safely handle "/" when not suffix
+    if '/' in t:
         parts = t.split('/')
-        t = parts[0].strip()
+        if not any(x in parts[1] for x in ['Q', 'X']):
+            t = parts[0].strip()
+
+    # Safely strip manufacturing suffixes from the end of the string
+    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q']
+    t_nosuff = t
+    changed = True
+    while changed:
+        changed = False
+        for suff in suffixes:
+            # Pattern matches the suffix at the very end, preceded by optional formatting
+            pattern = r'[\s\-_/]*' + re.escape(suff) + r'$'
+            new_t = re.sub(pattern, '', t_nosuff)
+            if new_t != t_nosuff:
+                t_nosuff = new_t
+                changed = True
+                
+    t_nosuff = t_nosuff.strip()
     
-    # Strip manufacturing suffixes
-    t_nosuff = re.sub(r'(\s|/)(A|B|AB|AE|E|J2|J|X|Q|VK210).*$', '', t).strip()
-    
-    # Strip common prefixes for deep numeric search
+    # Strip all remaining formatting characters
     t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
-    t_nopfx = t_clean
+    
     prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC']
+    t_nopfx = t_clean
+    found_prefix = ""
     for pfx in prefixes_to_strip:
-        if t_nopfx.startswith(pfx):
-            t_nopfx = t_nopfx[len(pfx):]
+        if t_clean.startswith(pfx):
+            t_nopfx = t_clean[len(pfx):]
+            found_prefix = pfx
             break
 
-    # 1. PRIMARY LOOKUP: Numeric Family
-    match = re.search(r'(\d{3,5})', t_nopfx)
-    if match:
-        base = match.group(1)
-        variants.append(base)                  
-        variants.append(str(int(base)))        
-        
-    # 2. SECONDARY: Cleaned Without Prefix
-    if t_nopfx and t_nopfx not in variants:
-        variants.append(t_nopfx)
-        
-    # 3. TERTIARY: Cleaned With Prefix
-    if t_clean and t_clean not in variants:
-        variants.append(t_clean)
-        
-    # 4. FALLBACKS: Original and Partial
-    if t_nosuff not in variants: variants.append(t_nosuff)
-    if t not in variants: variants.append(t)
+    # STRICT ORDER: Exact -> Normalized -> Prefixed -> Base Family
+    variants = []
+    if t and t not in variants: variants.append(t)
+    if t_clean and t_clean not in variants: variants.append(t_clean)
+    if found_prefix and t_nopfx:
+        pf_val = f"{found_prefix}{t_nopfx}"
+        if pf_val not in variants: variants.append(pf_val)
+    if t_nopfx and t_nopfx not in variants: variants.append(t_nopfx)
     
-    # Add prefix re-attachments for edge cases
-    if match:
-        base = match.group(1)
-        for pfx in prefixes_to_strip:
-            if pfx in t_clean:
-                variants.append(f"{pfx}{base}")
-                variants.append(f"{pfx}-{base}")
-
-    # Remove empties and preserve priority order
-    res = []
-    for v in variants:
-        if v and v not in res: res.append(v)
-    return res
+    return variants
 
 # Preserve display names precisely
 def get_display_name(raw_text):
     if pd.isna(raw_text): return ""
     t = str(raw_text).strip().upper()
-    if t.startswith("MF"): t = t[2:]
+    if t.startswith("MF"): t = t[2:].strip()
     return t
 
 def safe_float(val):
@@ -220,41 +224,26 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
     except Exception as e:
         return None, [f"[{file_label}] ERR: {str(e)}"]
 
+# Lookups now perform strict O(1) dictionary matching. NO FALLBACK LOOPS.
 def get_rate_for_part(display_name, p_code, rates):
     variants = get_lookup_variants(display_name)
-    # 1. Exact Match via variants
     for var in variants:
-        if f"{var}_{p_code}" in rates: return rates[f"{var}_{p_code}"]
-    # 2. Contains Match
-    for var in variants:
-        for k, v in rates.items():
-            if not k.endswith(f"_{p_code}"): continue
-            k_base = k.split('_')[0]
-            if var == k_base or var in k_base or k_base in var: return v
+        if f"{var}_{p_code}" in rates: 
+            return rates[f"{var}_{p_code}"]
     return 0.0
 
 def get_weight_for_part(display_name, p_code, weights):
     variants = get_lookup_variants(display_name)
     for var in variants:
-        if f"{var}_{p_code}" in weights: return weights[f"{var}_{p_code}"]
-    for var in variants:
-        for k, v in weights.items():
-            if not k.endswith(f"_{p_code}"): continue
-            k_base = k.split('_')[0]
-            if var == k_base or var in k_base or k_base in var: return v
+        if f"{var}_{p_code}" in weights: 
+            return weights[f"{var}_{p_code}"]
     return None
 
 def get_box_for_part_detailed(display_name, p_code, box_matrix):
-    """Returns (qty, source, lookup_key) to separate exact logic and display logic"""
     variants = get_lookup_variants(display_name)
     for var in variants:
         if var in box_matrix and p_code in box_matrix[var]: 
             return box_matrix[var][p_code]['qty'], box_matrix[var][p_code]['source'], var
-    for var in variants:
-        for k, v in box_matrix.items():
-            if var in k or k in var:
-                if p_code in v: 
-                    return v[p_code]['qty'], v[p_code]['source'], var
     return 0.0, "NONE", variants[0] if variants else display_name
 
 def get_box_for_part(display_name, p_code, box_matrix):
@@ -264,17 +253,13 @@ def get_box_for_part(display_name, p_code, box_matrix):
 def get_furnaces_for_part(display_name, p_code, furnace_map):
     variants = get_lookup_variants(display_name)
     for var in variants:
-        if f"{var}_{p_code}" in furnace_map: return furnace_map[f"{var}_{p_code}"]
-    for var in variants:
-        for k, v in furnace_map.items():
-            if not k.endswith(f"_{p_code}"): continue
-            k_base = k.split('_')[0]
-            if var == k_base or var in k_base or k_base in var: return v
+        if f"{var}_{p_code}" in furnace_map: 
+            return furnace_map[f"{var}_{p_code}"]
     return list(FURNACE_SPECS.keys())
 
 def format_time(rel_hrs):
     total_minutes = int(round(rel_hrs * 60))
-    base_hour = 10 # Production starts 10:00 AM
+    base_hour = 10 
     h = (base_hour + (total_minutes // 60)) % 24
     m = total_minutes % 60
     days_added = (base_hour + (total_minutes // 60)) // 24
@@ -339,7 +324,6 @@ def generate_schedule(payload: ScheduleRequest):
                         raw_t = mv_val if mv_val and mv_val not in ["NAN", "NONE"] else last_mf
                         
                         if is_invalid_part(raw_t): continue
-                        
                         display_name = get_display_name(raw_t)
 
                         if display_name not in monthly_data[month_str]:
@@ -368,10 +352,14 @@ def generate_schedule(payload: ScheduleRequest):
                             channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
         del sheets_zero
 
-        # 2. BOX MATRIX
+        # 2. BOX MATRIX (Cached Master Parsing)
         box_matrix = {}
         sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
-        if sheets_box:
+        box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
+        
+        if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
+            box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
+        elif sheets_box:
             # Always process RING PER BOX. first as primary data source
             if 'RING PER BOX.' in sheets_box:
                 df_box = sheets_box['RING PER BOX.'].fillna('')
@@ -390,7 +378,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 if or_qty > 0: box_matrix[ck]['OR'] = {'qty': or_qty, 'source': 'RING PER BOX.'}
                                 if ir_qty > 0: box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': 'RING PER BOX.'}
             
-            # Use BOX PER DAY sheets strictly as a fallback if the above source is unavailable
+            # Fallback sheets
             for fb_sheet in ['BOX PER DAY DGBB', 'BOX PER DAY TRB']:
                 if fb_sheet in sheets_box:
                     df_fb = sheets_box[fb_sheet].fillna('')
@@ -413,7 +401,6 @@ def generate_schedule(payload: ScheduleRequest):
                             clean_keys = get_lookup_variants(raw_t)
                             for ck in clean_keys:
                                 if ck not in box_matrix: box_matrix[ck] = {}
-                                # Only populate if Ring Per Box did not already fulfill it
                                 if 'IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0:
                                     fq = 0.0
                                     if ir_col != -1: fq = safe_float(row_vals[ir_col])
@@ -424,6 +411,8 @@ def generate_schedule(payload: ScheduleRequest):
                                     if or_col != -1: fq = safe_float(row_vals[or_col])
                                     elif single_rpb_col != -1: fq = safe_float(row_vals[single_rpb_col])
                                     if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': fb_sheet}
+            
+            PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
         del sheets_box
 
         # 3. BUFFERS
@@ -452,9 +441,7 @@ def generate_schedule(payload: ScheduleRequest):
                     buffers_by_fam[display_name][stage][sub_ring_type] += buf_val
 
         def process_requirements_for_day(demands, in_out_buffers):
-            f_req = {}
-            o_req = {}
-            h_req = {}
+            f_req, o_req, h_req = {}, {}, {}
             for display_name, data in demands.items():
                 rpb_ir = get_box_for_part(display_name, 'IR', box_matrix)
                 rpb_or = get_box_for_part(display_name, 'OR', box_matrix)
@@ -468,11 +455,9 @@ def generate_schedule(payload: ScheduleRequest):
                     else: avail_buf_rings = raw_buf 
                     
                     if avail_buf_rings >= base_rings:
-                        used_rings = base_rings
-                        rem_rings = avail_buf_rings - base_rings
+                        used_rings, rem_rings = base_rings, avail_buf_rings - base_rings
                     else:
-                        used_rings = avail_buf_rings
-                        rem_rings = 0.0
+                        used_rings, rem_rings = avail_buf_rings, 0.0
                         
                     if display_name in in_out_buffers:
                         if payload.unit_mode == 'Days': new_raw = (rem_rings / base_rings) if base_rings > 0 else 0
@@ -499,15 +484,18 @@ def generate_schedule(payload: ScheduleRequest):
         face_req_d1, od_req_d1, ht_req_d1 = process_requirements_for_day(channel_demands_day1, buffers_by_fam)
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
-        # 4. PRODUCTION RATES & WEIGHTS
-        weight_matrix = {}
-        furnace_map = {}
-        machines_data = {'FACE': {}, 'OD': {}}
-
+        # 4. PRODUCTION RATES & WEIGHTS (Cached Master Parsing)
         sheets_prod, logs3 = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
-        
-        if sheets_prod:
+        prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
+
+        if PARSED_MASTER_DATA["production"][3] == prod_cache_ts:
+            weight_matrix, furnace_map, machines_data, _ = PARSED_MASTER_DATA["production"]
+        elif sheets_prod:
+            weight_matrix = {}
+            furnace_map = {}
+            machines_data = {'FACE': {}, 'OD': {}}
+
             if 'WEIGHTS' in sheets_prod:
                 df_w = sheets_prod['WEIGHTS'].fillna('')
                 header_idx = -1
@@ -626,15 +614,19 @@ def generate_schedule(payload: ScheduleRequest):
                                         if rate_rings > 0:
                                             for ck in clean_keys:
                                                 machines_data[m_type][m_num]['rates'][f"{ck}_{pc}"] = rate_rings
+            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, prod_cache_ts)
+        del sheets_prod
 
         # ==========================================
         # 5. GLOBAL OPTIMIZATION SCHEDULING (Load Balancing)
         # ==========================================
 
         def allocate_grinding(m_type, dict_d1, dict_d2):
-            allocated_result = {m_num: {"machine": m_num, "rows": []} for m_num in machines_data.get(m_type, {})}
-            machine_ready_time = {m_num: m_info['ready_time'] for m_num, m_info in machines_data.get(m_type, {}).items()}
-            machine_last_fam = {m_num: None for m_num in machines_data.get(m_type, {})}
+            # Machine ready times are strictly local states to avoid mutation side effects on cached master dictionary
+            m_state_dict = machines_data.get(m_type, {})
+            allocated_result = {m_num: {"machine": m_num, "rows": []} for m_num in m_state_dict}
+            machine_ready_time = {m_num: m_info.get('ready_time', 0.0) for m_num, m_info in m_state_dict.items()}
+            machine_last_fam = {m_num: None for m_num in m_state_dict}
             
             def process_priority_pass(demands_dict, is_day_2=False):
                 part_options = {}
@@ -647,7 +639,7 @@ def generate_schedule(payload: ScheduleRequest):
                         if rings_needed <= 0: continue
                         
                         compatible_machines = []
-                        for m_num, m_info in machines_data.get(m_type, {}).items():
+                        for m_num, m_info in m_state_dict.items():
                             rate = get_rate_for_part(display_name, p_code, m_info.get('rates', {}))
                             if rate > 0: compatible_machines.append((m_num, rate))
                         
@@ -669,7 +661,7 @@ def generate_schedule(payload: ScheduleRequest):
 
                 sorted_parts = sorted(part_options.keys(), key=lambda k: (len(part_options[k]['machines']), -part_options[k]['needed']))
                 
-                machine_versatility = {m: 0 for m in machines_data.get(m_type, {})}
+                machine_versatility = {m: 0 for m in m_state_dict}
                 for pk in sorted_parts:
                     for m_num, _ in part_options[pk]['machines']:
                         machine_versatility[m_num] += 1
@@ -686,9 +678,7 @@ def generate_schedule(payload: ScheduleRequest):
                         versatility_penalty = machine_versatility.get(m_key, 0) * 1.5
                         return end_time + versatility_penalty
 
-                    # Split large jobs across multiple capable machines for load balancing
                     while rings_needed > 0:
-                        # Cap distribution chunk to max 8 hours if we have choices, preventing single-machine overload
                         best_cands = sorted(candidates, key=lambda x: get_machine_score(x[0], x[1], rings_needed))
                         best_m, best_rate = best_cands[0]
                         
@@ -709,7 +699,6 @@ def generate_schedule(payload: ScheduleRequest):
                         machine_last_fam[best_m] = display_name
                         rings_needed -= chunk_qty
                         
-                        # Use detailed lookup to generate strictly display Boxes and emit debug verification
                         rpb, source, lookup_key = get_box_for_part_detailed(display_name, p_code, box_matrix)
                         
                         if rpb > 0:

@@ -18,6 +18,9 @@ const TBE = () => {
   const [detailData, setDetailData] = useState([]);
   const [detailLoading, setDetailLoading] = useState(false);
 
+  // --- SORTING STATE ---
+  const [sortConfig, setSortConfig] = useState(null);
+
   // --- CALCULATOR STATES ---
   const [selectedCells, setSelectedCells] = useState({});
   const [isDragging, setIsDragging] = useState(false);
@@ -175,20 +178,78 @@ const TBE = () => {
     }
   };
 
+  // --- SORTING HELPER FUNCTIONS ---
+  const parseDate = (dateStr) => {
+    if (!dateStr || dateStr === '-') return 0;
+    const parts = dateStr.split('-');
+    if (parts.length === 3) {
+      // Assuming dd-mm-yyyy format
+      return new Date(parts[2], parts[1] - 1, parts[0]).getTime();
+    }
+    return 0;
+  };
+
+  const getEarliestDate = (row) => {
+    const d1 = parseDate(row.sho_in);
+    const d2 = parseDate(row.ch_in);
+    if (d1 === 0) return d2;
+    if (d2 === 0) return d1;
+    return Math.min(d1, d2);
+  };
+
+  const requestSort = (key) => {
+    let direction = 'ascending';
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === 'ascending') {
+      direction = 'descending';
+    }
+    setSortConfig({ key, direction });
+  };
+
+  const getSortIcon = (name) => {
+    if (!sortConfig || sortConfig.key !== name) return '↕';
+    return sortConfig.direction === 'ascending' ? '▲' : '▼';
+  };
+
   const filteredSummary = summaryData.filter(item => {
     return (item.channel_ref && String(item.channel_ref).toLowerCase().includes(search.toLowerCase())) ||
       (item.product_variant && String(item.product_variant).toLowerCase().includes(search.toLowerCase())) ||
       (item.mo_ref && String(item.mo_ref).toLowerCase().includes(search.toLowerCase()));
   });
 
+  // --- REVISED SORTING LOGIC ---
   const sortedSummary = [...filteredSummary].sort((a, b) => {
-    if (a.channel_ref !== b.channel_ref) {
-      return String(a.channel_ref || '').localeCompare(String(b.channel_ref || ''));
+    // If no specific column is clicked, default to Date-based sorting instead of Family
+    if (!sortConfig) {
+      const dateA = getEarliestDate(a);
+      const dateB = getEarliestDate(b);
+      return dateA - dateB;
     }
-    if (a.product_variant !== b.product_variant) {
-      return String(a.product_variant || '').localeCompare(String(b.product_variant || ''));
+
+    const { key, direction } = sortConfig;
+    const valA = a[key];
+    const valB = b[key];
+
+    const isDate = ['sho_in', 'tb_out', 'ch_in', 'ch_out'].includes(key);
+    const isNum = ['sho_qty', 'scrap_qty', 'tb_qty', 'ch_qty'].includes(key);
+
+    if (isDate) {
+      const dA = parseDate(valA);
+      const dB = parseDate(valB);
+      return direction === 'ascending' ? dA - dB : dB - dA;
     }
-    return String(a.ring_type || '').localeCompare(String(b.ring_type || ''));
+
+    if (isNum) {
+      const numA = Number(valA) || 0;
+      const numB = Number(valB) || 0;
+      return direction === 'ascending' ? numA - numB : numB - numA;
+    }
+
+    // String sorting (A to Z)
+    const strA = String(valA || '').toLowerCase();
+    const strB = String(valB || '').toLowerCase();
+    if (strA < strB) return direction === 'ascending' ? -1 : 1;
+    if (strA > strB) return direction === 'ascending' ? 1 : -1;
+    return 0;
   });
 
   const getChannelRowSpan = (dataArray, currentIndex) => {
@@ -346,7 +407,7 @@ const isCalcActive = true;
                 <th className="th-status">Status Tracker</th>
               </tr>
               {/* Row 2 Sticky Headers with corresponding matching tint colors */}
-              <tr className="sub-header">
+               <tr className="sub-header">
                 <th className="sub-meta">Channel Ref</th>
                 <th className="sub-meta">MO</th>
                 <th className="sub-meta">Ring Family</th>
@@ -365,6 +426,52 @@ const isCalcActive = true;
                 <th className="sub-ch">Out Date</th>
                 
                 <th className="sub-status">Tracking Status</th>
+              </tr>
+              {/* Row 2 Sticky Headers with corresponding matching tint colors & sortable capabilities */}
+              <tr className="sub-header" style={{ height: '38px', userSelect: 'none' }}>
+                <th onClick={() => requestSort('channel_ref')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Channel Ref</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('channel_ref')}</span></div>
+                </th>
+                <th onClick={() => requestSort('mo_ref')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>MO</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('mo_ref')}</span></div>
+                </th>
+                <th onClick={() => requestSort('product_variant')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Ring Family</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('product_variant')}</span></div>
+                </th>
+                <th onClick={() => requestSort('ring_type')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Ring Type</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('ring_type')}</span></div>
+                </th>
+                
+                <th onClick={() => requestSort('sho_qty')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Qty</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('sho_qty')}</span></div>
+                </th>
+                <th onClick={() => requestSort('sho_in')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#e0f2fe', color: '#0369a1', border: '1px solid #bae6fd', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>In Date</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('sho_in')}</span></div>
+                </th>
+                <th onClick={() => requestSort('scrap_qty')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#fee2e2', color: '#991b1b', border: '1px solid #fecaca', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Scrap Qty</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('scrap_qty')}</span></div>
+                </th>
+
+                <th onClick={() => requestSort('tb_qty')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Qty</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('tb_qty')}</span></div>
+                </th>
+                <th onClick={() => requestSort('tb_out')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#ffedd5', color: '#9a3412', border: '1px solid #fed7aa', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Out Date</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('tb_out')}</span></div>
+                </th>
+                
+                <th onClick={() => requestSort('ch_qty')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Qty</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('ch_qty')}</span></div>
+                </th>
+                <th onClick={() => requestSort('ch_in')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>In Date</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('ch_in')}</span></div>
+                </th>
+                <th onClick={() => requestSort('ch_out')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#dcfce7', color: '#15803d', border: '1px solid #bbf7d0', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Out Date</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('ch_out')}</span></div>
+                </th>
+                
+                <th onClick={() => requestSort('status')} style={{ cursor: 'pointer', position: 'sticky', top: '42px', zIndex: 10, background: '#f8fafc', color: '#1e293b', border: '1px solid #cbd5e1', padding: '10px', fontSize: '0.9em' }}>
+                  <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}><span>Tracking Status</span><span style={{fontSize: '0.8em', opacity: 0.6}}>{getSortIcon('status')}</span></div>
+                </th>
               </tr>
             </thead>
             <tbody>

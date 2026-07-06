@@ -18,11 +18,15 @@ ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
-FAM_REGEX = re.compile(r'(\d{3,5})')
-
 # --- 1. PERFORMANCE CACHE ---
 EXCEL_CACHE = {}
-CACHE_TTL = 600  # Cache Excel files for 10 minutes
+CACHE_TTL = 600
+
+# Cache for parsed lookup dictionaries to prevent redundant O(N) worksheet scans
+PARSED_MASTER_DATA = {
+    "box_matrix": ({}, 0),  
+    "production": ({}, {}, {}, {}, 0) 
+}
 
 # --- 2. MONTHLY TRACKING STORAGE ---
 MONTHLY_FILE = "monthly_tracking.json"
@@ -30,38 +34,18 @@ MONTHLY_FILE = "monthly_tracking.json"
 def load_monthly_tracking():
     if os.path.exists(MONTHLY_FILE):
         try:
-            with open(MONTHLY_FILE, 'r') as f: return json.load(f)
-        except: return {}
+            with open(MONTHLY_FILE, 'r') as f: 
+                return json.load(f)
+        except: 
+            return {}
     return {}
 
 def save_monthly_tracking(data):
     try:
-        with open(MONTHLY_FILE, 'w') as f: json.dump(data, f)
+        with open(MONTHLY_FILE, 'w') as f: 
+            json.dump(data, f)
     except Exception as e:
         print(f"Error saving monthly tracking: {e}")
-
-# Hardcoded Matrix from User Chart Image
-OPERATION_EXCLUSIONS = {
-    '1': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-    '2': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-    '4': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-    '5': {'OD': ['IR']},
-    '8': {'OD': ['IR']},
-    '11': {'OD': ['IR']},
-    '12': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-    '13': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-    'T1': {'OD': ['IR']},
-    'T2': {'OD': ['IR']},
-    'T3': {'OD': ['IR']},
-    'T4': {'OD': ['IR']},
-    'T5': {'OD': ['IR']},
-    'T6': {'OD': ['IR']},
-    'T7': {'OD': ['IR']},
-    'T8': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-    'T9': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-    'T10': {'OD': ['IR']},
-    'T11': {'FACE': ['IR', 'OR'], 'OD': ['IR', 'OR']},
-}
 
 FURNACE_SPECS = {
     "AICHELIN.(896)": 350.0,
@@ -90,54 +74,89 @@ def get_monthly_tracking():
 
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
-    ch = ch.replace("CH", "").replace("CHANNEL", "").strip()
-    if ch.isdigit(): return str(int(ch))
+    ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
     return ch
 
-def parse_family(prod_text):
-    text = str(prod_text).strip().upper()
-    if "INDUSTRILA" in text: text = text.replace("INDUSTRILA", "INDUSTRIAL")
-    if "AUTOMOTIVE" in text: return None
-    if not text or text in ["NAN", "NONE", "", "UNKNOWN", "TYPE"]: return None
-    
-    if "BB1B420205" in text: return "UC205"
-    
-    for prefix in ["BB1", "BTH", "BT-", "BB-"]:
-        if text.startswith(prefix):
-            text = text[len(prefix):].strip()
-            
-    if not text: return None
-            
-    if "HUB" in text:
-        match_hub = re.search(r'(T?\s*HUB\s*\d+\.?\d*)', text)
-        if match_hub: return match_hub.group(1).replace(" ", "")
-        return "HUB"
-        
-    if text.startswith("T ") or re.match(r'^T\d+', text):
-        match_t = re.search(r'(T\s*\d+)', text)
-        if match_t: return match_t.group(1).replace(" ", "")
-        return "T"
+# Validate rows to prevent scheduling headers/summaries
+def is_invalid_part(raw_text):
+    if pd.isna(raw_text) or not raw_text: return True
+    t = str(raw_text).upper()
+    invalid_keywords = [
+        "PROJECTED", "PLAN", "QTY", "HRS", "DAY", "NAN", "NONE", "UNKNOWN", "TYPE",
+        "WIP", "MTD", "ASKING", "TOTAL"
+    ]
+    for k in invalid_keywords:
+        if k in t: return True
+    return False
 
-    t_norm = text.replace("-", " ").replace("_", " ").replace("/", " ")
-    words = t_norm.split()
+def get_lookup_variants(raw_text, p_code=None):
+    """
+    Strict normalization logic. Keeps the absolute base numeric family bounded.
+    Added logic to handle composite bearings (e.g., 25877/2/25821/2/Q) based on IR/OR.
+    """
+    if is_invalid_part(raw_text): return []
+    t = str(raw_text).upper().strip()
     
-    match = FAM_REGEX.search(text)
-    base = match.group(1) if match else (text.split()[0].split('-')[0] if text.split() else text)
+    if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
+    if t.startswith("MF"): t = t[2:].strip()
     
-    if "BT" in words or text.startswith("BT") or " BT" in text: base = f"BT-{base}"
-    elif "BB" in words or text.startswith("BB") or " BB" in text: base = f"BB-{base}"
-    elif "UC" in text:
-        match_uc = re.search(r'(UC\s*\d+)', text)
-        if match_uc: base = match_uc.group(1).replace(" ", "")
-        
-    return base
+    # Handle composite bearings like 25877/2/25821/2/Q
+    parts = [p.strip() for p in t.split('/') if p.strip()]
+    numeric_parts = [p for p in parts if any(c.isdigit() for c in p) and len(re.sub(r'\D', '', p)) >= 3]
+    
+    if len(numeric_parts) >= 2 and p_code:
+        if p_code == 'IR':
+            t = parts[0]
+        elif p_code == 'OR':
+            # Usually the second major numeric family is the OR
+            t = numeric_parts[1]
+    elif '/' in t:
+        if not any(x in parts[1] for x in ['Q', 'X']):
+            t = parts[0].strip()
 
-def extract_num(text):
-    match = re.search(r'(\d{4,5})', str(text))
-    if match: return match.group(1)
-    match_hub = re.search(r'HUB\s*(\d+\.?\d*)', str(text).upper())
-    if match_hub: return "HUB" + match_hub.group(1).replace(" ", "")
-    return str(text)
+    # Safely strip manufacturing suffixes from the end of the string
+    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q']
+    t_nosuff = t
+    changed = True
+    while changed:
+        changed = False
+        for suff in suffixes:
+            pattern = r'[\s\-_/]*' + re.escape(suff) + r'$'
+            new_t = re.sub(pattern, '', t_nosuff)
+            if new_t != t_nosuff:
+                t_nosuff = new_t
+                changed = True
+                
+    t_nosuff = t_nosuff.strip()
+    
+    # Strip all remaining formatting characters
+    t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
+    
+    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC']
+    t_nopfx = t_clean
+    found_prefix = ""
+    for pfx in prefixes_to_strip:
+        if t_clean.startswith(pfx):
+            t_nopfx = t_clean[len(pfx):]
+            found_prefix = pfx
+            break
+
+    # STRICT ORDER: Exact -> Normalized -> Prefixed -> Base Family
+    variants = []
+    if t and t not in variants: variants.append(t)
+    if t_clean and t_clean not in variants: variants.append(t_clean)
+    if found_prefix and t_nopfx:
+        pf_val = f"{found_prefix}{t_nopfx}"
+        if pf_val not in variants: variants.append(pf_val)
+    if t_nopfx and t_nopfx not in variants: variants.append(t_nopfx)
+    
+    return variants
+
+def get_display_name(raw_text):
+    if pd.isna(raw_text): return ""
+    t = str(raw_text).strip().upper()
+    if t.startswith("MF"): t = t[2:].strip()
+    return t
 
 def safe_float(val):
     if pd.isna(val) or val is None: return 0.0
@@ -154,7 +173,8 @@ def is_target_date(val, target_date):
         return val.day == target_date.day and val.month == target_date.month
         
     v_str = str(val).strip().upper()
-    for symbol in ['-', '/', '.', '_', ':', ' ']: v_str = v_str.replace(symbol, ' ')
+    for symbol in ['-', '/', '.', '_', ':', ' ']: 
+        v_str = v_str.replace(symbol, ' ')
     tokens = v_str.split()
     
     day_str = str(target_date.day)
@@ -167,17 +187,14 @@ def is_target_date(val, target_date):
         return True
     return False
 
-# SPEED OPTIMIZATION: Check cache before downloading
 def get_cached_excel_sheets(url, file_label="Unknown"):
     logs = []
     if not url or url.strip() == "": return None, logs
-    
     now = time.time()
     if url in EXCEL_CACHE:
         cache_time, df_dict = EXCEL_CACHE[url]
         if now - cache_time < CACHE_TTL:
             return df_dict, [f"Loaded {file_label} from ultra-fast cache."]
-            
     try:
         resp = requests.get(url, timeout=30)
         if resp.status_code != 200: return None, logs
@@ -188,23 +205,57 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
     except Exception as e:
         return None, [f"[{file_label}] ERR: {str(e)}"]
 
-def get_rate_for_part(fam, p_code, rates):
-    exact_key = f"{fam}_{p_code}"
-    if exact_key in rates: return rates[exact_key]
+# Lookups now perform strict O(1) dictionary matching
+def get_rate_for_part(display_name, p_code, rates):
+    variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
+        if f"{var}_{p_code}" in rates: 
+            return rates[f"{var}_{p_code}"]
+    return 0.0
+
+def get_weight_for_part(display_name, p_code, weights):
+    variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
+        if f"{var}_{p_code}" in weights: 
+            return weights[f"{var}_{p_code}"]
+    return None
+
+def get_box_for_part_detailed(display_name, p_code, box_matrix):
+    variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
+        if var in box_matrix and p_code in box_matrix[var]: 
+            return box_matrix[var][p_code]['qty'], box_matrix[var][p_code]['source'], var
+    return 0.0, "NONE", variants[0] if variants else display_name
+
+def get_box_for_part(display_name, p_code, box_matrix):
+    qty, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix)
+    return qty
+
+def get_furnaces_for_part(display_name, p_code, furnace_map):
+    variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
+        if f"{var}_{p_code}" in furnace_map: 
+            return furnace_map[f"{var}_{p_code}"]
+    return list(FURNACE_SPECS.keys())
+
+def format_time(rel_hrs):
+    total_minutes = int(round(rel_hrs * 60))
+    base_hour = 10 
+    h = (base_hour + (total_minutes // 60)) % 24
+    m = total_minutes % 60
+    days_added = (base_hour + (total_minutes // 60)) // 24
     
-    num1 = extract_num(fam)
-    for k, v in rates.items():
-        if not k.endswith(f"_{p_code}"): continue
-        k_fam = k.split('_')[0]
-        num2 = extract_num(k_fam)
-        if (num1 and num1 != fam and num1 == num2) or (num1 in k_fam) or (k_fam in num1):
-            return v
-    return 0.0 
+    day_plus = f" (+{days_added})" if days_added > 0 else ""
+    return f"{h:02d}:{m:02d}{day_plus}"
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []
+    
+    # Track completion time for dependencies (HT -> Face -> OD -> CH)
+    part_available_time = {} # Key: (display_name, p_code, day_idx), Value: float (relative hours)
+
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date + timedelta(days=1)
@@ -224,98 +275,101 @@ def generate_schedule(payload: ScheduleRequest):
         
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
-                r_idx, type_col_idx = None, None
+                r_idx, type_col_idx, mv_col_idx = None, None, None
                 c1_col, c2_col = None, None
                 monthly_cols = []
                 
                 for i in range(min(25, len(df_zero))):
                     row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
                     row_joined = " ".join(row_strs)
-                    
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
-                            if val in ["TYPE", "MF", "PART NO", "BRG NO"] or "TYPE" in val: 
-                                type_col_idx = j
-                                break
-                                
+                            if val in ["TYPE", "MF", "PART NO", "BRG NO"] or "TYPE" in val: type_col_idx = j
+                            if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
                             if is_target_date(val, day_2): c2_col = j
-                            # Quick check if it's a day in the target month (1-31)
                             if pd.notna(val):
                                 if isinstance(val, (datetime, pd.Timestamp)) and val.month == req_date.month:
                                     monthly_cols.append(j)
                                 elif str(val).strip().isdigit() and 1 <= int(str(val).strip()) <= 31:
                                     monthly_cols.append(j)
-                                    
-                    if r_idx is not None and type_col_idx is not None: break
+                    if r_idx is not None and type_col_idx is not None: 
+                        break
                         
                 if r_idx is not None and type_col_idx is not None:
-                    active_raw_type = None
+                    last_mf = ""
                     for idx in range(r_idx + 1, len(df_zero)):
-                        cell_val = df_zero.iloc[idx, type_col_idx]
-                        if pd.notna(cell_val) and str(cell_val).strip() != "":
-                            active_raw_type = str(cell_val).strip()
-                            
-                        if not active_raw_type: continue
-                        fam = parse_family(active_raw_type)
-                        if not fam: continue
+                        mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
+                        if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
+                        
+                        mv_val = str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else ""
+                        raw_t = mv_val if mv_val and mv_val not in ["NAN", "NONE"] else last_mf
+                        
+                        if is_invalid_part(raw_t): continue
+                        display_name = get_display_name(raw_t)
 
-                        # Calculate Total Monthly Demand (Tracking)
-                        if fam not in monthly_data[month_str]:
-                            monthly_data[month_str][fam] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
+                        if display_name not in monthly_data[month_str]:
+                            monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
                         
                         row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
                         if row_monthly_sum > 0:
-                            monthly_data[month_str][fam]["total_req"] += (row_monthly_sum * 1000)
+                            monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
                         
-                        # Calculate Day 1 & Day 2 Specific Demand
                         val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
                         val2 = safe_float(df_zero.iloc[idx, c2_col]) if c2_col is not None else 0.0
                         
                         r1 = val1 * 1000 if val1 > 0 else 0.0
                         r2 = val2 * 1000 if val2 > 0 else 0.0
                         
-                        # Set Day 1
                         if r1 > 0:
-                            if fam not in channel_demands_day1: channel_demands_day1[fam] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
-                            channel_demands_day1[fam]['IR'] = max(channel_demands_day1[fam]['IR'], r1)
-                            channel_demands_day1[fam]['OR'] = max(channel_demands_day1[fam]['OR'], r1)
+                            if display_name not in channel_demands_day1: 
+                                channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
+                            channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1)
+                            channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
                             
-                        # Set Day 2
                         if r2 > 0:
-                            if fam not in channel_demands_day2: channel_demands_day2[fam] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
-                            channel_demands_day2[fam]['IR'] = max(channel_demands_day2[fam]['IR'], r2)
-                            channel_demands_day2[fam]['OR'] = max(channel_demands_day2[fam]['OR'], r2)
+                            if display_name not in channel_demands_day2: 
+                                channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
+                            channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2)
+                            channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
+        del sheets_zero
 
-        # 2. BOX MATRIX
+        # 2. BOX MATRIX (Cached Master Parsing)
         box_matrix = {}
         sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
-        if sheets_box:
+        box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
+        
+        if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
+            box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
+        elif sheets_box:
             if 'RING PER BOX.' in sheets_box:
                 df_box = sheets_box['RING PER BOX.'].fillna('')
                 for idx in range(2, len(df_box)):
                     row_vals = list(df_box.iloc[idx])
                     for i in range(0, len(row_vals) - 2, 3):
                         fam_raw = str(row_vals[i]).strip()
-                        if not fam_raw or fam_raw.upper() in ["TYPE", "TRB", "DGBB", "HUB"]: continue
+                        if is_invalid_part(fam_raw): continue
+                        
                         fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
                         for f_raw in fams_to_process:
-                            fam = parse_family(f_raw)
-                            if fam:
-                                or_qty, ir_qty = safe_float(row_vals[i+1]), safe_float(row_vals[i+2])
-                                if fam not in box_matrix: box_matrix[fam] = {}
-                                if or_qty > 0: box_matrix[fam]['OR'] = or_qty
-                                if ir_qty > 0: box_matrix[fam]['IR'] = ir_qty
+                            for p_c in ['IR', 'OR']:
+                                clean_keys = get_lookup_variants(f_raw, p_c)
+                                for ck in clean_keys:
+                                    or_qty = safe_float(row_vals[i+1])
+                                    ir_qty = safe_float(row_vals[i+2])
+                                    if ck not in box_matrix: box_matrix[ck] = {}
+                                    if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': 'RING PER BOX.'}
+                                    if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': 'RING PER BOX.'}
             
             for fb_sheet in ['BOX PER DAY DGBB', 'BOX PER DAY TRB']:
                 if fb_sheet in sheets_box:
                     df_fb = sheets_box[fb_sheet].fillna('')
                     type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
                     for r_idx in range(min(20, len(df_fb))):
-                        norm_strs = [re.sub(r'[\s./]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
+                        norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
                         t_c = next((j for j, h in enumerate(norm_strs) if 'TYPE' in h or 'BEARING' in h), -1)
                         i_c = next((j for j, h in enumerate(norm_strs) if 'IR' in h and 'BOX' in h), -1)
                         o_c = next((j for j, h in enumerate(norm_strs) if 'OR' in h and 'BOX' in h), -1)
@@ -323,21 +377,221 @@ def generate_schedule(payload: ScheduleRequest):
                         if t_c != -1 and (i_c != -1 or o_c != -1 or s_c != -1):
                             type_col, ir_col, or_col, single_rpb_col = t_c, i_c, o_c, s_c
                             break
-                            
                     if type_col != -1:
                         for idx in range(r_idx + 1, len(df_fb)):
                             row_vals = list(df_fb.iloc[idx])
-                            fam = parse_family(str(row_vals[type_col]).strip())
-                            if fam:
-                                if fam not in box_matrix: box_matrix[fam] = {}
-                                if 'IR' not in box_matrix[fam] or box_matrix[fam]['IR'] <= 0:
-                                    if ir_col != -1: box_matrix[fam]['IR'] = safe_float(row_vals[ir_col])
-                                    elif single_rpb_col != -1: box_matrix[fam]['IR'] = safe_float(row_vals[single_rpb_col])
-                                if 'OR' not in box_matrix[fam] or box_matrix[fam]['OR'] <= 0:
-                                    if or_col != -1: box_matrix[fam]['OR'] = safe_float(row_vals[or_col])
-                                    elif single_rpb_col != -1: box_matrix[fam]['OR'] = safe_float(row_vals[single_rpb_col])
+                            raw_t = str(row_vals[type_col]).strip()
+                            if is_invalid_part(raw_t): continue
+                            
+                            for p_c in ['IR', 'OR']:
+                                clean_keys = get_lookup_variants(raw_t, p_c)
+                                for ck in clean_keys:
+                                    if ck not in box_matrix: box_matrix[ck] = {}
+                                    if p_c == 'IR' and ('IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0):
+                                        fq = 0.0
+                                        if ir_col != -1: fq = safe_float(row_vals[ir_col])
+                                        elif single_rpb_col != -1: fq = safe_float(row_vals[single_rpb_col])
+                                        if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': fb_sheet}
+                                    if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
+                                        fq = 0.0
+                                        if or_col != -1: fq = safe_float(row_vals[or_col])
+                                        elif single_rpb_col != -1: fq = safe_float(row_vals[single_rpb_col])
+                                        if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': fb_sheet}
+            
+            PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
+        del sheets_box
 
-        # 3. BUFFERS (Process sequential net deductions Day 1 -> Day 2)
+        # 4. PRODUCTION RATES & WEIGHTS & FLEXIBILITY (Cached Master Parsing)
+        sheets_prod, logs3 = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
+        debug_logs.extend(logs3)
+        prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
+
+        if PARSED_MASTER_DATA["production"][4] == prod_cache_ts:
+            weight_matrix, furnace_map, machines_data, channel_flex_map, _ = PARSED_MASTER_DATA["production"]
+        elif sheets_prod:
+            weight_matrix = {}
+            furnace_map = {}
+            machines_data = {'FACE': {}, 'OD': {}}
+            channel_flex_map = {} 
+
+            # Channel Process Flexibility
+            flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
+            if flex_sheet_key:
+                df_flex = sheets_prod[flex_sheet_key].fillna('')
+                header_idx = -1
+                for i in range(min(10, len(df_flex))):
+                    row_strs = [str(x).upper().strip() for x in df_flex.iloc[i].values]
+                    if any("CH" in x or "CHANNEL" in x for x in row_strs) and any("FACE" in x for x in row_strs):
+                        header_idx = i
+                        break
+                if header_idx != -1:
+                    headers = [str(x).upper().strip() for x in df_flex.iloc[header_idx].values]
+                    ch_col = next((j for j, h in enumerate(headers) if 'CH' in h or 'CHANNEL' in h), -1)
+                    ring_col = next((j for j, h in enumerate(headers) if 'RING' in h or 'IR/OR' in h), -1)
+                    face_col = next((j for j, h in enumerate(headers) if 'FACE' in h), -1)
+                    od_col = next((j for j, h in enumerate(headers) if 'OD' in h), -1)
+                    
+                    if ch_col != -1 and ring_col != -1:
+                        for idx in range(header_idx + 1, len(df_flex)):
+                            ch_raw = str(df_flex.iloc[idx, ch_col]).strip()
+                            if not ch_raw or is_invalid_part(ch_raw): continue
+                            c_norm = normalize_channel(ch_raw)
+                            r_raw = str(df_flex.iloc[idx, ring_col]).strip().upper()
+                            p_code = 'OR' if 'OR' in r_raw or '100' in r_raw else ('IR' if 'IR' in r_raw or '010' in r_raw or '120' in r_raw else None)
+                            
+                            face_req = True
+                            od_req = True
+                            if face_col != -1:
+                                face_val = str(df_flex.iloc[idx, face_col]).strip().upper()
+                                if face_val == "NO": face_req = False
+                            if od_col != -1:
+                                od_val = str(df_flex.iloc[idx, od_col]).strip().upper()
+                                if od_val == "NO": od_req = False
+                                
+                            if p_code:
+                                if c_norm not in channel_flex_map: channel_flex_map[c_norm] = {}
+                                channel_flex_map[c_norm][p_code] = {'FACE': face_req, 'OD': od_req}
+
+
+            if 'WEIGHTS' in sheets_prod:
+                df_w = sheets_prod['WEIGHTS'].fillna('')
+                header_idx = -1
+                for r_idx in range(min(10, len(df_w))):
+                    h_row = [str(x).strip().upper() for x in df_w.iloc[r_idx].values]
+                    if any('TYPE' in h for h in h_row) and any('IR/OR' in h or 'WEIGHT' in h or 'IR' in h for h in h_row):
+                        header_idx = r_idx
+                        break
+                
+                if header_idx != -1:
+                    norm_w_headers = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
+                    type_idx = next((j for j, h in enumerate(norm_w_headers) if 'TYPE' in h), -1)
+                    ir_or_idx = next((j for j, h in enumerate(norm_w_headers) if 'IROR' in h or 'IR' in h), -1)
+                    wt_idx = next((j for j, h in enumerate(norm_w_headers) if 'WEIGHT' in h), -1)
+
+                    if type_idx != -1:
+                        for offset in range(1, len(df_w) - header_idx):
+                            row_vals = df_w.iloc[header_idx + offset].values
+                            raw_fam = str(row_vals[type_idx]).strip()
+                            if is_invalid_part(raw_fam): continue
+                            
+                            ir_or_val = str(row_vals[ir_or_idx]).strip() if ir_or_idx != -1 else ""
+                            part_code = 'OR' if '100' in ir_or_val else ('IR' if ('120' in ir_or_val or '010' in ir_or_val) else None)
+                            if part_code and wt_idx != -1:
+                                wt_val = safe_float(row_vals[wt_idx])
+                                if wt_val > 0:
+                                    clean_keys = get_lookup_variants(raw_fam, part_code)
+                                    for ck in clean_keys:
+                                        weight_matrix[f"{ck}_{part_code}"] = wt_val
+
+            fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper() and 'FLEX' in str(k).upper()), None)
+            if fur_sheet_key:
+                df_f = sheets_prod[fur_sheet_key]
+                df_f.columns = [str(x).strip().upper() for x in df_f.iloc[0]]
+                for idx, r in df_f.iloc[1:].iterrows():
+                    comp_level = str(r.get('COMP LEVEL 1', r.iloc[0] if len(r) > 0 else '')).strip()
+                    if is_invalid_part(comp_level): continue
+                    
+                    p_code = 'IR' if comp_level.startswith('IM') else ('OR' if comp_level.startswith('OM') else None)
+                    if p_code:
+                        clean_keys = get_lookup_variants(comp_level, p_code)
+                        valid_furnaces = []
+                        for fn_key in ['PRIMARY FURNA', 'PRIMARY FURNACE', 'ALTERNATIVE 1', 'ALTERNATIVE 2']:
+                            fn = str(r.get(fn_key, '')).strip().upper()
+                            if not fn or fn == 'NAN': continue
+                            
+                            matched_fn = None
+                            if fn == "AU" or "UNITHERM" in fn:
+                                matched_fn = "AICHELIN UNITHERM ( 2033 )"
+                            elif "AICHELIN" in fn:
+                                matched_fn = "AICHELIN.(896)"
+                            else:
+                                matched_fn = next((k for k in FURNACE_SPECS.keys() if fn[:4] in k.upper()), None)
+                                
+                            if matched_fn and matched_fn not in valid_furnaces: 
+                                valid_furnaces.append(matched_fn)
+                        if valid_furnaces: 
+                            for ck in clean_keys:
+                                furnace_map[f"{ck}_{p_code}"] = valid_furnaces
+            
+            for sheet_name, df_m in sheets_prod.items():
+                if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
+                str_matrix = df_m.fillna('').astype(str).values
+                
+                # Multi-table parsing support for full machine discovery
+                current_m_num = None
+                current_m_type = "UNKNOWN"
+                header_idx = -1
+                
+                # Resilient row-by-row scanning to extract all chunks without early termination on blanks
+                for r in range(str_matrix.shape[0]):
+                    row_text = " ".join(str_matrix[r]).upper()
+                    
+                    # Setup Machine Block
+                    if 'MACHINE' in row_text or 'M/C' in row_text:
+                        cells = [c.strip() for c in str_matrix[r] if c.strip()]
+                        m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
+                        if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
+                            current_m_num = m_cand
+                            if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): current_m_type = "FACE"
+                            elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: current_m_type = "OD"
+                    
+                    if current_m_num and current_m_type in ['FACE', 'OD']:
+                        h_row = [c.strip().upper() for c in str_matrix[r]]
+                        if any('TYPE' in h or 'PART' in h for h in h_row) and any('HR' in h for h in h_row):
+                            if current_m_num not in machines_data[current_m_type]:
+                                machines_data[current_m_type][current_m_num] = {'name': current_m_num, 'rates': {}, 'ready_time': 0.0}
+                                
+                            norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in h_row]
+                            std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
+                            box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOXHR' in h or 'BOXESHR' in h or 'BOXPERHR' in h or 'BOXESPERHR' in h), -1)
+                            ring_hr_idx = next((j for j, h in enumerate(norm_headers) if 'RINGHR' in h or 'RINGSHR' in h or 'RINGPERHR' in h or 'RINGSPERHR' in h), -1)
+                            rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'BOX' in h and 'HR' not in h), -1)
+                            type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h), -1)
+                            part_idx = next((j for j, h in enumerate(norm_headers) if 'PART' in h and 'NO' not in h), -1)
+                            comb_idx = next((j for j, h in enumerate(norm_headers) if 'COMBINED' in h), -1)
+                            
+                            for offset2 in range(1, 200):
+                                if r + offset2 >= str_matrix.shape[0]: break
+                                row_vals = str_matrix[r + offset2]
+                                inner_row_text = " ".join(row_vals).upper()
+                                if "MACHINE" in inner_row_text or "M/C" in inner_row_text: break # Move to next block safely
+                                
+                                raw_t = str(row_vals[type_idx]).strip() if type_idx != -1 else ""
+                                if is_invalid_part(raw_t): continue
+                                
+                                part_val = str(row_vals[part_idx]).strip().upper() if part_idx != -1 else ""
+                                p_codes = []
+                                if '100' in part_val or 'OR' in part_val: p_codes.append('OR')
+                                if '120' in part_val or 'IR' in part_val or '010' in part_val: p_codes.append('IR')
+                                if not p_codes: p_codes = ['IR', 'OR']
+                                
+                                for pc in p_codes:
+                                    clean_keys = get_lookup_variants(raw_t, pc)
+                                    comb_val = str(row_vals[comb_idx]).strip() if comb_idx != -1 else ""
+                                    if comb_val and not is_invalid_part(comb_val):
+                                        clean_keys.extend(get_lookup_variants(comb_val, pc))
+                                        
+                                    if not clean_keys: continue
+                                        
+                                    rate_rings = 0.0
+                                    rpb = safe_float(row_vals[rpb_idx]) if rpb_idx != -1 else 0.0
+                                    if rpb <= 0: rpb = get_box_for_part(clean_keys[0], pc, box_matrix)
+                                    
+                                    if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0:
+                                        rate_rings = safe_float(row_vals[ring_hr_idx])
+                                    elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0:
+                                        rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
+                                    elif std_hr_idx != -1 and safe_float(row_vals[std_hr_idx]) > 0 and rpb > 0:
+                                        rate_rings = safe_float(row_vals[std_hr_idx]) * rpb
+                                        
+                                    if rate_rings > 0:
+                                        for ck in set(clean_keys):
+                                            machines_data[current_m_type][current_m_num]['rates'][f"{ck}_{pc}"] = rate_rings
+                                            
+            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, channel_flex_map, prod_cache_ts)
+        del sheets_prod
+
+        # 3. BUFFERS & REQUIREMENTS PERCOLATION
         buffers_by_fam = {}
         BUFFER_MAP = {
             'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
@@ -352,306 +606,290 @@ def generate_schedule(payload: ScheduleRequest):
                     if len(parts) < 3: continue
                     col_channel, sub_ring_type = parts[-2], parts[-1]
                     
-                    fam = parse_family(val)
-                    if not fam: continue
+                    display_name = get_display_name(val)
+                    if is_invalid_part(display_name): continue
+                    
                     buf_val = safe_float(payload.entries.get(f"{buf_prefix}_{col_channel}_{sub_ring_type}", 0))
                     if buf_val <= 0: continue
                     
-                    if fam not in buffers_by_fam:
-                        buffers_by_fam[fam] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
-                    buffers_by_fam[fam][stage][sub_ring_type] += buf_val
+                    if display_name not in buffers_by_fam:
+                        buffers_by_fam[display_name] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
+                    buffers_by_fam[display_name][stage][sub_ring_type] += buf_val
 
         def process_requirements_for_day(demands, in_out_buffers):
             f_req, o_req, h_req = {}, {}, {}
-            for fam, data in demands.items():
-                rpb_ir = box_matrix.get(fam, {}).get('IR', 100)
-                rpb_or = box_matrix.get(fam, {}).get('OR', 100)
-                if rpb_ir <= 0: rpb_ir = 100.0
-                if rpb_or <= 0: rpb_or = 100.0
-                
-                req_boxes_ir = data['IR'] / rpb_ir
-                req_boxes_or = data['OR'] / rpb_or
-                
-                def apply_buf(stage, side, base_boxes, rpb_rate):
-                    raw_buf = in_out_buffers.get(fam, {}).get(stage, {}).get(side, 0)
-                    avail_buf = (raw_buf * base_boxes) if payload.unit_mode == 'Days' else (raw_buf / rpb_rate if payload.unit_mode == 'Rings' else raw_buf)
+            for display_name, data in demands.items():
+                ch_norm = normalize_channel(data['channel'])
+                for side in ['IR', 'OR']:
+                    req_rings = data[side]
+                    if req_rings <= 0: continue
                     
-                    if avail_buf >= base_boxes:
-                        used = base_boxes
-                        rem = avail_buf - base_boxes
-                    else:
-                        used = avail_buf
-                        rem = 0.0
-                        
-                    # Update buffer dictionary for next day
-                    if fam in in_out_buffers:
-                        # Convert remaining back to original unit roughly
-                        new_raw = (rem / base_boxes) if payload.unit_mode == 'Days' and base_boxes > 0 else (rem * rpb_rate if payload.unit_mode == 'Rings' else rem)
-                        in_out_buffers[fam][stage][side] = new_raw
-                        
-                    return used
+                    rpb = get_box_for_part(display_name, side, box_matrix)
+                    flex = channel_flex_map.get(ch_norm, {}).get(side, {'FACE': True, 'OD': True})
+                    req_face = flex['FACE']
+                    req_od = flex['OD']
                     
-                net_face_ir = max(0.0, req_boxes_ir - apply_buf('FACE', 'IR', req_boxes_ir, rpb_ir))
-                net_face_or = max(0.0, req_boxes_or - apply_buf('FACE', 'OR', req_boxes_or, rpb_or))
-                net_od_ir = max(0.0, net_face_ir - apply_buf('OD', 'IR', net_face_ir, rpb_ir))
-                net_od_or = max(0.0, net_face_or - apply_buf('OD', 'OR', net_face_or, rpb_or))
-                net_ht_ir = max(0.0, net_od_ir - apply_buf('CH', 'IR', net_od_ir, rpb_ir))
-                net_ht_or = max(0.0, net_od_or - apply_buf('CH', 'OR', net_od_or, rpb_or))
+                    def apply_buf(stage, base_rings, rpb_rate):
+                        raw_buf = in_out_buffers.get(display_name, {}).get(stage, {}).get(side, 0)
+                        if payload.unit_mode == 'Days': avail_buf_rings = raw_buf * base_rings
+                        elif payload.unit_mode == 'Boxes': avail_buf_rings = raw_buf * (rpb_rate if rpb_rate > 0 else 100)
+                        else: avail_buf_rings = raw_buf 
+                        
+                        if avail_buf_rings >= base_rings:
+                            used_rings, rem_rings = base_rings, avail_buf_rings - base_rings
+                        else:
+                            used_rings, rem_rings = avail_buf_rings, 0.0
+                            
+                        if display_name in in_out_buffers:
+                            if payload.unit_mode == 'Days': new_raw = (rem_rings / base_rings) if base_rings > 0 else 0
+                            elif payload.unit_mode == 'Boxes': new_raw = rem_rings / (rpb_rate if rpb_rate > 0 else 100)
+                            else: new_raw = rem_rings
+                            in_out_buffers[display_name][stage][side] = new_raw
+                        return used_rings
 
-                if net_face_ir > 0 or net_face_or > 0: f_req[fam] = {'IR': net_face_ir, 'OR': net_face_or, 'channel': data['channel']}
-                if net_od_ir > 0 or net_od_or > 0: o_req[fam] = {'IR': net_od_ir, 'OR': net_od_or, 'channel': data['channel']}
-                if net_ht_ir > 0 or net_ht_or > 0: h_req[fam] = {'IR': net_ht_ir, 'OR': net_ht_or, 'rings': {'IR': net_ht_ir * rpb_ir, 'OR': net_ht_or * rpb_or}, 'channel': data['channel']}
+                    current_req = req_rings
+                    
+                    # Sequence: HT -> Face -> OD -> Channel
+                    # If OD is required, subtract OD buffer to find OD requirement
+                    if req_od:
+                        used_buf = apply_buf('OD', current_req, rpb)
+                        current_req = max(0.0, current_req - used_buf)
+                        if current_req > 0:
+                            if display_name not in o_req: o_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
+                            o_req[display_name][side] += current_req
+                    
+                    # Face is required, pull from face buffer based on current required (either from OD or direct from CH)
+                    if req_face:
+                        used_buf = apply_buf('FACE', current_req, rpb)
+                        current_req = max(0.0, current_req - used_buf)
+                        if current_req > 0:
+                            if display_name not in f_req: f_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
+                            f_req[display_name][side] += current_req
+                    
+                    # HT requirement
+                    used_buf = apply_buf('CH', current_req, rpb)
+                    current_req = max(0.0, current_req - used_buf)
+                    if current_req > 0:
+                        if display_name not in h_req: h_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
+                        h_req[display_name][side] += current_req
+
             return f_req, o_req, h_req
 
-        # Cascade buffers: Day 1 first, leftovers to Day 2
         face_req_d1, od_req_d1, ht_req_d1 = process_requirements_for_day(channel_demands_day1, buffers_by_fam)
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
-        # 4. PRODUCTION RATES
-        weight_matrix, furnace_map, machines_data = {}, {}, {'FACE': {}, 'OD': {}}
+        # ==========================================
+        # 5. GLOBAL OPTIMIZATION SCHEDULING (Load Balancing & Strict Dependencies)
+        # Sequence: HT -> FACE -> OD
+        # ==========================================
 
-        sheets_prod, logs3 = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
-        debug_logs.extend(logs3)
-        
-        if sheets_prod:
-            if 'WEIGHTS' in sheets_prod:
-                df_w = sheets_prod['WEIGHTS'].fillna('')
-                header_idx = -1
-                for r_idx in range(min(10, len(df_w))):
-                    h_row = [str(x).strip().upper() for x in df_w.iloc[r_idx].values]
-                    if any('TYPE' in h for h in h_row) and any('IR/OR' in h or 'WEIGHT' in h or 'IR' in h for h in h_row):
-                        header_idx = r_idx; break
-                
-                if header_idx != -1:
-                    norm_w_headers = [re.sub(r'[\s./]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
-                    type_idx = next((j for j, h in enumerate(norm_w_headers) if 'TYPE' in h), -1)
-                    ir_or_idx = next((j for j, h in enumerate(norm_w_headers) if 'IROR' in h or 'IR' in h), -1)
-                    wt_idx = next((j for j, h in enumerate(norm_w_headers) if 'WEIGHT' in h), -1)
-
-                    if type_idx != -1:
-                        for offset in range(1, len(df_w) - header_idx):
-                            row_vals = df_w.iloc[header_idx + offset].values
-                            fam = parse_family(str(row_vals[type_idx]).strip())
-                            if not fam: continue
-                            
-                            ir_or_val = str(row_vals[ir_or_idx]).strip() if ir_or_idx != -1 else ""
-                            part_code = 'OR' if '100' in ir_or_val else ('IR' if '120' in ir_or_val else None)
-                            if part_code and wt_idx != -1:
-                                wt_val = safe_float(row_vals[wt_idx])
-                                if wt_val > 0: weight_matrix[f"{fam}_{part_code}"] = wt_val
-
-            fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper() and 'FLEX' in str(k).upper()), None)
-            if fur_sheet_key:
-                df_f = sheets_prod[fur_sheet_key]
-                df_f.columns = [str(x).strip().upper() for x in df_f.iloc[0]]
-                for idx, r in df_f.iloc[1:].iterrows():
-                    comp_level = str(r.get('COMP LEVEL 1', r.iloc[0] if len(r) > 0 else '')).strip()
-                    if not comp_level: continue
-                    p_code = 'IR' if comp_level.startswith('IM') else ('OR' if comp_level.startswith('OM') else None)
-                    fam = extract_num(comp_level) 
-                    if fam and p_code:
-                        valid_furnaces = []
-                        for fn in [str(r.get('PRIMARY FURNA', r.get('PRIMARY FURNACE', ''))), str(r.get('ALTERNATIVE 1', '')), str(r.get('ALTERNATIVE 2', ''))]:
-                            matched_fn = next((k for k in FURNACE_SPECS.keys() if fn.strip().upper()[:4] in k.upper()), None)
-                            if matched_fn and matched_fn not in valid_furnaces: valid_furnaces.append(matched_fn)
-                        if valid_furnaces: furnace_map[f"{fam}_{p_code}"] = valid_furnaces
-            
-            for sheet_name, df_m in sheets_prod.items():
-                if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.']: continue
-                str_matrix = df_m.fillna('').astype(str).values
-                for r in range(str_matrix.shape[0]):
-                    row_text = " ".join(str_matrix[r]).upper()
-                    if 'MACHINE' in row_text or 'M/C' in row_text:
-                        cells = [c.strip() for c in str_matrix[r] if c.strip()]
-                        m_num = cells[1] if len(cells) > 1 else f"MC_{r}"
-                        
-                        m_type = "UNKNOWN"
-                        if "FACE" in row_text or "DDS" in m_num.upper() or "BG" in m_num.upper(): m_type = "FACE"
-                        elif "OD" in row_text or "CL" in m_num.upper() or "CELL" in m_num.upper() or "+" in m_num: m_type = "OD"
-                        
-                        if m_type in ['FACE', 'OD']:
-                            if m_num not in machines_data[m_type]:
-                                machines_data[m_type][m_num] = {'name': m_num, 'rates': {}, 'avail_hours': 24.0}
-                            
-                            header_idx = -1
-                            for offset in range(1, 15):
-                                if r + offset >= str_matrix.shape[0]: break
-                                h_row = [str(x).strip().upper() for x in df_m.iloc[r + offset].values]
-                                if any('TYPE' in h or 'PART' in h for h in h_row):
-                                    header_idx = r + offset; break
-                            
-                            if header_idx != -1:
-                                norm_headers = [re.sub(r'[\s./]', '', str(x).strip().upper()) for x in df_m.iloc[header_idx].values]
-                                std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
-                                box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOXHR' in h or 'BOXESHR' in h), -1)
-                                ring_hr_idx = next((j for j, h in enumerate(norm_headers) if 'RINGHR' in h or 'RINGSHR' in h), -1)
-                                rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'BOX' in h and 'HR' not in h), -1)
-                                type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h), -1)
-                                part_idx = next((j for j, h in enumerate(norm_headers) if 'PART' in h and 'NO' not in h), -1)
-                                
-                                for offset2 in range(1, 60):
-                                    if header_idx + offset2 >= str_matrix.shape[0]: break
-                                    row_vals = df_m.iloc[header_idx + offset2].values
-                                    fam = parse_family(str(row_vals[type_idx]).strip() if type_idx != -1 else "")
-                                    if not fam: continue
-                                    
-                                    part_val = str(row_vals[part_idx]).strip().upper() if part_idx != -1 else ""
-                                    p_codes = []
-                                    if '100' in part_val or 'OR' in part_val: p_codes.append('OR')
-                                    if '120' in part_val or 'IR' in part_val or '010' in part_val: p_codes.append('IR')
-                                    if not p_codes: p_codes = ['IR', 'OR']
-                                    
-                                    for pc in p_codes:
-                                        rate_hr = 0.0
-                                        rpb = safe_float(row_vals[rpb_idx]) if rpb_idx != -1 else 0.0
-                                        if rpb <= 0: rpb = box_matrix.get(fam, {}).get(pc, 100.0)
-                                        if box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0: rate_hr = safe_float(row_vals[box_hr_idx])
-                                        elif ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0: rate_hr = safe_float(row_vals[ring_hr_idx]) / rpb
-                                        elif std_hr_idx != -1 and safe_float(row_vals[std_hr_idx]) > 0: rate_hr = safe_float(row_vals[std_hr_idx]) / rpb
-                                        if rate_hr > 0: machines_data[m_type][m_num]['rates'][f"{fam}_{pc}"] = rate_hr
-
-        # 5. OPTIMIZED GRINDING SCHEDULER (Priority: Day 1 fully, then Day 2)
-        def allocate_grinding(m_type, dict_d1, dict_d2):
-            allocated_result = {m_num: {"machine": m_num, "rows": []} for m_num in machines_data.get(m_type, {})}
-            machine_clocks = {m_num: m_info['avail_hours'] for m_num, m_info in machines_data.get(m_type, {}).items()}
-            machine_last_fam = {m_num: None for m_num in machines_data.get(m_type, {})}
-            
-            def process_priority_pass(demands_dict, is_day_2=False):
-                sorted_fams = sorted(demands_dict.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True)
-                for fam, data in sorted_fams:
-                    ch_normalized = normalize_channel(data['channel'])
-                    for p_code in ['IR', 'OR']:
-                        if ch_normalized in OPERATION_EXCLUSIONS and p_code in OPERATION_EXCLUSIONS[ch_normalized].get(m_type, []):
-                            continue
-                                
-                        boxes_needed = data[p_code]
-                        if boxes_needed <= 0: continue
-                        
-                        candidates = []
-                        for m_num, m_info in machines_data.get(m_type, {}).items():
-                            rate = get_rate_for_part(fam, p_code, m_info.get('rates', {}))
-                            if rate > 0 and machine_clocks[m_num] > 0:
-                                candidates.append((m_num, rate))
-                        
-                        def get_sort_key(m, r):
-                            hrs_left = machine_clocks[m]
-                            eff_hrs = hrs_left - (2.0 if machine_last_fam[m] and machine_last_fam[m] != fam else 0.0)
-                            if eff_hrs <= 0: return (3, 0, 0)
-                            time_req = boxes_needed / r
-                            can_finish = time_req <= eff_hrs
-                            return (0 if can_finish else 1, (eff_hrs - time_req) if can_finish else -eff_hrs, -r)
-                        
-                        candidates.sort(key=lambda x: get_sort_key(x[0], x[1]))
-                        
-                        placed = False
-                        for m_num, rate in candidates:
-                            if boxes_needed <= 0: break
-                            if machine_clocks[m_num] <= 0: continue
-                            
-                            hrs_left = machine_clocks[m_num]
-                            setup_cost = 2.0 if machine_last_fam[m_num] and machine_last_fam[m_num] != fam else 0.0
-                            if hrs_left <= setup_cost:
-                                machine_clocks[m_num] = 0.0
-                                continue
-                                
-                            hrs_left -= setup_cost
-                            time_required = boxes_needed / rate
-                            
-                            produced_boxes = boxes_needed
-                            if time_required <= hrs_left:
-                                boxes_needed = 0.0
-                                hrs_left -= time_required
-                            else:
-                                produced_boxes = hrs_left * rate
-                                boxes_needed -= produced_boxes
-                                hrs_left = 0.0
-                                
-                            machine_clocks[m_num] = hrs_left
-                            machine_last_fam[m_num] = fam
-                            placed = True
-                            
-                            # Update monthly tracker with what actually got scheduled
-                            rpb = box_matrix.get(fam, {}).get(p_code, 100)
-                            if fam in monthly_data[month_str]:
-                                monthly_data[month_str][fam]["produced"] += (produced_boxes * rpb)
-                            
-                            allocated_result[m_num]["rows"].append({
-                                "part": f"{fam} {p_code}" + (" (D2)" if is_day_2 else ""),
-                                "std_box": str(round(rate, 1)),
-                                "p_2nd": "1" if len(allocated_result[m_num]["rows"]) == 0 else "",
-                                "p_3rd": "1" if len(allocated_result[m_num]["rows"]) == 1 else "",
-                                "alert": False,
-                                "p_label": f"P{len(allocated_result[m_num]['rows']) + 1}"
-                            })
-                        
-                        if boxes_needed > 0.5:
-                            day_label = "Day 2" if is_day_2 else "Day 1"
-                            reason = "Capacity Exhausted" if placed else "Missing Machine Rate"
-                            unscheduled.append({ "stage": m_type, "part": f"{fam} {p_code} ({day_label})", "missed_boxes": f"{round(boxes_needed, 1)} box - {reason}" })
-
-            process_priority_pass(dict_d1, False)
-            process_priority_pass(dict_d2, True)
-            return list(allocated_result.values())
-
-        final_face = allocate_grinding('FACE', face_req_d1, face_req_d2)
-        final_od = allocate_grinding('OD', od_req_d1, od_req_d2)
-
-        # 6. DYNAMIC HEAT TREATMENT
-        furnace_clocks = {f: {"avail_hours": 24.0, "current_fam": None, "rows": [], "capacity": cap} for f, cap in FURNACE_SPECS.items()}
-
-        def schedule_ht_pass(demands, is_day_2=False):
-            for fam, data in sorted(demands.items(), key=lambda x: x[1]['rings']['IR'] + x[1]['rings']['OR'], reverse=True):
-                for p_code, qty in [('IR', data['rings']['IR']), ('OR', data['rings']['OR'])]:
-                    if qty <= 0: continue
+        def schedule_ht_pass(demands, furnace_clocks, day_idx):
+            for display_name, data in sorted(demands.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True):
+                for p_code in ['IR', 'OR']:
+                    qty_rings = data[p_code]
+                    if qty_rings <= 0: continue
                     
-                    search_key = f"{extract_num(fam)}_{p_code}"
-                    preferred_furnaces = furnace_map.get(search_key, [])
-                    if not preferred_furnaces: preferred_furnaces = list(FURNACE_SPECS.keys())
+                    preferred_furnaces = get_furnaces_for_part(display_name, p_code, furnace_map)
+                    unit_weight = get_weight_for_part(display_name, p_code, weight_matrix)
                     
-                    unit_weight = weight_matrix.get(f"{fam}_{p_code}")
-                    is_assumed = False
                     if unit_weight is None or unit_weight <= 0:
-                        unit_weight = 0.25
-                        is_assumed = True
-                        if not is_day_2: debug_logs.append(f"HT Skipped: Missing weight for {fam} {p_code} - Assumed 0.25kg")
+                        rpb = get_box_for_part(display_name, p_code, box_matrix)
+                        missed_val = f"{int(qty_rings)} rings" if rpb <= 0 else f"{math.ceil(qty_rings / rpb)} Box"
+                        unscheduled.append({ 
+                            "stage": "HT", 
+                            "part": f"{display_name} {p_code} ({'Day 2' if day_idx==1 else 'Day 1'})", 
+                            "missed_boxes": f"{missed_val} - Missing Weight" 
+                        })
+                        continue
                     
-                    total_weight_kg = qty * unit_weight
-                    scheduled_flag = False
+                    total_weight_kg = qty_rings * unit_weight
+                    
+                    best_f = None
+                    best_score = float('inf')
+                    best_time_needed = 0.0
                     
                     for f_name in preferred_furnaces:
                         if f_name not in furnace_clocks: continue
+                        
                         kg_per_hr = FURNACE_SPECS[f_name]
                         time_needed = total_weight_kg / kg_per_hr
                         ctx = furnace_clocks[f_name]
-                        setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != fam) else 0.0
                         
-                        if (ctx["avail_hours"] - setup_penalty) >= time_needed:
-                            ctx["avail_hours"] -= (time_needed + setup_penalty)
-                            ctx["current_fam"] = fam
-                            display_rate = f"{int(qty)} pcs" if is_assumed else f"{round(total_weight_kg, 1)} kg"
-                            ctx["rows"].append({
-                                "part": f"{fam}-{p_code}" + (" (D2)" if is_day_2 else ""), 
-                                "qty": str(int(qty)), 
-                                "cha": data['channel'],
-                                "rate": display_rate, 
-                                "alert": False 
-                            })
-                            scheduled_flag = True
-                            break
+                        # Part available time for current day/run
+                        earliest_start = max(ctx["ready_time"], part_available_time.get((display_name, p_code, day_idx), 0.0))
+                        setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != display_name) else 0.0
+                        
+                        end_time = earliest_start + setup_penalty + time_needed
+                        
+                        if end_time < best_score:
+                            best_score = end_time
+                            best_f = f_name
+                            best_time_needed = time_needed
                             
-                    if not scheduled_flag:
-                        day_lbl = "Day 2" if is_day_2 else "Day 1"
-                        unscheduled.append({ "stage": "HT", "part": f"{fam} {p_code} ({day_lbl})", "missed_boxes": "Capacity Exceeded" })
+                    if best_f:
+                        ctx = furnace_clocks[best_f]
+                        
+                        earliest_start = max(ctx["ready_time"], part_available_time.get((display_name, p_code, day_idx), 0.0))
+                        setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != display_name) else 0.0
+                        
+                        start_rel = earliest_start + setup_penalty
+                        end_rel = start_rel + best_time_needed
+                        timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
 
-        schedule_ht_pass(ht_req_d1, False)
-        schedule_ht_pass(ht_req_d2, True)
+                        ctx["ready_time"] = end_rel
+                        ctx["current_fam"] = display_name
+                        part_available_time[(display_name, p_code, day_idx)] = end_rel
+                        
+                        display_rate = f"{round(total_weight_kg, 1)} kg"
+                        
+                        ctx["rows"].append({
+                            "part": f"{display_name}-{p_code}" + (" (D2)" if day_idx==1 else ""), 
+                            "qty": str(int(qty_rings)), 
+                            "cha": data['channel'],
+                            "rate": display_rate, 
+                            "timing": timing_display,
+                            "alert": False 
+                        })
+                    else:
+                        rpb = get_box_for_part(display_name, p_code, box_matrix)
+                        missed_val = f"{int(qty_rings)} rings" if rpb <= 0 else f"{math.ceil(qty_rings / rpb)} Box"
+                        unscheduled.append({ "stage": "HT", "part": f"{display_name} {p_code}", "missed_boxes": f"{missed_val} - Capacity Error" })
+
+
+        def allocate_grinding(m_type, dict_d1, dict_d2):
+            m_state_dict = machines_data.get(m_type, {})
+            allocated_result = {m_num: {"machine": m_num, "rows": []} for m_num in m_state_dict}
+            machine_ready_time = {m_num: m_info.get('ready_time', 0.0) for m_num, m_info in m_state_dict.items()}
+            machine_last_fam = {m_num: None for m_num in m_state_dict}
+            
+            def process_priority_pass(demands_dict, day_idx=0):
+                part_options = {}
+                for display_name, data in demands_dict.items():
+                    ch_normalized = normalize_channel(data['channel'])
+                    for p_code in ['IR', 'OR']:
+                        rings_needed = data[p_code]
+                        if rings_needed <= 0: continue
+                        
+                        flex = channel_flex_map.get(ch_normalized, {}).get(p_code, {'FACE': True, 'OD': True})
+                        if not flex.get(m_type, True): 
+                            continue 
+                        
+                        compatible_machines = []
+                        for m_num, m_info in m_state_dict.items():
+                            rate = get_rate_for_part(display_name, p_code, m_info.get('rates', {}))
+                            if rate > 0: compatible_machines.append((m_num, rate))
+                        
+                        if compatible_machines:
+                            part_options[(display_name, p_code)] = {
+                                'needed': rings_needed,
+                                'channel': data['channel'],
+                                'machines': compatible_machines
+                            }
+                        else:
+                            day_label = "Day 2" if day_idx==1 else "Day 1"
+                            rpb = get_box_for_part(display_name, p_code, box_matrix)
+                            missed_val = f"{int(rings_needed)} Rings" if rpb <= 0 else f"{math.ceil(rings_needed / rpb)} Boxes"
+                            unscheduled.append({ 
+                                "stage": m_type, 
+                                "part": f"{display_name} {p_code} ({day_label})", 
+                                "missed_boxes": f"{missed_val} - Missing Machine Rate" 
+                            })
+
+                sorted_parts = sorted(part_options.keys(), key=lambda k: (len(part_options[k]['machines']), -part_options[k]['needed']))
+                
+                machine_versatility = {m: 0 for m in m_state_dict}
+                for pk in sorted_parts:
+                    for m_num, _ in part_options[pk]['machines']:
+                        machine_versatility[m_num] += 1
+
+                for pk in sorted_parts:
+                    display_name, p_code = pk
+                    rings_needed = part_options[pk]['needed']
+                    candidates = part_options[pk]['machines']
+                    
+                    def get_machine_score(m_key, rate, qty):
+                        # Strict routing inheritance
+                        avail_t = part_available_time.get((display_name, p_code, day_idx), 0.0)
+                        ready_time = max(machine_ready_time[m_key], avail_t)
+                        setup = 2.0 if machine_last_fam[m_key] and machine_last_fam[m_key] != display_name else 0.0
+                        end_time = ready_time + setup + (qty / rate)
+                        versatility_penalty = machine_versatility.get(m_key, 0) * 1.5
+                        return end_time + versatility_penalty
+
+                    while rings_needed > 0:
+                        best_cands = sorted(candidates, key=lambda x: get_machine_score(x[0], x[1], rings_needed))
+                        best_m, best_rate = best_cands[0]
+                        
+                        max_chunk_hours = 8.0
+                        chunk_qty = min(rings_needed, best_rate * max_chunk_hours)
+                        if len(best_cands) == 1: 
+                            chunk_qty = rings_needed
+                            
+                        avail_t = part_available_time.get((display_name, p_code, day_idx), 0.0)
+                        setup_cost = 2.0 if machine_last_fam[best_m] and machine_last_fam[best_m] != display_name else 0.0
+                        
+                        start_rel = max(machine_ready_time[best_m], avail_t) + setup_cost
+                        time_required = chunk_qty / best_rate
+                        end_rel = start_rel + time_required
+                        
+                        timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
+
+                        machine_ready_time[best_m] = end_rel
+                        machine_last_fam[best_m] = display_name
+                        part_available_time[(display_name, p_code, day_idx)] = end_rel
+                        
+                        rings_needed -= chunk_qty
+                        
+                        rpb = get_box_for_part(display_name, p_code, box_matrix)
+                        if rpb > 0:
+                            calculated_boxes = math.ceil(chunk_qty / rpb)
+                            display_val = f"{calculated_boxes} Boxes"
+                        else:
+                            display_val = f"{int(chunk_qty)} Rings"
+                        
+                        if display_name in monthly_data.get(month_str, {}):
+                            monthly_data[month_str][display_name]["produced"] += chunk_qty
+                        
+                        allocated_result[best_m]["rows"].append({
+                            "part": f"{display_name} {p_code}" + (" (D2)" if day_idx==1 else ""),
+                            "qty": str(int(chunk_qty)),
+                            "std_box": display_val,
+                            "timing": timing_display,
+                            "p_2nd": "1" if len(allocated_result[best_m]["rows"]) == 0 else "",
+                            "p_3rd": "1" if len(allocated_result[best_m]["rows"]) == 1 else "",
+                            "alert": False,
+                            "p_label": f"P{len(allocated_result[best_m]['rows']) + 1}"
+                        })
+                        
+                        machine_versatility[best_m] = max(0, machine_versatility[best_m] - 1)
+
+            process_priority_pass(dict_d1, 0)
+            process_priority_pass(dict_d2, 1)
+            
+            # Write final ready times back to global m_state_dict for future references if any
+            for m_num, m_info in m_state_dict.items():
+                m_info['ready_time'] = machine_ready_time[m_num]
+                
+            return list(allocated_result.values())
+
+        # Enforce Sequence: HT -> Face -> OD strictly
+        furnaces_state = {f: {"ready_time": 0.0, "current_fam": None, "rows": [], "capacity": cap} for f, cap in FURNACE_SPECS.items()}
         
-        # Save tracking data in the background
+        # Pass 1: HT
+        schedule_ht_pass(ht_req_d1, furnaces_state, 0)
+        schedule_ht_pass(ht_req_d2, furnaces_state, 1)
+
+        # Pass 2: Face (inherits availability from HT)
+        final_face = allocate_grinding('FACE', face_req_d1, face_req_d2)
+        
+        # Pass 3: OD (inherits availability from Face, or HT if Face skipped)
+        final_od = allocate_grinding('OD', od_req_d1, od_req_d2)
+        
         save_monthly_tracking(monthly_data)
 
         ht_formatted = [
             {"furnace": fur, "capacity": f"Total Cap: {int(f_data['capacity'])} kg/hr", "rows": f_data["rows"]}
-            for fur, f_data in furnace_clocks.items()
+            for fur, f_data in furnaces_state.items()
         ]
 
         return {

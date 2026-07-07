@@ -245,13 +245,16 @@ def get_furnaces_for_part(display_name, p_code, furnace_map):
     return list(FURNACE_SPECS.keys())
 
 def format_time(rel_hrs):
-    # Cap strictly within 24h for presentation. 24.0 wraps strictly to 10:00
-    rel_hrs = min(24.0, max(0.0, rel_hrs))
+    # Adjusted to allow values beyond 24.0 seamlessly to represent next day (+1) schedules accurately
+    rel_hrs = max(0.0, rel_hrs)
     total_minutes = int(round(rel_hrs * 60))
     base_hour = 10 
     h = (base_hour + (total_minutes // 60)) % 24
     m = total_minutes % 60
-    return f"{h:02d}:{m:02d}"
+    days_added = (base_hour + (total_minutes // 60)) // 24
+    
+    day_plus = f" (+{days_added})" if days_added > 0 else ""
+    return f"{h:02d}:{m:02d}{day_plus}"
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -677,7 +680,7 @@ def generate_schedule(payload: ScheduleRequest):
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
         # ==========================================
-        # 5. GLOBAL OPTIMIZATION SCHEDULING (Chronological & Strict Dependencies)
+        # 5. GLOBAL OPTIMIZATION SCHEDULING
         # ==========================================
 
         def schedule_ht_pass(demands, furnace_clocks, day_idx):
@@ -704,68 +707,48 @@ def generate_schedule(payload: ScheduleRequest):
                     best_f = None
                     best_score = float('inf')
                     best_start_rel = 0.0
+                    best_part_ready = 0.0
+                    best_furnace_free = 0.0
                     
                     for f_name in preferred_furnaces:
                         if f_name not in furnace_clocks: continue
                         
                         kg_per_hr = FURNACE_SPECS[f_name]
-                        time_needed = total_weight_kg / kg_per_hr
                         ctx = furnace_clocks[f_name]
                         
-                        earliest_start = ctx["ready_time"]
+                        earliest_start = max(ctx["ready_time"], part_available_time.get((display_name, p_code, day_idx), 0.0))
                         setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != display_name) else 0.0
                         
                         start_cand = earliest_start + setup_penalty
-                        end_cand = start_cand + time_needed
+                        loading_time = total_weight_kg / kg_per_hr
+                        furnace_free_cand = start_cand + loading_time + 0.5
+                        part_ready_cand = start_cand + loading_time + 3.5
                         
-                        if start_cand < 24.0 and end_cand < best_score:
-                            best_score = end_cand
+                        if start_cand < 24.0 and furnace_free_cand < best_score:
+                            best_score = furnace_free_cand
                             best_f = f_name
                             best_start_rel = start_cand
+                            best_furnace_free = furnace_free_cand
+                            best_part_ready = part_ready_cand
                             
                     if best_f:
                         ctx = furnace_clocks[best_f]
-                        kg_per_hr = FURNACE_SPECS[best_f]
                         start_rel = best_start_rel
-                        
-                        if start_rel >= 24.0:
-                            rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
-                            missed_val = f"{int(qty_rings)} Rings (Q)" if rpb <= 0 else f"{math.ceil(qty_rings / rpb)} Boxes"
-                            unscheduled.append({ "stage": "HT", "part": f"{display_name} {p_code}", "missed_boxes": f"{missed_val} - 24H Limit Exceeded" })
-                            continue
-                            
-                        max_time = 24.0 - start_rel
-                        time_needed = total_weight_kg / kg_per_hr
-                        
-                        if time_needed > max_time:
-                            actual_time = max_time
-                            actual_weight = actual_time * kg_per_hr
-                            actual_qty = actual_weight / unit_weight
-                            
-                            rem_qty = qty_rings - actual_qty
-                            rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
-                            missed_val = f"{int(rem_qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(rem_qty / rpb)} Boxes"
-                            unscheduled.append({ "stage": "HT", "part": f"{display_name} {p_code}", "missed_boxes": f"{missed_val} - Exceeds 24H" })
-                        else:
-                            actual_time = time_needed
-                            actual_weight = total_weight_kg
-                            actual_qty = qty_rings
-                            
-                        end_rel = start_rel + actual_time
-                        timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
 
-                        ctx["ready_time"] = end_rel
+                        # Apply directly with strict constraints (allow one crossing job then block)
+                        ctx["ready_time"] = best_furnace_free
                         ctx["current_fam"] = display_name
-                        part_available_time[(display_name, p_code, day_idx)] = end_rel
+                        part_available_time[(display_name, p_code, day_idx)] = best_part_ready
                         
                         if display_name in monthly_data.get(month_str, {}):
-                            monthly_data[month_str][display_name]["produced"] += actual_qty
+                            monthly_data[month_str][display_name]["produced"] += qty_rings
                         
-                        display_rate = f"{round(actual_weight, 1)} kg"
+                        display_rate = f"{round(total_weight_kg, 1)} kg"
+                        timing_display = f"{format_time(start_rel)}-{format_time(best_part_ready)}"
                         
                         ctx["rows"].append({
                             "part": f"{display_name}-{p_code}" + (" (D2)" if day_idx==1 else ""), 
-                            "qty": str(int(actual_qty)), 
+                            "qty": str(int(qty_rings)), 
                             "cha": data['channel'],
                             "rate": display_rate, 
                             "timing": timing_display,
@@ -774,7 +757,14 @@ def generate_schedule(payload: ScheduleRequest):
                     else:
                         rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
                         missed_val = f"{int(qty_rings)} Rings (Q)" if rpb <= 0 else f"{math.ceil(qty_rings / rpb)} Boxes"
-                        unscheduled.append({ "stage": "HT", "part": f"{display_name} {p_code}", "missed_boxes": f"{missed_val} - Capacity Error" })
+                        
+                        # Determine exact reason: Exceeds Planning Window or Capacity
+                        if preferred_furnaces and any(max(furnace_clocks[f]["ready_time"], part_available_time.get((display_name, p_code, day_idx), 0.0)) >= 24.0 for f in preferred_furnaces):
+                            reason = "Exceeds Planning Window"
+                        else:
+                            reason = "Furnace Capacity Exceeded"
+                        
+                        unscheduled.append({ "stage": "HT", "part": f"{display_name} {p_code}", "missed_boxes": f"{missed_val} - {reason}" })
 
         def allocate_grinding(m_type, dict_d1, dict_d2):
             m_state_dict = machines_data.get(m_type, {})
@@ -821,7 +811,6 @@ def generate_schedule(payload: ScheduleRequest):
                                 "missed_boxes": f"{missed_val} - Missing Machine Rate" 
                             })
 
-            # Sort chronologically by arrival at this stage, then by least machines available, then by qty
             all_tasks.sort(key=lambda t: (
                 part_available_time.get((t['display_name'], t['p_code'], t['day_idx']), 0.0),
                 len(t['machines']),
@@ -848,26 +837,26 @@ def generate_schedule(payload: ScheduleRequest):
                 while rings_needed > 0:
                     best_cands = sorted(candidates, key=lambda x: get_machine_score(x[0], x[1], rings_needed))
                     best_m, best_rate = best_cands[0]
-                    
-                    avail_t = part_available_time.get((display_name, p_code, day_idx), 0.0)
-                    setup_cost = 2.0 if machine_last_fam[best_m] and machine_last_fam[best_m] != display_name else 0.0
-                    start_rel = max(machine_ready_time[best_m], avail_t) + setup_cost
-                    
-                    if start_rel >= 24.0:
+                    best_score = get_machine_score(best_m, best_rate, rings_needed)
+
+                    if best_score == float('inf'):
                         rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
                         missed_val = f"{int(rings_needed)} Rings (Q)" if rpb <= 0 else f"{math.ceil(rings_needed / rpb)} Boxes"
                         unscheduled.append({
                             "stage": m_type,
                             "part": f"{display_name} {p_code}" + (" (D2)" if day_idx==1 else ""),
-                            "missed_boxes": f"{missed_val} - 24H Limit Exceeded"
+                            "missed_boxes": f"{missed_val} - Exceeds Planning Window"
                         })
                         break
-                        
-                    max_chunk_hours = 8.0
-                    time_limit = min(24.0 - start_rel, max_chunk_hours)
-                    if len(best_cands) == 1: time_limit = 24.0 - start_rel
                     
-                    chunk_qty = min(rings_needed, best_rate * time_limit)
+                    avail_t = part_available_time.get((display_name, p_code, day_idx), 0.0)
+                    setup_cost = 2.0 if machine_last_fam[best_m] and machine_last_fam[best_m] != display_name else 0.0
+                    start_rel = max(machine_ready_time[best_m], avail_t) + setup_cost
+                    
+                    max_chunk_hours = 8.0
+                    chunk_qty = min(rings_needed, best_rate * max_chunk_hours)
+                    if len(best_cands) == 1: chunk_qty = rings_needed
+                    
                     time_required = chunk_qty / best_rate
                     end_rel = start_rel + time_required
                     

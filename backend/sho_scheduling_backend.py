@@ -90,10 +90,6 @@ def is_invalid_part(raw_text):
     return False
 
 def get_lookup_variants(raw_text, p_code=None):
-    """
-    Strict normalization logic. Keeps the absolute base numeric family bounded.
-    Handles composite bearings based on IR/OR.
-    """
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
     
@@ -125,7 +121,6 @@ def get_lookup_variants(raw_text, p_code=None):
                 changed = True
                 
     t_nosuff = t_nosuff.strip()
-    
     t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
     
     prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC']
@@ -245,7 +240,6 @@ def get_furnaces_for_part(display_name, p_code, furnace_map):
     return list(FURNACE_SPECS.keys())
 
 def format_time(rel_hrs):
-    # Allows tracking past 24.0 (next day) for proper timing display without breaking sequences
     rel_hrs = max(0.0, rel_hrs)
     total_minutes = int(round(rel_hrs * 60))
     base_hour = 10 
@@ -261,7 +255,7 @@ def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []
     logged_rpb = set()
-
+    
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date + timedelta(days=1)
@@ -343,7 +337,7 @@ def generate_schedule(payload: ScheduleRequest):
                             channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
         del sheets_zero
 
-        # 2. BOX MATRIX (Cached Master Parsing)
+        # 2. BOX MATRIX
         box_matrix = {}
         sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
         box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
@@ -407,7 +401,7 @@ def generate_schedule(payload: ScheduleRequest):
             PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
         del sheets_box
 
-        # 4. PRODUCTION RATES & WEIGHTS & FLEXIBILITY (Cached Master Parsing)
+        # 4. PRODUCTION RATES & FLEXIBILITY 
         sheets_prod, logs3 = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
         debug_logs.extend(logs3)
         prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
@@ -618,6 +612,28 @@ def generate_schedule(payload: ScheduleRequest):
                         buffers_by_fam[display_name] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
                     buffers_by_fam[display_name][stage][sub_ring_type] += buf_val
 
+        # BUILD GLOBAL PRIORITY SCORING METRICS
+        ch_stats = {}
+        for d_dict in [channel_demands_day1, channel_demands_day2]:
+            for fam, data in d_dict.items():
+                ch = normalize_channel(data['channel'])
+                if ch not in ch_stats: ch_stats[ch] = {'demand': 0.0, 'buffer': 0.0}
+                ch_stats[ch]['demand'] += data.get('IR', 0) + data.get('OR', 0)
+                
+        fam_to_ch = {}
+        for d_dict in [channel_demands_day1, channel_demands_day2]:
+            for fam, data in d_dict.items():
+                fam_to_ch[fam] = normalize_channel(data['channel'])
+                
+        for fam, stg_data in buffers_by_fam.items():
+            ch = fam_to_ch.get(fam, "UNKNOWN")
+            if ch not in ch_stats: ch_stats[ch] = {'demand': 0.0, 'buffer': 0.0}
+            for stg, side_data in stg_data.items():
+                ch_stats[ch]['buffer'] += side_data.get('IR', 0) + side_data.get('OR', 0)
+                
+        for ch, stats in ch_stats.items():
+            stats['score'] = (stats['demand'] + 1.0) / (stats['buffer'] + 1.0)
+
         def process_requirements_for_day(demands, in_out_buffers):
             f_req, o_req, h_req = {}, {}, {}
             for display_name, data in demands.items():
@@ -678,107 +694,146 @@ def generate_schedule(payload: ScheduleRequest):
 
         # ==========================================
         # 5. GLOBAL OPTIMIZATION SCHEDULING
-        # Strict Propagated Dependencies and 24H Bounds
+        # Hybrid Demand-Driven & Resource-Centric Dispatch
         # ==========================================
 
-        furnace_blocked = {f: False for f in FURNACE_SPECS.keys()}
+        def allocate_ht(dict_d1, dict_d2, furnace_clocks, ht_out_time):
+            tasks = []
+            for day_idx, d_dict in [(0, dict_d1), (1, dict_d2)]:
+                for display_name, data in d_dict.items():
+                    for p_code in ['IR', 'OR']:
+                        qty = data.get(p_code, 0)
+                        if qty > 0:
+                            weight = get_weight_for_part(display_name, p_code, weight_matrix)
+                            if not weight:
+                                ht_out_time[(display_name, p_code, day_idx)] = float('inf')
+                                rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
+                                missed_val = f"{int(qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(qty / rpb)} Boxes"
+                                unscheduled.append({ 
+                                    "stage": "HT", 
+                                    "part": f"{display_name} {p_code} ({'Day 2' if day_idx==1 else 'Day 1'})", 
+                                    "missed_boxes": f"{missed_val} - Missing Weight" 
+                                })
+                                continue
+                                
+                            channel = normalize_channel(data['channel'])
+                            tasks.append({
+                                'display_name': display_name,
+                                'p_code': p_code,
+                                'day_idx': day_idx,
+                                'channel': channel,
+                                'needed': qty,
+                                'weight': weight,
+                                'furnaces': get_furnaces_for_part(display_name, p_code, furnace_map)
+                            })
+            
+            # Priority: Channel demand vs buffer, Flexibility, Due Day, Quantity
+            tasks.sort(key=lambda t: (
+                t['day_idx'],
+                -ch_stats.get(t['channel'], {}).get('score', 0),
+                len(t['furnaces']),
+                -t['needed']
+            ))
+            
+            furnace_blocked = {f: False for f in furnace_clocks}
+            
+            while True:
+                active_fs = [f for f, blocked in furnace_blocked.items() if not blocked]
+                if not active_fs: break
+                
+                earliest_f = min(active_fs, key=lambda f: furnace_clocks[f]['ready_time'])
+                f_ready = furnace_clocks[earliest_f]['ready_time']
+                
+                best_task_idx = -1
+                for i, t in enumerate(tasks):
+                    if t['needed'] <= 0: continue
+                    if earliest_f not in t['furnaces']: continue
+                    best_task_idx = i
+                    break
+                    
+                if best_task_idx == -1:
+                    furnace_blocked[earliest_f] = True
+                    continue
+                    
+                t = tasks[best_task_idx]
+                disp, pc, d_idx = t['display_name'], t['p_code'], t['day_idx']
+                qty = t['needed']
+                total_weight = qty * t['weight']
+                kg_per_hr = FURNACE_SPECS[earliest_f]
+                
+                ctx = furnace_clocks[earliest_f]
+                setup = 0.5 if ctx['current_fam'] and ctx['current_fam'] != disp else 0.0
+                start_rel = max(f_ready, 0.0) + setup
+                
+                if start_rel >= 24.0:
+                    furnace_blocked[earliest_f] = True
+                    continue
+                
+                max_time = 24.0 - start_rel
+                time_needed = total_weight / kg_per_hr
+                
+                if time_needed > max_time:
+                    actual_time = max_time
+                    actual_weight = actual_time * kg_per_hr
+                    actual_qty = actual_weight / t['weight']
+                    furnace_blocked[earliest_f] = True
+                else:
+                    actual_time = time_needed
+                    actual_weight = total_weight
+                    actual_qty = qty
+                    
+                # Furnace batch timing rules: free to load next after loading finishes + 0.5
+                f_free_time = start_rel + actual_time + 0.5
+                # Part available for downstream Face Grinding after full 3.5h cycle
+                part_ready_time = start_rel + actual_time + 3.5
+                
+                ctx['ready_time'] = f_free_time
+                ctx['current_fam'] = disp
+                
+                # Keep track of max output time for precedence propagation in cases of multiple chunks
+                current_out = ht_out_time.get((disp, pc, d_idx), 0.0)
+                ht_out_time[(disp, pc, d_idx)] = max(current_out, part_ready_time)
+                
+                if f_free_time >= 24.0:
+                    furnace_blocked[earliest_f] = True
+                    
+                t['needed'] -= actual_qty
+                
+                if disp in monthly_data.get(month_str, {}):
+                    monthly_data[month_str][disp]["produced"] += actual_qty
+                    
+                timing_display = f"{format_time(start_rel)}-{format_time(part_ready_time)}"
+                ctx["rows"].append({
+                    "part": f"{disp}-{pc}" + (" (D2)" if d_idx==1 else ""),
+                    "qty": str(int(actual_qty)),
+                    "cha": t['channel'],
+                    "rate": f"{round(actual_weight, 1)} kg",
+                    "timing": timing_display,
+                    "alert": False
+                })
 
-        def schedule_ht_pass(demands, furnace_clocks, day_idx, ht_out_time):
-            for display_name, data in sorted(demands.items(), key=lambda x: x[1]['IR'] + x[1]['OR'], reverse=True):
-                for p_code in ['IR', 'OR']:
-                    qty_rings = data.get(p_code, 0)
-                    if qty_rings <= 0: continue
+            for t in tasks:
+                if t['needed'] > 0:
+                    disp, pc, d_idx = t['display_name'], t['p_code'], t['day_idx']
+                    ht_out_time[(disp, pc, d_idx)] = float('inf')
+                    rpb, _, _ = get_box_for_part_detailed(disp, pc, box_matrix, debug_logs, logged_rpb)
+                    missed_val = f"{int(t['needed'])} Rings (Q)" if rpb <= 0 else f"{math.ceil(t['needed'] / rpb)} Boxes"
                     
-                    preferred_furnaces = get_furnaces_for_part(display_name, p_code, furnace_map)
-                    unit_weight = get_weight_for_part(display_name, p_code, weight_matrix)
-                    
-                    if unit_weight is None or unit_weight <= 0:
-                        ht_out_time[(display_name, p_code, day_idx)] = float('inf')
-                        rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
-                        missed_val = f"{int(qty_rings)} Rings (Q)" if rpb <= 0 else f"{math.ceil(qty_rings / rpb)} Boxes"
-                        unscheduled.append({ 
-                            "stage": "HT", 
-                            "part": f"{display_name} {p_code} ({'Day 2' if day_idx==1 else 'Day 1'})", 
-                            "missed_boxes": f"{missed_val} - Missing Weight" 
-                        })
-                        continue
-                    
-                    total_weight_kg = qty_rings * unit_weight
-                    best_f = None
-                    best_score = float('inf')
-                    best_start_rel = 0.0
-                    best_part_ready = 0.0
-                    best_furnace_free = 0.0
-                    
-                    for f_name in preferred_furnaces:
-                        if furnace_blocked.get(f_name, False): continue
+                    reason = "Furnace Capacity Exceeded"
+                    if t['furnaces'] and all(furnace_blocked.get(f) or furnace_clocks.get(f, {}).get('ready_time', 24.0) >= 24.0 for f in t['furnaces']):
+                        reason = "Exceeds Planning Window"
                         
-                        kg_per_hr = FURNACE_SPECS[f_name]
-                        ctx = furnace_clocks[f_name]
-                        
-                        earliest_start = max(ctx["ready_time"], 0.0)
-                        setup_penalty = 0.5 if (ctx["current_fam"] and ctx["current_fam"] != display_name) else 0.0
-                        
-                        start_cand = earliest_start + setup_penalty
-                        if start_cand >= 24.0: continue
-                        
-                        loading_time = total_weight_kg / kg_per_hr
-                        furnace_free_cand = start_cand + loading_time + 0.5
-                        part_ready_cand = start_cand + loading_time + 3.5
-                        
-                        if furnace_free_cand < best_score:
-                            best_score = furnace_free_cand
-                            best_f = f_name
-                            best_start_rel = start_cand
-                            best_furnace_free = furnace_free_cand
-                            best_part_ready = part_ready_cand
-                            
-                    if best_f:
-                        ctx = furnace_clocks[best_f]
-                        start_rel = best_start_rel
+                    unscheduled.append({ "stage": "HT", "part": f"{disp} {pc}", "missed_boxes": f"{missed_val} - {reason}" })
 
-                        # Finalize HT execution on selected furnace
-                        ctx["ready_time"] = best_furnace_free
-                        ctx["current_fam"] = display_name
-                        ht_out_time[(display_name, p_code, day_idx)] = best_part_ready
-                        
-                        if best_furnace_free >= 24.0:
-                            furnace_blocked[best_f] = True
-                            
-                        if display_name in monthly_data.get(month_str, {}):
-                            monthly_data[month_str][display_name]["produced"] += qty_rings
-                        
-                        display_rate = f"{round(total_weight_kg, 1)} kg"
-                        timing_display = f"{format_time(start_rel)}-{format_time(best_part_ready)}"
-                        
-                        ctx["rows"].append({
-                            "part": f"{display_name}-{p_code}" + (" (D2)" if day_idx==1 else ""), 
-                            "qty": str(int(qty_rings)), 
-                            "cha": data['channel'],
-                            "rate": display_rate, 
-                            "timing": timing_display,
-                            "alert": False 
-                        })
-                    else:
-                        ht_out_time[(display_name, p_code, day_idx)] = float('inf')
-                        rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
-                        missed_val = f"{int(qty_rings)} Rings (Q)" if rpb <= 0 else f"{math.ceil(qty_rings / rpb)} Boxes"
-                        
-                        reason = "Furnace Capacity Exceeded"
-                        if preferred_furnaces and all(furnace_blocked.get(f) or furnace_clocks.get(f, {}).get("ready_time", 24.0) >= 24.0 for f in preferred_furnaces):
-                            reason = "Exceeds Planning Window"
-                            
-                        unscheduled.append({ "stage": "HT", "part": f"{display_name} {p_code}", "missed_boxes": f"{missed_val} - {reason}" })
 
         def allocate_grinding(m_type, dict_d1, dict_d2, input_times, output_times):
             m_state_dict = machines_data.get(m_type, {})
             allocated_result = {m_num: {"machine": m_num, "rows": []} for m_num in m_state_dict}
             machine_ready_time = {m_num: m_info.get('ready_time', 0.0) for m_num, m_info in m_state_dict.items()}
             machine_last_fam = {m_num: None for m_num in m_state_dict}
-            machine_versatility = {m: 0 for m in m_state_dict}
             machine_blocked = {m: False for m in m_state_dict}
             
-            all_tasks = []
+            tasks = []
             for day_idx, d_dict in [(0, dict_d1), (1, dict_d2)]:
                 for display_name, data in d_dict.items():
                     ch_normalized = normalize_channel(data['channel'])
@@ -793,12 +848,10 @@ def generate_schedule(payload: ScheduleRequest):
                         compatible_machines = []
                         for m_num, m_info in m_state_dict.items():
                             rate = get_rate_for_part(display_name, p_code, m_info.get('rates', {}))
-                            if rate > 0: 
-                                compatible_machines.append((m_num, rate))
-                                machine_versatility[m_num] += 1
+                            if rate > 0: compatible_machines.append((m_num, rate))
                                 
                         if compatible_machines:
-                            all_tasks.append({
+                            tasks.append({
                                 'display_name': display_name,
                                 'p_code': p_code,
                                 'needed': rings_needed,
@@ -817,101 +870,132 @@ def generate_schedule(payload: ScheduleRequest):
                                 "missed_boxes": f"{missed_val} - Missing Machine Rate" 
                             })
 
-            all_tasks.sort(key=lambda t: (
-                input_times.get((t['display_name'], t['p_code'], t['day_idx']), 0.0),
+            tasks.sort(key=lambda t: (
+                t['day_idx'],
+                -ch_stats.get(normalize_channel(t['channel']), {}).get('score', 0),
                 len(t['machines']),
                 -t['needed']
             ))
 
-            for task in all_tasks:
-                display_name = task['display_name']
-                p_code = task['p_code']
-                day_idx = task['day_idx']
-                rings_needed = task['needed']
-                candidates = task['machines']
+            while True:
+                active_machines = [m for m, blocked in machine_blocked.items() if not blocked]
+                if not active_machines: break
                 
-                input_avail = input_times.get((display_name, p_code, day_idx), 0.0)
+                earliest_m = min(active_machines, key=lambda m: machine_ready_time[m])
+                m_ready = machine_ready_time[earliest_m]
                 
-                if input_avail == float('inf'):
-                    output_times[(display_name, p_code, day_idx)] = float('inf')
-                    continue
+                best_task_idx = -1
                 
-                while rings_needed > 0:
-                    best_cands = []
-                    for m_key, rate in candidates:
-                        if machine_blocked.get(m_key, False): continue
-                        
-                        ready_time = max(machine_ready_time[m_key], input_avail)
-                        setup = 2.0 if machine_last_fam[m_key] and machine_last_fam[m_key] != display_name else 0.0
-                        start_rel = ready_time + setup
-                        
-                        if start_rel >= 24.0: continue
-                        
-                        end_time = start_rel + (rings_needed / rate)
-                        versatility = machine_versatility.get(m_key, 0) * 1.5
-                        score = end_time + versatility
-                        best_cands.append((score, m_key, rate, start_rel))
-                        
-                    if not best_cands:
-                        output_times[(display_name, p_code, day_idx)] = float('inf')
-                        rpb, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
-                        missed_val = f"{int(rings_needed)} Rings (Q)" if rpb <= 0 else f"{math.ceil(rings_needed / rpb)} Boxes"
-                        
-                        reason = "Machine Capacity Exceeded"
-                        if candidates and all(machine_blocked.get(m) or machine_ready_time[m] >= 24.0 for m, _ in candidates):
-                            reason = "Exceeds Planning Window"
-                            
-                        unscheduled.append({
-                            "stage": m_type,
-                            "part": f"{display_name} {p_code}" + (" (D2)" if day_idx==1 else ""),
-                            "missed_boxes": f"{missed_val} - {reason}"
-                        })
+                # First pass: look for a task that is strictly available at or before this machine's ready time
+                for i, t in enumerate(tasks):
+                    if t['needed'] <= 0: continue
+                    if earliest_m not in [m[0] for m in t['machines']]: continue
+                    
+                    inp_time = input_times.get((t['display_name'], t['p_code'], t['day_idx']), 0.0)
+                    if inp_time <= m_ready:
+                        best_task_idx = i
                         break
+                
+                # If no task is ready now, advance machine's clock to the earliest future available task
+                if best_task_idx == -1:
+                    earliest_future_inp = float('inf')
+                    for i, t in enumerate(tasks):
+                        if t['needed'] <= 0: continue
+                        if earliest_m not in [m[0] for m in t['machines']]: continue
                         
-                    best_cands.sort(key=lambda x: x[0])
-                    _, best_m, best_rate, start_rel = best_cands[0]
-                    
-                    max_chunk_hours = 8.0
-                    chunk_qty = min(rings_needed, best_rate * max_chunk_hours)
-                    if len(candidates) == 1: 
-                        chunk_qty = rings_needed
-                        
-                    time_required = chunk_qty / best_rate
-                    end_rel = start_rel + time_required
-                    
-                    if end_rel >= 24.0:
-                        machine_blocked[best_m] = True
-                        
-                    machine_ready_time[best_m] = end_rel
-                    machine_last_fam[best_m] = display_name
-                    
-                    current_out = output_times.get((display_name, p_code, day_idx), 0.0)
-                    output_times[(display_name, p_code, day_idx)] = max(current_out, end_rel)
-                    
-                    rings_needed -= chunk_qty
-                    
-                    rpb, source, lookup_key = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_rpb)
-                    if rpb > 0:
-                        calculated_boxes = math.ceil(chunk_qty / rpb)
-                        display_val = f"{calculated_boxes} Boxes"
+                        inp_time = input_times.get((t['display_name'], t['p_code'], t['day_idx']), 0.0)
+                        if inp_time < earliest_future_inp:
+                            earliest_future_inp = inp_time
+                            best_task_idx = i
+                            
+                    if best_task_idx != -1 and earliest_future_inp < 24.0:
+                        machine_ready_time[earliest_m] = earliest_future_inp
+                        m_ready = earliest_future_inp
                     else:
-                        display_val = f"{int(chunk_qty)} Rings (Q)"
+                        machine_blocked[earliest_m] = True
+                        continue
+                        
+                if best_task_idx == -1:
+                    machine_blocked[earliest_m] = True
+                    continue
                     
-                    timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
+                t = tasks[best_task_idx]
+                disp, pc, d_idx = t['display_name'], t['p_code'], t['day_idx']
+                
+                rate = next(r for m, r in t['machines'] if m == earliest_m)
+                setup = 2.0 if machine_last_fam[earliest_m] and machine_last_fam[earliest_m] != disp else 0.0
+                
+                start_rel = m_ready + setup
+                if start_rel >= 24.0:
+                    machine_blocked[earliest_m] = True
+                    continue 
                     
-                    allocated_result[best_m]["rows"].append({
-                        "part": f"{display_name} {p_code}" + (" (D2)" if day_idx==1 else ""),
-                        "qty": str(int(chunk_qty)),
-                        "std_box": display_val,
-                        "timing": timing_display,
-                        "p_2nd": "1" if len(allocated_result[best_m]["rows"]) == 0 else "",
-                        "p_3rd": "1" if len(allocated_result[best_m]["rows"]) == 1 else "",
-                        "alert": False,
-                        "p_label": f"P{len(allocated_result[best_m]['rows']) + 1}"
-                    })
+                # Interleaved chunking for steady flow downstream
+                max_chunk_hours = 8.0
+                time_limit = min(24.0 - start_rel, max_chunk_hours)
+                
+                # If this is the last/only machine available, we can let it run out to the 24h limit
+                if len(t['machines']) == 1:
+                    time_limit = 24.0 - start_rel
                     
-                    machine_versatility[best_m] = max(0, machine_versatility[best_m] - 1)
+                chunk_qty = min(t['needed'], rate * time_limit)
+                
+                if chunk_qty <= 0:
+                    machine_blocked[earliest_m] = True
+                    continue
+                    
+                time_req = chunk_qty / rate
+                end_rel = start_rel + time_req
+                
+                if end_rel >= 24.0:
+                    machine_blocked[earliest_m] = True
+                    
+                machine_ready_time[earliest_m] = end_rel
+                machine_last_fam[earliest_m] = disp
+                
+                current_out = output_times.get((disp, pc, d_idx), 0.0)
+                output_times[(disp, pc, d_idx)] = max(current_out, end_rel)
+                
+                t['needed'] -= chunk_qty
+                
+                rpb, source, lookup_key = get_box_for_part_detailed(disp, pc, box_matrix, debug_logs, logged_rpb)
+                if rpb > 0:
+                    calculated_boxes = math.ceil(chunk_qty / rpb)
+                    display_val = f"{calculated_boxes} Boxes"
+                else:
+                    display_val = f"{int(chunk_qty)} Rings (Q)"
+                
+                timing_display = f"{format_time(start_rel)}-{format_time(end_rel)}"
+                
+                allocated_result[earliest_m]["rows"].append({
+                    "part": f"{disp} {pc}" + (" (D2)" if d_idx==1 else ""),
+                    "qty": str(int(chunk_qty)),
+                    "std_box": display_val,
+                    "timing": timing_display,
+                    "p_2nd": "1" if len(allocated_result[earliest_m]["rows"]) == 0 else "",
+                    "p_3rd": "1" if len(allocated_result[earliest_m]["rows"]) == 1 else "",
+                    "alert": False,
+                    "p_label": f"P{len(allocated_result[earliest_m]['rows']) + 1}"
+                })
 
+            for t in tasks:
+                if t['needed'] > 0:
+                    disp, pc, d_idx = t['display_name'], t['p_code'], t['day_idx']
+                    rpb, _, _ = get_box_for_part_detailed(disp, pc, box_matrix, debug_logs, logged_rpb)
+                    missed_val = f"{int(t['needed'])} Rings (Q)" if rpb <= 0 else f"{math.ceil(t['needed'] / rpb)} Boxes"
+                    
+                    reason = "Machine Capacity Exceeded"
+                    if t['machines'] and all(machine_blocked.get(m[0]) or machine_ready_time[m[0]] >= 24.0 for m in t['machines']):
+                        reason = "Exceeds Planning Window"
+                        
+                    output_times[(disp, pc, d_idx)] = float('inf')
+                    
+                    unscheduled.append({
+                        "stage": m_type,
+                        "part": f"{disp} {pc}" + (" (D2)" if d_idx==1 else ""),
+                        "missed_boxes": f"{missed_val} - {reason}"
+                    })
+                
             for m_num, m_info in m_state_dict.items():
                 m_info['ready_time'] = machine_ready_time[m_num]
                 
@@ -920,8 +1004,7 @@ def generate_schedule(payload: ScheduleRequest):
         furnaces_state = {f: {"ready_time": 0.0, "current_fam": None, "rows": [], "capacity": cap} for f, cap in FURNACE_SPECS.items()}
         
         ht_out_time = {}
-        schedule_ht_pass(ht_req_d1, furnaces_state, 0, ht_out_time)
-        schedule_ht_pass(ht_req_d2, furnaces_state, 1, ht_out_time)
+        allocate_ht(ht_req_d1, ht_req_d2, furnaces_state, ht_out_time)
 
         face_out_time = ht_out_time.copy()
         final_face = allocate_grinding('FACE', face_req_d1, face_req_d2, ht_out_time, face_out_time)

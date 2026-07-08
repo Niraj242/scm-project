@@ -35,14 +35,18 @@ const Afterchannel = () => {
   const [rollerSentVal, setRollerSentVal] = useState('');
   const [rollerStationVal, setRollerStationVal] = useState('');
  
-  
-  // Add the new states here
+  // === NEW SCRAP STATES ===
   const [scrapData, setScrapData] = useState([]);
   const [expandedScrapMOs, setExpandedScrapMOs] = useState({});
+  const [expandedMOs, setExpandedMOs] = useState({});
+  const [expandedVariants, setExpandedVariants] = useState({});
+ 
+  // P-VSM Visual Flow Filters
+  const [pvsmMo, setPvsmMo] = useState('');
+  const [pvsmType, setPvsmType] = useState('');
+  const [isFlowLoaded, setIsFlowLoaded] = useState(false);
 
-  // ==========================================
-  // PASTE THE NEW HOOK HERE (Top-Level Scope)
-  // ==========================================
+  // === NEW SCRAP FETCH HOOK ===
   useEffect(() => {
     const fetchScrapData = async () => {
       try {
@@ -61,20 +65,6 @@ const Afterchannel = () => {
   const toggleScrapRow = (mo) => {
     setExpandedScrapMOs(prev => ({ ...prev, [mo]: !prev[mo] }));
   };
-  // ==========================================
-
-  // Your existing functions follow...
-  const handleFormSubmit = async (e) => {
-      // ... existing logic
-   
- 
-  const [expandedMOs, setExpandedMOs] = useState({});
-  const [expandedVariants, setExpandedVariants] = useState({});
- 
-  // P-VSM Visual Flow Filters
-  const [pvsmMo, setPvsmMo] = useState('');
-  const [pvsmType, setPvsmType] = useState('');
-  const [isFlowLoaded, setIsFlowLoaded] = useState(false);
 
   useEffect(() => {
     fetchMasterData();
@@ -186,10 +176,6 @@ const Afterchannel = () => {
       bearingFamily: bearingFamily || null
     };
 
-
-
-
-   
     const numFields = [
       'qtyIn', 'qtySent', 'ballScrap', 'rollerScrap', 'cageScrap', 'irScrap', 'orScrap',
       'irSent', 'orSent', 'cageSent', 'rollerSent'
@@ -677,7 +663,6 @@ const Afterchannel = () => {
           </div>
         )}
 
-
         {activeTab === 'summary' && (
           <div className="summary-view animate-fade-in">
             <div className="summary-view-header">
@@ -756,8 +741,6 @@ const Afterchannel = () => {
           </div>
         )}
  
-        {activeTab === 'visualFlow' && renderPVSMFlow()}
-
         {/* ================= NEW P-VSM VISUAL FLOW ================= */}
         {activeTab === 'visualFlow' && renderPVSMFlow()}
 
@@ -825,7 +808,5 @@ const Afterchannel = () => {
     </div>
   );
 };
-};
  
 export default Afterchannel;
-

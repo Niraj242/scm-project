@@ -758,7 +758,10 @@ const Afterchannel = () => {
  
         {activeTab === 'visualFlow' && renderPVSMFlow()}
 
-        {/* Paste this block just before the closing divs of the component */}
+        {/* ================= NEW P-VSM VISUAL FLOW ================= */}
+        {activeTab === 'visualFlow' && renderPVSMFlow()}
+
+        {/* ================= NEW SCRAP TAB ================= */}
         {activeTab === 'scrap' && (
           <div className="table-container">
             <table className="ledger-table">
@@ -788,22 +791,21 @@ const Afterchannel = () => {
                         <td>{moData.channel_scrap}</td>
                       </tr>
                       
-                      {/* Expanded Dropdown Row */}
                       {expandedScrapMOs[moData.mo] && (
                         <tr>
                           <td colSpan="4" style={{padding: '0'}}>
-                            <table className="inner-scrap-table">
+                            <table style={{width: '100%', backgroundColor: 'var(--ac-surface-alt)', borderCollapse: 'collapse', border: '1px solid var(--ac-border)'}}>
                               <thead>
                                 <tr>
-                                  <th style={{width: '50%'}}>Reason Code</th>
-                                  <th style={{width: '50%'}}>Total Scrap for Reason</th>
+                                  <th style={{width: '50%', backgroundColor: 'var(--ac-blue-soft)', color: 'var(--ac-blue-dark)', fontSize: '11px', padding: '6px 12px', textAlign: 'left'}}>Reason Code</th>
+                                  <th style={{width: '50%', backgroundColor: 'var(--ac-blue-soft)', color: 'var(--ac-blue-dark)', fontSize: '11px', padding: '6px 12px', textAlign: 'left'}}>Total Scrap for Reason</th>
                                 </tr>
                               </thead>
                               <tbody>
                                 {Object.entries(moData.reasons).map(([code, qty]) => (
                                   <tr key={code}>
-                                    <td style={{fontWeight: '600'}}>{code}</td>
-                                    <td>{qty}</td>
+                                    <td style={{fontWeight: '600', padding: '6px 12px', borderBottom: '1px solid var(--ac-border)', fontSize: '12px'}}>{code}</td>
+                                    <td style={{padding: '6px 12px', borderBottom: '1px solid var(--ac-border)', fontSize: '12px'}}>{qty}</td>
                                   </tr>
                                 ))}
                               </tbody>
@@ -817,9 +819,7 @@ const Afterchannel = () => {
               </tbody>
             </table>
           </div>
-        )}  
-
-
+        )}
 
       </div>
     </div>
@@ -827,3 +827,7 @@ const Afterchannel = () => {
 };
  
 export default Afterchannel;
+
+
+
+

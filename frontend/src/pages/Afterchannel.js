@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import './Afterchannel.css';
  
 const API = 'https://scm-backend-pshv.onrender.com';
-
+ 
 const Afterchannel = () => {
   const [activeTab, setActiveTab] = useState('accurate');
   const [entryMode, setEntryMode] = useState('IN'); 
@@ -13,7 +13,7 @@ const Afterchannel = () => {
   const [scrapData, setScrapData] = useState([]);
   const [scrapSearchQuery, setScrapSearchQuery] = useState('');
   const [expandedScrapMOs, setExpandedScrapMOs] = useState({});
-  const [expandedScrapReasons, setExpandedScrapReasons] = useState({});
+  const [expandedScrapVariants, setExpandedScrapVariants] = useState({}); // Used for toggling variant -> reason
 
   const [moNumber, setMoNumber] = useState('');
   const [selectedVariant, setSelectedVariant] = useState('');
@@ -109,7 +109,6 @@ const Afterchannel = () => {
     }
   };
  
-  // DECLARE UTILITY FUNCTIONS FIRST TO AVOID NO-UNDEF ERRORS
   const getQtyFromRow = (row) => {
     for (const key in row) {
       const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
@@ -152,7 +151,6 @@ const Afterchannel = () => {
     ? allUniqueMos.filter(mo => moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant.trim().toUpperCase()))
     : allUniqueMos;
  
-  // EVENT HANDLERS
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
@@ -635,12 +633,77 @@ const Afterchannel = () => {
     );
   };
 
-  const getFilteredScrapData = () => {
+  const getStructuredScrapData = () => {
     let list = [...scrapData];
     if (scrapSearchQuery.trim()) {
         list = list.filter(s => s.mo.toLowerCase().includes(scrapSearchQuery.toLowerCase()));
     }
-    return list.sort((a,b) => a.mo.localeCompare(b.mo));
+    list.sort((a,b) => a.mo.localeCompare(b.mo));
+
+    return list.map(moRow => {
+        const variants = {};
+        let moIrTot = 0; let moOrTot = 0;
+        let moIrSho = 0; let moOrSho = 0;
+        let moIrChan = 0; let moOrChan = 0;
+
+        if (moRow.breakdown) {
+            Object.entries(moRow.breakdown).forEach(([reason, rData]) => {
+                if (rData.types) {
+                    Object.entries(rData.types).forEach(([vName, vStats]) => {
+                        if (!variants[vName]) {
+                            variants[vName] = {
+                                ir: { sho: 0, chan: 0, tot: 0 },
+                                or: { sho: 0, chan: 0, tot: 0 },
+                                reasons: {}
+                            };
+                        }
+
+                        // Base data mapped properly based on API expected keys (IM/OM)
+                        const irTot = Number(vStats.IM || vStats.IR || 0);
+                        const orTot = Number(vStats.OM || vStats.OR || 0);
+
+                        // Safe mapping for SHO / Channel splits at deepest level
+                        const irSho = Number(vStats.IM_sho || vStats.IR_sho || 0);
+                        const orSho = Number(vStats.OM_sho || vStats.OR_sho || 0);
+                        const irChan = Number(vStats.IM_chan || vStats.IR_chan || 0);
+                        const orChan = Number(vStats.OM_chan || vStats.OR_chan || 0);
+
+                        // Roll-ups to variant level
+                        variants[vName].ir.tot += irTot; variants[vName].or.tot += orTot;
+                        variants[vName].ir.sho += irSho; variants[vName].or.sho += orSho;
+                        variants[vName].ir.chan += irChan; variants[vName].or.chan += orChan;
+
+                        // Roll-ups to MO level
+                        moIrTot += irTot; moOrTot += orTot;
+                        moIrSho += irSho; moOrSho += orSho;
+                        moIrChan += irChan; moOrChan += orChan;
+
+                        // Inject reason level object
+                        variants[vName].reasons[reason] = {
+                            ir: { sho: irSho || '-', chan: irChan || '-', tot: irTot },
+                            or: { sho: orSho || '-', chan: orChan || '-', tot: orTot }
+                        };
+                    });
+                }
+            });
+        }
+
+        // Final MO level values with fallback mapping if backend doesn't provide explicit bottom-up splits
+        return {
+            mo: moRow.mo,
+            ir: { 
+                sho: moIrSho > 0 ? moIrSho : (moRow.ir_sho_scrap || '-'), 
+                chan: moIrChan > 0 ? moIrChan : (moRow.ir_channel_scrap || '-'), 
+                tot: moIrTot > 0 ? moIrTot : (moRow.ir_total_scrap || '-') 
+            },
+            or: { 
+                sho: moOrSho > 0 ? moOrSho : (moRow.or_sho_scrap || '-'), 
+                chan: moOrChan > 0 ? moOrChan : (moRow.or_channel_scrap || '-'), 
+                tot: moOrTot > 0 ? moOrTot : (moRow.or_total_scrap || '-') 
+            },
+            variants: variants
+        };
+    });
   };
  
   return (
@@ -719,14 +782,11 @@ const Afterchannel = () => {
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, activeTab)}>
               <fieldset className={`form-fieldset ${entryMode === 'OUT' ? 'form-fieldset-out' : ''}`}>
               <div className="form-card-title">
-  {activeTab.toUpperCase()} - {entryMode === "IN"
-      ? "Receiving Log"
-      : "Dispatch Log"}
-</div>
+                {activeTab.toUpperCase()} - {entryMode === "IN" ? "Receiving Log" : "Dispatch Log"}
+              </div>
 
-<div className="form-card-body">
-
-  <div className="form-grid-3">
+              <div className="form-card-body">
+                <div className="form-grid-3">
                     {entryMode === 'IN' ? (
                       <>
                         {activeTab === 'cps' && <div className="field-group"><label className="field-label">Item</label><select name="item" defaultValue={editingRecord?.item_type || ''} className="field-input"><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>}
@@ -751,7 +811,7 @@ const Afterchannel = () => {
                       </>
                     )}
                 </div>
-                </div>
+              </div>
               </fieldset>
               <button type="submit" className={`submit-btn ${entryMode === 'IN' ? 'submit-btn-in' : 'submit-btn-out'}`}>{editingRecord ? 'Update Entry' : 'Save Entry'}</button>
             </form>
@@ -768,78 +828,18 @@ const Afterchannel = () => {
               </div>
  
               {entryMode === 'IN' ? (
-
-<fieldset className="form-fieldset">
-
-    <div className="form-card-title">
-        ACCURATE - RECEIVING LOG
-    </div>
-
-    <div className="form-card-body">
-
-       <div className="form-grid-3">
-
-    <div className="field-group">
-        <label className="field-label">In Date</label>
-        <input
-            type="date"
-            name="inDate"
-            defaultValue={editingRecord?.in_date || ""}
-            className="field-input"
-            required
-        />
-    </div>
-
-    <div className="field-group">
-        <label className="field-label">Shift In</label>
-        <select
-            name="shiftIn"
-            defaultValue={editingRecord?.shift_in || ""}
-            className="field-input"
-        >
-            <option></option>
-            <option>1</option>
-            <option>2</option>
-            <option>3</option>
-        </select>
-    </div>
-
-    <div className="field-group">
-        <label className="field-label">PC No</label>
-        <input
-            type="text"
-            name="pc"
-            defaultValue={editingRecord?.pc_no || ""}
-            className="field-input"
-        />
-    </div>
-
-    <div className="field-group">
-        <label className="field-label">Material In From</label>
-        <input
-            list="depts-list"
-            name="materialInFrom"
-            defaultValue={editingRecord?.material_in_from || ""}
-            className="field-input"
-        />
-    </div>
-
-    <div className="field-group">
-        <label className="field-label">Qty In</label>
-        <input
-            type="number"
-            name="qtyIn"
-            defaultValue={editingRecord?.qty_in || ""}
-            className="field-input"
-            required
-        />
-    </div>
-
-</div>
-
-    </div>
-
-</fieldset>
+                <fieldset className="form-fieldset">
+                    <div className="form-card-title">DISMANTLING - RECEIVING LOG</div>
+                    <div className="form-card-body">
+                       <div className="form-grid-3">
+                            <div className="field-group"><label className="field-label">In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ""} className="field-input" required/></div>
+                            <div className="field-group"><label className="field-label">Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ""} className="field-input"><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                            <div className="field-group"><label className="field-label">PC No</label><input type="text" name="pc" defaultValue={editingRecord?.pc_no || ""} className="field-input"/></div>
+                            <div className="field-group"><label className="field-label">Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ""} className="field-input"/></div>
+                            <div className="field-group"><label className="field-label">Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ""} className="field-input" required/></div>
+                        </div>
+                    </div>
+                </fieldset>
               ) : (
                 <fieldset className="form-fieldset form-fieldset-out">
                   <legend>Dismantling - Dispatch Log</legend>
@@ -918,7 +918,6 @@ const Afterchannel = () => {
                 <tbody>
                   {generateSummaryData().map(moData => (
                     <React.Fragment key={moData.mo}>
-                      {/* LEVEL 0: MO ROW */}
                       <tr onClick={() => setExpandedMOs(p => ({...p, [moData.mo]: !p[moData.mo]}))} className={`row-mo ${expandedMOs[moData.mo] ? 'row-mo-expanded' : ''}`}>
                         <td className="mo-toggle-cell">{expandedMOs[moData.mo] ? '▼' : '▶'} {moData.mo}</td>
                         <td>{moData.totals.rwIn || '-'}</td><td>{moData.totals.rwOut || '-'}</td>
@@ -938,7 +937,6 @@ const Afterchannel = () => {
                         const vKey = `${moData.mo}-${variant}`;
                         return (
                           <React.Fragment key={variant}>
-                            {/* LEVEL 1: VARIANT ROW */}
                             <tr onClick={() => setExpandedVariants(p => ({...p, [vKey]: !p[vKey]}))} className="row-variant">
                               <td className="variant-toggle-cell">{expandedVariants[vKey] ? '▼' : '▶'} {variant}</td>
                               <td>{vData.rwIn || '-'}</td><td>{vData.rwOut || '-'}</td>
@@ -953,8 +951,6 @@ const Afterchannel = () => {
                               <td className="cell-scrap-sub">{vData.ballScrap || '-'}</td>
                               <td className="cell-scrap-total">{vData.totalScrap || '-'}</td>
                             </tr>
-                                                        
-                             {/* LEVEL 2: COMPONENT DISPATCH DETAILS */}
                             {expandedVariants[vKey] && (
                               <tr><td colSpan="17" style={{padding: 0}}>{renderMoDispatchDetails(vData.records)}</td></tr>
                             )}
@@ -962,7 +958,6 @@ const Afterchannel = () => {
                         );
                       })}
  
-                      {/* MO BOTTOM TOTAL ROW */}
                       {expandedMOs[moData.mo] && (
                         <tr className="row-total">
                           <td className="label-cell">TOTAL FOR {moData.mo}:</td>
@@ -983,7 +978,7 @@ const Afterchannel = () => {
           </div>
         )}
 
-        {/* ================= NEW SCRAP DATA VIEW ================= */}
+        {/* ================= NEW SCRAP DATA VIEW WITH IR/OR COMPONENT LEVELING ================= */}
         {activeTab === 'scrapData' && (
           <div className="summary-view scrap-summary-view">
             <div className="summary-view-header">
@@ -993,54 +988,78 @@ const Afterchannel = () => {
             </div>
 
             <div className="table-scroll">
-              <table className="summary-table scrap-table">
+              <table className="summary-table scrap-table" style={{borderCollapse: 'collapse', width: '100%', textAlign: 'center'}}>
                 <thead>
                   <tr>
-                    <th className="col-mo">Master Order (MO) / Reason Code</th>
-                    <th className="col-scrap">SHO Scrap</th>
-                    <th className="col-scrap">Channel Scrap</th>
-                    <th className="col-scrap" style={{color: 'var(--ac-red)'}}>Overall Scrap</th>
+                    <th style={{border: '1px solid #ddd', padding: '10px', background: '#f5f7fa', minWidth: '180px'}}>MO / Variant / Reason</th>
+                    <th style={{border: '1px solid #ddd', padding: '10px', background: '#f5f7fa'}}>Component</th>
+                    <th style={{border: '1px solid #ddd', padding: '10px', background: '#f5f7fa'}}>SHO Scrap</th>
+                    <th style={{border: '1px solid #ddd', padding: '10px', background: '#f5f7fa'}}>Channel Scrap</th>
+                    <th style={{border: '1px solid #ddd', padding: '10px', background: '#f5f7fa'}}>Overall Scrap</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {getFilteredScrapData().length === 0 ? (
-                      <tr><td colSpan="4" style={{textAlign: 'center', padding: '20px'}}>No Scrap Data Available.</td></tr>
-                  ) : getFilteredScrapData().map(moNode => (
-                    <React.Fragment key={moNode.mo}>
-                      {/* MO Main Row */}
-                      <tr onClick={() => setExpandedScrapMOs(p => ({...p, [moNode.mo]: !p[moNode.mo]}))} className={`row-mo ${expandedScrapMOs[moNode.mo] ? 'row-mo-expanded' : ''}`}>
-                        <td className="mo-toggle-cell" style={{fontWeight: '700', cursor: 'pointer'}}>
-                            {expandedScrapMOs[moNode.mo] ? '▼' : '▶'} {moNode.mo}
+                  {getStructuredScrapData().length === 0 ? (
+                      <tr><td colSpan="5" style={{textAlign: 'center', padding: '20px', border: '1px solid #ddd'}}>No Scrap Data Available.</td></tr>
+                  ) : getStructuredScrapData().map(node => (
+                    <React.Fragment key={node.mo}>
+                      {/* LEVEL 0: MO */}
+                      <tr style={{background: '#eaeff5'}}>
+                        <td rowSpan="2" onClick={() => setExpandedScrapMOs(p => ({...p, [node.mo]: !p[node.mo]}))} style={{border: '1px solid #ddd', padding: '10px', fontWeight: 'bold', cursor: 'pointer', verticalAlign: 'middle', textAlign: 'left', color: '#1a1a1a'}}>
+                            {expandedScrapMOs[node.mo] ? '▼' : '▶'} {node.mo}
                         </td>
-                        <td className="cell-scrap-sub">{moNode.sho_scrap}</td>
-                        <td className="cell-scrap-sub">{moNode.channel_scrap}</td>
-                        <td className="cell-scrap-total" style={{color: 'var(--ac-red)'}}>{moNode.total_scrap}</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#1a1a1a'}}>IR</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.ir.sho}</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.ir.chan}</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', color: 'var(--ac-red)', fontWeight: 'bold'}}>{node.ir.tot}</td>
+                      </tr>
+                      <tr style={{background: '#eaeff5'}}>
+                        <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#1a1a1a'}}>OR</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.or.sho}</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.or.chan}</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', color: 'var(--ac-red)', fontWeight: 'bold'}}>{node.or.tot}</td>
                       </tr>
                       
-                      {/* Reason Breakdown Level */}
-                      {expandedScrapMOs[moNode.mo] && Object.values(moNode.breakdown).map(rcNode => {
-                         const rcKey = `${moNode.mo}-${rcNode.reason}`;
+                      {/* LEVEL 1: VARIANT */}
+                      {expandedScrapMOs[node.mo] && Object.entries(node.variants).map(([vName, vData]) => {
+                         const vKey = `${node.mo}-${vName}`;
                          return (
-                            <React.Fragment key={rcNode.reason}>
-                                <tr onClick={() => setExpandedScrapReasons(p => ({...p, [rcKey]: !p[rcKey]}))} className="row-variant" style={{background: '#fafafa', cursor: 'pointer'}}>
-                                    <td className="variant-toggle-cell" style={{paddingLeft: '30px', color: '#0f1b33'}}>
-                                        {expandedScrapReasons[rcKey] ? '▼' : '▶'} {rcNode.reason}
+                            <React.Fragment key={vKey}>
+                                <tr style={{background: '#fcfcfc'}}>
+                                    <td rowSpan="2" onClick={() => setExpandedScrapVariants(p => ({...p, [vKey]: !p[vKey]}))} style={{border: '1px solid #ddd', padding: '8px', paddingLeft: '30px', cursor: 'pointer', verticalAlign: 'middle', textAlign: 'left', color: '#0f1b33', fontWeight: '500'}}>
+                                        {expandedScrapVariants[vKey] ? '▼' : '▶'} {vName}
                                     </td>
-                                    <td>-</td>
-                                    <td>-</td>
-                                    <td className="cell-scrap-total">{rcNode.total}</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#2b2b2b'}}>IR</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.ir.sho || '-'}</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.ir.chan || '-'}</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#d32f2f'}}>{vData.ir.tot}</td>
+                                </tr>
+                                <tr style={{background: '#fcfcfc'}}>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#2b2b2b'}}>OR</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.or.sho || '-'}</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.or.chan || '-'}</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#d32f2f'}}>{vData.or.tot}</td>
                                 </tr>
 
-                                {/* Variant & Type Split Level */}
-                                {expandedScrapReasons[rcKey] && Object.entries(rcNode.types).map(([vName, vStats]) => (
-                                    <tr key={`${rcKey}-${vName}`} style={{background: '#ffffff'}}>
-                                        <td style={{paddingLeft: '50px', fontSize: '11.5px', color: '#5b6478'}}>
-                                            <strong>{vName}</strong> (IM: {vStats.IM} | OM: {vStats.OM} | Other: {vStats.other})
-                                        </td>
-                                        <td>-</td>
-                                        <td>-</td>
-                                        <td className="cell-scrap-sub" style={{fontWeight: '600'}}>{vStats.total}</td>
-                                    </tr>
+                                {/* LEVEL 2: REASON CODE */}
+                                {expandedScrapVariants[vKey] && Object.entries(vData.reasons).map(([reason, rData]) => (
+                                    <React.Fragment key={`${vKey}-${reason}`}>
+                                        <tr style={{background: '#ffffff'}}>
+                                            <td rowSpan="2" style={{border: '1px solid #ddd', padding: '6px', paddingLeft: '50px', verticalAlign: 'middle', textAlign: 'left', fontSize: '13px', color: '#5b6478', fontWeight: '500'}}>
+                                                {reason}
+                                            </td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#555'}}>IR</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.ir.sho}</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.ir.chan}</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', fontWeight: '600', color: '#e53935'}}>{rData.ir.tot}</td>
+                                        </tr>
+                                        <tr style={{background: '#ffffff'}}>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#555'}}>OR</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.or.sho}</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.or.chan}</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', fontWeight: '600', color: '#e53935'}}>{rData.or.tot}</td>
+                                        </tr>
+                                    </React.Fragment>
                                 ))}
                             </React.Fragment>
                          );

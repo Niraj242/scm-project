@@ -90,10 +90,6 @@ def is_invalid_part(raw_text):
     return False
 
 def get_lookup_variants(raw_text, p_code=None):
-    """
-    Strict normalization logic. Keeps the absolute base numeric family bounded.
-    Handles composite bearings based on IR/OR.
-    """
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
     
@@ -125,7 +121,6 @@ def get_lookup_variants(raw_text, p_code=None):
                 changed = True
                 
     t_nosuff = t_nosuff.strip()
-    
     t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
     
     prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC']
@@ -255,27 +250,12 @@ def format_time(rel_hrs):
     day_plus = f" (+{days_added})" if days_added > 0 else ""
     return f"{h:02d}:{m:02d}{day_plus}"
 
-class WorkItem:
-    def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, flex):
-        self.stage = stage
-        self.disp = disp
-        self.pc = pc
-        self.day_idx = day_idx
-        self.channel = channel
-        self.qty = qty
-        self.ready_time = ready_time
-        self.priority = priority
-        self.flex = flex
-
-class Resource:
-    def __init__(self, r_id, r_type, capacity_info):
-        self.id = r_id
-        self.type = r_type
-        self.ready_time = 0.0
-        self.last_fam = None
-        self.blocked = False
-        self.capacity_info = capacity_info 
-        self.rows = []
+class ScheduleRequest(BaseModel):
+    sector: str
+    date: str
+    unit_mode: str
+    entries: Dict[str, Any]
+    unlocked_blocks: List[str]
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -717,7 +697,30 @@ def generate_schedule(payload: ScheduleRequest):
 
         # ==========================================
         # 5. GLOBAL OPTIMIZATION SCHEDULING (HYBRID PIPELINE)
+        # Full Batch scheduling past 24h allowed once per machine
         # ==========================================
+        
+        class WorkItem:
+            def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, flex):
+                self.stage = stage
+                self.disp = disp
+                self.pc = pc
+                self.day_idx = day_idx
+                self.channel = channel
+                self.qty = qty
+                self.ready_time = ready_time
+                self.priority = priority
+                self.flex = flex
+
+        class Resource:
+            def __init__(self, r_id, r_type, capacity_info):
+                self.id = r_id
+                self.type = r_type
+                self.ready_time = 0.0
+                self.last_fam = None
+                self.blocked = False
+                self.capacity_info = capacity_info 
+                self.rows = []
 
         work_items = []
         for day_idx, demands, f_req, o_req, h_req in [
@@ -763,6 +766,7 @@ def generate_schedule(payload: ScheduleRequest):
             resources.append(res)
 
         while True:
+            # Active items are items that have arrived and have quantity left
             active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < 24.0]
             if not active_items: break
             
@@ -789,8 +793,7 @@ def generate_schedule(payload: ScheduleRequest):
                     if res.last_fam == item.disp or res.last_fam is None:
                         setup = 0.0
                         
-                    start_time = max(res.ready_time, res.ready_time) + setup
-                    start_time = max(start_time, item.ready_time)
+                    start_time = max(res.ready_time + setup, item.ready_time)
                     if start_time >= 24.0: continue
                     
                     key = (start_time, -item.priority)
@@ -809,15 +812,10 @@ def generate_schedule(payload: ScheduleRequest):
                 total_weight = item.qty * weight
                 time_needed = total_weight / kg_per_hr
                 
-                max_time = 24.0 - start_time
-                if time_needed > max_time:
-                    actual_time = max_time
-                    actual_weight = actual_time * kg_per_hr
-                    chunk_qty = actual_weight / weight
-                else:
-                    actual_time = time_needed
-                    actual_weight = total_weight
-                    chunk_qty = item.qty
+                # FULL BATCH scheduling: Do not truncate by 24h
+                actual_time = time_needed
+                actual_weight = total_weight
+                chunk_qty = item.qty
                     
                 res_ready_time = start_time + actual_time + 0.5
                 out_time = start_time + actual_time + 3.5
@@ -827,11 +825,9 @@ def generate_schedule(payload: ScheduleRequest):
                     monthly_data[month_str][item.disp]["produced"] += chunk_qty
                     
             else:
-                max_chunk_hours = 8.0
-                time_limit = min(24.0 - start_time, max_chunk_hours)
-                chunk_qty = min(item.qty, rate_or_cap * time_limit)
+                # FULL BATCH scheduling: Do not arbitrarily slice 8 hours or truncate by 24h
+                chunk_qty = item.qty
                 
-                # Failsafe avoiding infinitely small chunks block
                 if chunk_qty <= 0.01:
                     res.blocked = True
                     continue
@@ -843,6 +839,7 @@ def generate_schedule(payload: ScheduleRequest):
                 
             res.ready_time = res_ready_time
             res.last_fam = item.disp
+            
             if res.ready_time >= 24.0:
                 res.blocked = True
                 

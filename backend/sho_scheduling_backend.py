@@ -847,11 +847,15 @@ def generate_schedule(payload: ScheduleRequest):
                     start_time = max(res.ready_time + setup, item.ready_time)
                     if start_time >= 24.0: continue
                     
-                    # D2 Optimization: Pull exactly matching Day 2 part forward instantly to avoid resetting penalty
+                    # Strict Day 1 Priority Fix
                     is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
-                    effective_day = -1 if is_continuation else item.day_idx
                     
-                    key = (effective_day, start_time, -item.priority)
+                    # 1. Strictly sort by item.day_idx first (0 = Day 1, 1 = Day 2).
+                    # 2. Then by start_time.
+                    # 3. Then give a slight boost (-1) to continuations ONLY within the same day requirement.
+                    # 4. Finally, sort by priority score.
+                    key = (item.day_idx, start_time, -1 if is_continuation else 0, -item.priority)
+                    
                     if key < best_key:
                         best_key = key
                         best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)

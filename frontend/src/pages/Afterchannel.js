@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import './Afterchannel.css';
  
 const API = 'https://scm-backend-pshv.onrender.com';
- 
+
 const Afterchannel = () => {
   const [activeTab, setActiveTab] = useState('accurate');
   const [entryMode, setEntryMode] = useState('IN'); 

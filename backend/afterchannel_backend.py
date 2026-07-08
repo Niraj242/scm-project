@@ -63,7 +63,7 @@ def ensure_schema():
 def startup_event():
     ensure_schema()
 
-# Safe Date Parser to prevent PostgreSQL 500 Errors
+# Safe Date Parser
 def parse_date(date_str):
     if not date_str or str(date_str).strip() == "":
         return None
@@ -310,38 +310,58 @@ def mo_lookup(refresh: Optional[str] = Query(None)):
 @router.get("/api/xa-scrap")
 def get_xa_scrap_data():
     if not XA_SCRAP_URL:
-        raise HTTPException(status_code=500, detail="XA_SCRAP_URL not configured in .env")
+        return {"status": "error", "message": "XA_SCRAP_URL is missing from backend environment variables.", "data": []}
+        
     try:
-        res = requests.get(XA_SCRAP_URL)
+        res = requests.get(XA_SCRAP_URL, timeout=45)
         res.raise_for_status()
         
-        df = pd.read_excel(io.BytesIO(res.content), engine='openpyxl')
+        # Open Excel File Safely
+        content = io.BytesIO(res.content)
+        try:
+            df = pd.read_excel(content, engine='calamine')
+        except ImportError:
+            df = pd.read_excel(content, engine='openpyxl')
         
-        mo_col = next((c for c in df.columns if 'Order' in str(c)), None)
-        type_col = next((c for c in df.columns if 'Material' in str(c) or 'Type' in str(c) or 'Variant' in str(c)), None)
-        comp_col = next((c for c in df.columns if 'Component' in str(c) or 'Comp' in str(c)), None)
-        reason_col = next((c for c in df.columns if 'Reason' in str(c)), 'Reason Code')
-        qty_col = next((c for c in df.columns if 'Qty' in str(c) or 'Quantity' in str(c) or 'Scrap' in str(c)), 'Scrap Qty_1')
+        # Highly Resilient Column Matching (ignores spaces, cases, and symbols)
+        orig_cols = list(df.columns)
+        norm_cols = {re.sub(r'[^a-z0-9]', '', str(c).lower()): c for c in orig_cols}
         
+        mo_col = norm_cols.get('order') or norm_cols.get('mono') or next((c for c in orig_cols if 'order' in str(c).lower()), None)
+        type_col = norm_cols.get('variant') or norm_cols.get('material') or next((c for c in orig_cols if 'variant' in str(c).lower()), None)
+        comp_col = norm_cols.get('component') or norm_cols.get('componentdesc') or next((c for c in orig_cols if 'comp' in str(c).lower()), None)
+        reason_col = norm_cols.get('reasoncode') or norm_cols.get('reason') or next((c for c in orig_cols if 'reason' in str(c).lower()), None)
+        qty_col = norm_cols.get('scrapqty1') or norm_cols.get('scrapqty') or next((c for c in orig_cols if 'scrapqty' in str(c).lower().replace(' ', '')), None)
+        
+        # Fallback for QTY if 'Scrap' column exists but 'Scrap Qty_1' doesn't map perfectly
+        if not qty_col and norm_cols.get('scrap'):
+            qty_col = norm_cols.get('scrap')
+            
         if not mo_col:
-            raise ValueError("Could not find an 'Order' column for MOs in the Excel sheet.")
+            err_msg = f"Failed to find the 'Order' column in the uploaded Excel. Found columns: {', '.join([str(c) for c in orig_cols])}"
+            return {"status": "error", "message": err_msg, "data": []}
             
         grouped_data = {}
         
         for _, row in df.iterrows():
             raw_mo = str(row[mo_col]).strip()
-            if raw_mo == 'UNKNOWN' or raw_mo == 'nan':
+            if raw_mo.upper() in ['UNKNOWN', 'NAN', 'NONE', '']:
                 continue
                 
-            base_mo = raw_mo[:4] if raw_mo.startswith('M') else raw_mo
-            reason_code = str(row[reason_col]).strip() if reason_col in df.columns else 'UNKNOWN'
-            variant = str(row[type_col]).strip().upper() if type_col and type_col in df.columns else 'STANDARD'
-            component = str(row[comp_col]).strip().upper() if comp_col and comp_col in df.columns else 'UNKNOWN'
+            # Extract first 4 chars (e.g. M0X0)
+            base_mo = raw_mo[:4].upper() if raw_mo.upper().startswith('M') else raw_mo.upper()
+            
+            reason_code = str(row[reason_col]).strip().upper() if reason_col and pd.notna(row[reason_col]) else 'UNKNOWN'
+            variant = str(row[type_col]).strip().upper() if type_col and pd.notna(row[type_col]) else 'STANDARD'
+            component = str(row[comp_col]).strip().upper() if comp_col and pd.notna(row[comp_col]) else 'UNKNOWN'
             
             try:
-                scrap_qty = float(row[qty_col]) if qty_col in df.columns else 0.0
-            except ValueError:
+                scrap_qty = float(row[qty_col]) if qty_col and pd.notna(row[qty_col]) else 0.0
+            except (ValueError, TypeError):
                 scrap_qty = 0.0
+                
+            if scrap_qty == 0:
+                continue
                 
             if base_mo not in grouped_data:
                 grouped_data[base_mo] = {
@@ -387,8 +407,10 @@ def get_xa_scrap_data():
 
         result = list(grouped_data.values())
         return {"status": "success", "data": result}
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing Excel: {str(e)}")
+        print(f"Excel Scrap Parse Error: {str(e)}")
+        return {"status": "error", "message": f"Server encountered an error parsing the file: {str(e)}", "data": []}
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():

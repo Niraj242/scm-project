@@ -28,6 +28,7 @@
   --ac-red: #b3261e;
   --ac-red-soft: #fbeaea;
   --ac-red-strong: #f6d0ce;
+  --ac-red-dark: #8b1d16;
 
   --ac-violet: #6d3fc0;
   --ac-teal: #0f766e;
@@ -414,19 +415,33 @@
 
 /* ================= NEW XA SCRAP SUMMARY STYLES ================= */
 .scrap-grand-total-cell {
-  background-color: var(--ac-red-soft); color: var(--ac-red-dark); font-weight: 800; text-align: center; transition: background-color 0.2s ease, transform 0.1s ease;
+  background-color: var(--ac-red-soft);
+  color: var(--ac-red-dark);
+  font-weight: 800;
+  text-align: center;
+  transition: background-color 0.2s ease, transform 0.1s ease;
 }
 .scrap-grand-total-cell:hover {
-  background-color: var(--ac-red-strong); text-decoration: underline;
+  background-color: var(--ac-red-strong);
+  text-decoration: underline;
 }
 
 .row-scrap-breakdown {
-  background-color: var(--ac-surface-alt); animation: slideDownFade 0.25s ease-out forwards;
+  background-color: var(--ac-surface-alt);
+  animation: slideDownFade 0.25s ease-out forwards;
 }
-.row-scrap-breakdown td { vertical-align: middle; }
-.row-scrap-breakdown table { border-collapse: collapse; }
-.row-scrap-breakdown table tr:last-child td { border-bottom: none !important; }
-.row-scrap-breakdown table td { font-family: monospace; }
+.row-scrap-breakdown td {
+  vertical-align: middle;
+}
+.row-scrap-breakdown table {
+  border-collapse: collapse;
+}
+.row-scrap-breakdown table tr:last-child td {
+  border-bottom: none !important;
+}
+.row-scrap-breakdown table td {
+  font-family: monospace;
+}
 
 @keyframes slideDownFade {
   0% { opacity: 0; transform: translateY(-5px); }

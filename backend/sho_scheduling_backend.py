@@ -20,7 +20,7 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 # --- 1. PERFORMANCE CACHE ---
 EXCEL_CACHE = {}
-CACHE_TTL = 3600  # 1 hour cache for ultra-fast generation
+CACHE_TTL = 3600  
 
 PARSED_MASTER_DATA = {
     "box_matrix": ({}, 0),  
@@ -31,8 +31,6 @@ PARSED_MASTER_DATA = {
 MONTHLY_FILE = "monthly_tracking.json"
 
 # --- 3. HARDCODED PROCESS FLEXIBILITY MATRIX ---
-# Format: "CHANNEL_NAME": {"IR": {"FACE": True/False, "OD": True/False}, "OR": {"FACE": True/False, "OD": True/False}}
-# False means "No" (Process is skipped). Overrides Excel sheet if present.
 HARDCODED_PROCESS_FLEXIBILITY = {
     "T4": {
         "IR": {"FACE": True, "OD": False},
@@ -87,7 +85,6 @@ def normalize_channel(ch_str):
     return ch
 
 def get_process_flexibility(channel_norm, p_code, flex_map):
-    # Check hardcoded map first to override 
     for hard_ch, flex_data in HARDCODED_PROCESS_FLEXIBILITY.items():
         if hard_ch.replace(" ", "") in channel_norm or channel_norm in hard_ch.replace(" ", ""):
             if p_code in flex_data:
@@ -313,11 +310,7 @@ def generate_schedule(payload: ScheduleRequest):
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
-                
-                # Double IR rule for HUB and THUB channels
                 ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
-                
-                # Check if it's TRB/HUB or standard DGBB channel (DGBB should only use Type column)
                 is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
                 
                 r_idx, type_col_idx, mv_col_idx = None, None, None
@@ -327,10 +320,25 @@ def generate_schedule(payload: ScheduleRequest):
                 for i in range(min(25, len(df_zero))):
                     row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
                     row_joined = " ".join(row_strs)
+                    
                     if type_col_idx is None:
+                        # Prioritize exact "TYPE" match to avoid "MF" overwriting it
                         for j, val in enumerate(row_strs):
-                            if val in ["TYPE", "MF", "PART NO", "BRG NO"] or "TYPE" in val: type_col_idx = j
-                            if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j
+                            if val == "TYPE" or "TYPE " in val or " TYPE" in val:
+                                type_col_idx = j
+                                break
+                        if type_col_idx is None:
+                            for j, val in enumerate(row_strs):
+                                if val in ["MF", "PART NO", "BRG NO"]:
+                                    type_col_idx = j
+                                    break
+                                    
+                    if mv_col_idx is None:
+                        for j, val in enumerate(row_strs):
+                            if val in ["MV", "FV", "VAR", "VARIANT"]:
+                                mv_col_idx = j
+                                break
+                                
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
                         for j, val in enumerate(df_zero.iloc[i].values):
@@ -393,28 +401,28 @@ def generate_schedule(payload: ScheduleRequest):
         if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
             box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
         elif sheets_box:
-            if 'RING PER BOX.' in sheets_box:
-                df_box = sheets_box['RING PER BOX.'].fillna('')
-                for idx in range(2, len(df_box)):
-                    row_vals = list(df_box.iloc[idx])
-                    for i in range(0, len(row_vals) - 2, 3):
-                        fam_raw = str(row_vals[i]).strip()
-                        if is_invalid_part(fam_raw): continue
-                        
-                        fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
-                        for f_raw in fams_to_process:
-                            for p_c in ['IR', 'OR']:
-                                clean_keys = get_lookup_variants(f_raw, p_c)
-                                for ck in clean_keys:
-                                    or_qty = safe_float(row_vals[i+1])
-                                    ir_qty = safe_float(row_vals[i+2])
-                                    if ck not in box_matrix: box_matrix[ck] = {}
-                                    if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': 'RING PER BOX.'}
-                                    if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': 'RING PER BOX.'}
-            
-            for fb_sheet in ['BOX PER DAY DGBB', 'BOX PER DAY TRB']:
-                if fb_sheet in sheets_box:
-                    df_fb = sheets_box[fb_sheet].fillna('')
+            for s_name, df_b in sheets_box.items():
+                s_name_up = str(s_name).upper().strip()
+                if 'RING' in s_name_up and 'BOX' in s_name_up:
+                    df_box = df_b.fillna('')
+                    for idx in range(1, len(df_box)):
+                        row_vals = list(df_box.iloc[idx])
+                        for i in range(0, len(row_vals) - 2, 3):
+                            fam_raw = str(row_vals[i]).strip()
+                            if not fam_raw or is_invalid_part(fam_raw): continue
+                            
+                            fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
+                            for f_raw in fams_to_process:
+                                for p_c in ['IR', 'OR']:
+                                    clean_keys = get_lookup_variants(f_raw, p_c)
+                                    for ck in clean_keys:
+                                        or_qty = safe_float(row_vals[i+1])
+                                        ir_qty = safe_float(row_vals[i+2])
+                                        if ck not in box_matrix: box_matrix[ck] = {}
+                                        if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': s_name}
+                                        if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': s_name}
+                elif 'BOX' in s_name_up and 'DAY' in s_name_up:
+                    df_fb = df_b.fillna('')
                     type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
                     for r_idx in range(min(20, len(df_fb))):
                         norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
@@ -429,7 +437,7 @@ def generate_schedule(payload: ScheduleRequest):
                         for idx in range(r_idx + 1, len(df_fb)):
                             row_vals = list(df_fb.iloc[idx])
                             raw_t = str(row_vals[type_col]).strip()
-                            if is_invalid_part(raw_t): continue
+                            if not raw_t or is_invalid_part(raw_t): continue
                             
                             for p_c in ['IR', 'OR']:
                                 clean_keys = get_lookup_variants(raw_t, p_c)
@@ -439,12 +447,12 @@ def generate_schedule(payload: ScheduleRequest):
                                         fq = 0.0
                                         if ir_col != -1: fq = safe_float(row_vals[ir_col])
                                         elif single_rpb_col != -1: fq = safe_float(row_vals[single_rpb_col])
-                                        if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': fb_sheet}
+                                        if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': s_name}
                                     if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
                                         fq = 0.0
                                         if or_col != -1: fq = safe_float(row_vals[or_col])
                                         elif single_rpb_col != -1: fq = safe_float(row_vals[single_rpb_col])
-                                        if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': fb_sheet}
+                                        if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': s_name}
             
             PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
         del sheets_box

@@ -12,7 +12,12 @@ const Afterchannel = () => {
   const [moNumber, setMoNumber] = useState('');
   const [selectedVariant, setSelectedVariant] = useState('');
   const [actualProductionQty, setActualProductionQty] = useState(0);
-  
+
+ // Paste these near line 16, under your other useState declarations
+  const [scrapData, setScrapData] = useState([]);
+  const [expandedScrapMOs, setExpandedScrapMOs] = useState({});
+ 
+ 
   const [editingRecord, setEditingRecord] = useState(null);
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
   const [formDate, setFormDate] = useState('');
@@ -152,7 +157,31 @@ const Afterchannel = () => {
       type: selectedVariant.toUpperCase(),
       bearingFamily: bearingFamily || null
     };
- 
+
+   // Paste this right after your existing useEffect hooks end
+  useEffect(() => {
+    const fetchScrapData = async () => {
+      try {
+        const res = await fetch(`${API}/api/xa-scrap`);
+        const json = await res.json();
+        if(json.status === 'success') {
+          setScrapData(json.data);
+        }
+      } catch(err) {
+        console.error("Error fetching scrap data:", err);
+      }
+    };
+    fetchScrapData();
+  }, []);
+
+  const toggleScrapRow = (mo) => {
+    setExpandedScrapMOs(prev => ({ ...prev, [mo]: !prev[mo] }));
+  };
+
+
+
+
+   
     const numFields = [
       'qtyIn', 'qtySent', 'ballScrap', 'rollerScrap', 'cageScrap', 'irScrap', 'orScrap',
       'irSent', 'orSent', 'cageSent', 'rollerSent'
@@ -516,7 +545,7 @@ const Afterchannel = () => {
       <div className="ac-header">
         <h1 className="ac-title">Afterchannel Processing Operations</h1>
         <div className="tab-buttons">
-          {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
+          {['accurate', 'cps', 'scrap', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
             <button key={tab} className={`tab-pill tab-pill-${tab} ${activeTab === tab ? 'tab-pill-active' : ''}`} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily(''); resetComponentScrapStates();}}>
               {tab.toUpperCase()}
             </button>
@@ -639,7 +668,69 @@ const Afterchannel = () => {
             <div style={{marginTop: '30px'}}>{renderDepartmentLedger(activeTab, activeTab.toUpperCase())}</div>
           </div>
         )}
- 
+
+        {/* Paste this block just before the closing divs of the component */}
+        {activeTab === 'scrap' && (
+          <div className="table-container">
+            <table className="ledger-table">
+              <thead>
+                <tr>
+                  <th>Production MO</th>
+                  <th>Total Scrap</th>
+                  <th>SHO Scrap (HT/FOD)</th>
+                  <th>Channel Scrap</th>
+                </tr>
+              </thead>
+              <tbody>
+                {scrapData.length === 0 ? (
+                  <tr><td colSpan="4" style={{textAlign: 'center'}}>Loading or No Scrap Data Found...</td></tr>
+                ) : (
+                  scrapData.map(moData => (
+                    <React.Fragment key={moData.mo}>
+                      <tr 
+                        onClick={() => toggleScrapRow(moData.mo)} 
+                        style={{cursor: 'pointer', background: expandedScrapMOs[moData.mo] ? '#eaf0fd' : 'transparent'}}
+                      >
+                        <td style={{fontWeight: 'bold', color: 'var(--ac-blue)'}}>
+                          {expandedScrapMOs[moData.mo] ? '▼' : '▶'} {moData.mo}
+                        </td>
+                        <td style={{fontWeight: 'bold'}}>{moData.total_scrap}</td>
+                        <td style={{color: 'var(--ac-amber-dark)'}}>{moData.sho_scrap}</td>
+                        <td>{moData.channel_scrap}</td>
+                      </tr>
+                      
+                      {/* Expanded Dropdown Row */}
+                      {expandedScrapMOs[moData.mo] && (
+                        <tr>
+                          <td colSpan="4" style={{padding: '0'}}>
+                            <table className="inner-scrap-table">
+                              <thead>
+                                <tr>
+                                  <th style={{width: '50%'}}>Reason Code</th>
+                                  <th style={{width: '50%'}}>Total Scrap for Reason</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {Object.entries(moData.reasons).map(([code, qty]) => (
+                                  <tr key={code}>
+                                    <td style={{fontWeight: '600'}}>{code}</td>
+                                    <td>{qty}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}  
+
+
         {activeTab === 'summary' && (
           <div className="summary-view animate-fade-in">
             <div className="summary-view-header">

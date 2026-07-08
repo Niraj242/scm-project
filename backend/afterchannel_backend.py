@@ -17,11 +17,11 @@ router = APIRouter()
 DATABASE_URL = os.getenv("DATABASE_URL")
 DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
 TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
-XA_SCRAP_URL = os.getenv("XA_SCRAP_URL") # Added Scrap URL
+XA_SCRAP_URL = os.getenv("XA_SCRAP_URL")
 
 # --- Global Caches & State ---
 MASTER_DATA_CACHE = {}
-SCRAP_DATA_CACHE = {} # Added Cache for Scrap
+SCRAP_DATA_CACHE = {}
 IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
@@ -214,7 +214,7 @@ def load_excel_sheets(url):
         time.sleep(0.05)
         return {sheet: xls.parse(sheet) for sheet in xls.sheet_names}
     except Exception as e:
-        print(f"Error reading workbook stream: {e}")
+        print(f"Error reading workbook stream for Afterchannel: {e}")
         return {}
 
 def process_scrap_data():
@@ -223,13 +223,10 @@ def process_scrap_data():
     try:
         sheets = load_excel_sheets(XA_SCRAP_URL)
         if not sheets: return
-        df = list(sheets.values())[0]  # Just target the first sheet (Export)
+        df = list(sheets.values())[0]
         if df.empty: return
         
-        # Look for standard columns
         mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
-        
-        # Hard check for requested specific column names or fallbacks
         qty_col = 'Scrap Qty_1' if 'Scrap Qty_1' in df.columns else find_column(df, ["scrapqty1", "scrapqty_1", "scrapqty", "qty", "quantity"])
         reason_col = 'Reason Code' if 'Reason Code' in df.columns else find_column(df, ["reasoncode", "reason", "code"])
         
@@ -332,8 +329,7 @@ def process_master_data():
         process_mo_sheets(dgbb_sheets, temp_cache)
         process_mo_sheets(trb_sheets, temp_cache)
         MASTER_DATA_CACHE = temp_cache
-        
-        process_scrap_data() # Invoke Scrap compilation at same time
+        process_scrap_data()
     except Exception as e:
         print(f"Afterchannel Cache Compilation Fault: {str(e)}")
     finally:
@@ -359,7 +355,6 @@ def mo_lookup(refresh: Optional[str] = Query(None)):
 
 @router.get("/api/afterchannel/scrap_data")
 def get_scrap_data():
-    """Endpoint serving cached Scrap Data pulled from Google Sheets"""
     if not INITIALIZED: return {"status": "initializing", "data": {}}
     return {"status": "success", "data": SCRAP_DATA_CACHE}
 

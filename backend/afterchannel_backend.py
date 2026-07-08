@@ -318,59 +318,82 @@ def get_xa_scrap_data():
         res = requests.get(XA_SCRAP_URL)
         res.raise_for_status()
         
-        # Read the single export sheet
         df = pd.read_excel(io.BytesIO(res.content), engine='openpyxl')
         
-        # Find the MO column (usually 'Order' or 'Production Order' in SAP)
+        # Dynamically find columns in case of export variations
         mo_col = next((c for c in df.columns if 'Order' in str(c)), None)
+        type_col = next((c for c in df.columns if 'Material' in str(c) or 'Type' in str(c) or 'Variant' in str(c)), None)
+        comp_col = next((c for c in df.columns if 'Component' in str(c) or 'Comp' in str(c)), None)
+        reason_col = next((c for c in df.columns if 'Reason' in str(c)), 'Reason Code')
+        qty_col = next((c for c in df.columns if 'Qty' in str(c) or 'Quantity' in str(c) or 'Scrap' in str(c)), 'Scrap Qty_1')
+        
         if not mo_col:
             raise ValueError("Could not find an 'Order' column for MOs in the Excel sheet.")
             
         grouped_data = {}
-        # Fill empty values to prevent NaN errors
-        df = df.fillna({mo_col: 'UNKNOWN', 'Reason Code': 'UNKNOWN', 'Scrap Qty_1': 0})
         
         for _, row in df.iterrows():
             raw_mo = str(row[mo_col]).strip()
             if raw_mo == 'UNKNOWN' or raw_mo == 'nan':
                 continue
                 
-            # Extract base MO (e.g., matching M0X0 pattern, taking first 4 chars)
             base_mo = raw_mo[:4] if raw_mo.startswith('M') else raw_mo
+            reason_code = str(row[reason_col]).strip() if reason_col in df.columns else 'UNKNOWN'
+            variant = str(row[type_col]).strip().upper() if type_col and type_col in df.columns else 'STANDARD'
+            component = str(row[comp_col]).strip().upper() if comp_col and comp_col in df.columns else 'UNKNOWN'
             
-            reason_code = str(row['Reason Code']).strip()
-            # Handle possible string conversions from Excel for quantities
             try:
-                scrap_qty = float(row['Scrap Qty_1'])
+                scrap_qty = float(row[qty_col]) if qty_col in df.columns else 0.0
             except ValueError:
                 scrap_qty = 0.0
-            
+                
             if base_mo not in grouped_data:
                 grouped_data[base_mo] = {
                     "mo": base_mo,
                     "total_scrap": 0,
                     "sho_scrap": 0,
                     "channel_scrap": 0,
-                    "reasons": {}
+                    "variants": {}
                 }
             
             mo_data = grouped_data[base_mo]
             mo_data["total_scrap"] += scrap_qty
             
-            # Categorize Reason Codes
-            if reason_code.startswith('HT') or reason_code.startswith('FOD'):
+            is_sho = reason_code.startswith('HT') or reason_code.startswith('FOD')
+            if is_sho:
                 mo_data["sho_scrap"] += scrap_qty
             else:
                 mo_data["channel_scrap"] += scrap_qty
                 
-            # Group by individual reason code for the dropdown
-            if reason_code not in mo_data["reasons"]:
-                mo_data["reasons"][reason_code] = 0
-            mo_data["reasons"][reason_code] += scrap_qty
+            # Type-wise inner grouping
+            if variant not in mo_data["variants"]:
+                mo_data["variants"][variant] = {
+                    "total_scrap": 0,
+                    "im_scrap": 0,
+                    "om_scrap": 0,
+                    "reasons": {}
+                }
+                
+            v_data = mo_data["variants"][variant]
+            v_data["total_scrap"] += scrap_qty
             
-        return {"status": "success", "data": list(grouped_data.values())}
+            # IM (Inner Ring) / OM (Outer Ring) Component Split
+            if 'IM' in component or 'IR' in component or 'INNER' in component:
+                v_data["im_scrap"] += scrap_qty
+            elif 'OM' in component or 'OR' in component or 'OUTER' in component:
+                v_data["om_scrap"] += scrap_qty
+                
+            if reason_code not in v_data["reasons"]:
+                v_data["reasons"][reason_code] = 0
+            v_data["reasons"][reason_code] += scrap_qty
+            
+        result = list(grouped_data.values())
+        result.sort(key=lambda x: x["mo"])
+        return {"status": "success", "data": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing Excel: {str(e)}")
+
+
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():

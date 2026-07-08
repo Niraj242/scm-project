@@ -493,3 +493,15 @@
 .pvsm-legend-line { width: 24px; height: 2px; }
 .line-solid { background: #94a3b8; }
 .line-dashed { border-bottom: 2px dashed #94a3b8; height: 0; }
+
+/* Add to existing Afterchannel.css */
+
+.tab-pill-scrap.tab-pill-active { box-shadow: inset 0 -2px 0 var(--ac-red); border-color: var(--ac-red); color: var(--ac-red); }
+.tab-pill-scrap:hover { background: var(--ac-red); border-color: var(--ac-red); color: white; }
+.tab-pill-scrap.tab-pill-active:hover { background: white; color: var(--ac-red); }
+
+.scrap-summary-view .summary-view-title::before { background: var(--ac-red); }
+.scrap-table th.col-scrap { min-width: 150px; text-align: center; }
+.scrap-table td { text-align: center; border-right: 1px solid var(--ac-border-strong); padding: 10px; }
+.scrap-table td:first-child { text-align: left; }
+.scrap-table .row-variant:hover { background-color: var(--ac-surface-alt); }

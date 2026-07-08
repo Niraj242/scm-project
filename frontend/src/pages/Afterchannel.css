@@ -709,3 +709,25 @@
 .text-center { text-align: center; }
 .animate-fade-in { animation: fadeIn 0.25s ease-out forwards; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+/* Paste at the bottom of Afterchannel.css */
+.inner-scrap-table {
+  width: 100%;
+  background-color: var(--ac-surface-alt);
+  border-collapse: collapse;
+  border: 1px solid var(--ac-border);
+}
+
+.inner-scrap-table th {
+  background-color: var(--ac-blue-soft);
+  color: var(--ac-blue-dark);
+  font-size: 11px;
+  padding: 6px 12px;
+  text-align: left;
+}
+
+.inner-scrap-table td {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--ac-border);
+  font-size: 12px;
+}

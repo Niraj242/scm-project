@@ -282,7 +282,7 @@ class Resource:
         self.type = r_type
         self.ready_time = 0.0
         self.last_fam = None
-        self.last_pc = None
+        self.last_pc = None  
         self.blocked = False
         self.capacity_info = capacity_info 
         self.rows = []
@@ -313,8 +313,12 @@ def generate_schedule(payload: ScheduleRequest):
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
-                # Apply 2x IR logic for HUB/THUB/TBHU
+                
+                # Double IR rule for HUB and THUB channels
                 ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
+                
+                # Check if it's TRB/HUB or standard DGBB channel (DGBB should only use Type column)
+                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
                 
                 r_idx, type_col_idx, mv_col_idx = None, None, None
                 c1_col, c2_col = None, None
@@ -346,8 +350,11 @@ def generate_schedule(payload: ScheduleRequest):
                         mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
                         if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
                         
-                        mv_val = str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else ""
-                        raw_t = mv_val if mv_val and mv_val not in ["NAN", "NONE"] else last_mf
+                        if is_trb_hub:
+                            mv_val = str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else ""
+                            raw_t = mv_val if mv_val and mv_val not in ["NAN", "NONE"] else last_mf
+                        else:
+                            raw_t = last_mf
                         
                         if is_invalid_part(raw_t): continue
                         display_name = get_display_name(raw_t)
@@ -679,6 +686,7 @@ def generate_schedule(payload: ScheduleRequest):
                     if req_rings <= 0: continue
                     
                     rpb = get_box_for_part(display_name, side, box_matrix)
+                    
                     flex = get_process_flexibility(ch_norm, side, channel_flex_map)
                     req_face = flex['FACE']
                     req_od = flex['OD']
@@ -703,7 +711,6 @@ def generate_schedule(payload: ScheduleRequest):
 
                     current_req = req_rings
                     
-                    # Backwards buffer consumption: CH -> OD -> FACE -> HT
                     used_ch_buf = apply_buf('CH', current_req, rpb)
                     current_req = max(0.0, current_req - used_ch_buf)
                     
@@ -832,9 +839,9 @@ def generate_schedule(payload: ScheduleRequest):
                     start_time = max(res.ready_time + setup, item.ready_time)
                     if start_time >= 24.0: continue
                     
-                    # Strictly prioritize Day 1 over Day 2 UNLESS Day 2 is the exact continuation of current part
+                    # D2 Optimization: Pull exactly matching Day 2 part forward instantly to avoid resetting penalty
                     is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
-                    effective_day = 0 if is_continuation else item.day_idx
+                    effective_day = -1 if is_continuation else item.day_idx
                     
                     key = (effective_day, start_time, -item.priority)
                     if key < best_key:

@@ -290,9 +290,6 @@ def process_master_data():
         INITIALIZED = True
         IS_UPDATING = False
 
-
-
-
 def background_refresh_loop():
     while True:
         try:
@@ -320,7 +317,6 @@ def get_xa_scrap_data():
         
         df = pd.read_excel(io.BytesIO(res.content), engine='openpyxl')
         
-        # Dynamically find columns in case of export variations
         mo_col = next((c for c in df.columns if 'Order' in str(c)), None)
         type_col = next((c for c in df.columns if 'Material' in str(c) or 'Type' in str(c) or 'Variant' in str(c)), None)
         comp_col = next((c for c in df.columns if 'Component' in str(c) or 'Comp' in str(c)), None)
@@ -353,47 +349,46 @@ def get_xa_scrap_data():
                     "total_scrap": 0,
                     "sho_scrap": 0,
                     "channel_scrap": 0,
-                    "variants": {}
+                    "breakdown": {}
                 }
             
-            mo_data = grouped_data[base_mo]
-            mo_data["total_scrap"] += scrap_qty
+            # SHO vs Channel Grouping
+            is_sho = reason_code.startswith("HT") or reason_code.startswith("FOD")
             
-            is_sho = reason_code.startswith('HT') or reason_code.startswith('FOD')
             if is_sho:
-                mo_data["sho_scrap"] += scrap_qty
+                grouped_data[base_mo]["sho_scrap"] += scrap_qty
             else:
-                mo_data["channel_scrap"] += scrap_qty
+                grouped_data[base_mo]["channel_scrap"] += scrap_qty
                 
-            # Type-wise inner grouping
-            if variant not in mo_data["variants"]:
-                mo_data["variants"][variant] = {
-                    "total_scrap": 0,
-                    "im_scrap": 0,
-                    "om_scrap": 0,
-                    "reasons": {}
+            grouped_data[base_mo]["total_scrap"] += scrap_qty
+            
+            # Drill-down Breakdown Map
+            if reason_code not in grouped_data[base_mo]["breakdown"]:
+                grouped_data[base_mo]["breakdown"][reason_code] = {
+                    "reason": reason_code,
+                    "total": 0,
+                    "types": {}
                 }
-                
-            v_data = mo_data["variants"][variant]
-            v_data["total_scrap"] += scrap_qty
             
-            # IM (Inner Ring) / OM (Outer Ring) Component Split
-            if 'IM' in component or 'IR' in component or 'INNER' in component:
-                v_data["im_scrap"] += scrap_qty
-            elif 'OM' in component or 'OR' in component or 'OUTER' in component:
-                v_data["om_scrap"] += scrap_qty
-                
-            if reason_code not in v_data["reasons"]:
-                v_data["reasons"][reason_code] = 0
-            v_data["reasons"][reason_code] += scrap_qty
+            rc_node = grouped_data[base_mo]["breakdown"][reason_code]
+            rc_node["total"] += scrap_qty
             
+            if variant not in rc_node["types"]:
+                rc_node["types"][variant] = {"total": 0, "IM": 0, "OM": 0, "other": 0}
+                
+            rc_node["types"][variant]["total"] += scrap_qty
+            
+            if 'IM' in component or 'IR' in component:
+                rc_node["types"][variant]["IM"] += scrap_qty
+            elif 'OM' in component or 'OR' in component:
+                rc_node["types"][variant]["OM"] += scrap_qty
+            else:
+                rc_node["types"][variant]["other"] += scrap_qty
+
         result = list(grouped_data.values())
-        result.sort(key=lambda x: x["mo"])
         return {"status": "success", "data": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing Excel: {str(e)}")
-
-
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():
@@ -402,22 +397,31 @@ def get_summary_ledgers():
     try:
         cursor.execute("SELECT * FROM accurate_ledger")
         accurate = cursor.fetchall()
+        
         cursor.execute("SELECT * FROM cps_ledger")
         cps = cursor.fetchall()
+        
         cursor.execute("SELECT * FROM rework_ledger")
         rework = cursor.fetchall()
+        
         cursor.execute("SELECT * FROM vibration_dismantling_ledger")
         dismantling = cursor.fetchall()
+        
         cursor.execute("SELECT * FROM autopackaging_ledger")
         autopackaging = cursor.fetchall()
+        
         cursor.execute("SELECT * FROM fps_ledger")
         fps = cursor.fetchall()
 
         return {
             "status": "success",
             "data": {
-                "accurate": accurate, "cps": cps, "rework": rework, 
-                "dismantling": dismantling, "autopackaging": autopackaging, "fps": fps
+                "accurate": accurate,
+                "cps": cps,
+                "rework": rework,
+                "dismantling": dismantling,
+                "autopackaging": autopackaging,
+                "fps": fps
             }
         }
     except Exception as e:
@@ -435,14 +439,17 @@ def submit_accurate(entry: AccurateEntry):
         out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
-                UPDATE accurate_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, pc_no=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
+                UPDATE accurate_ledger
+                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, pc_no=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s
+                WHERE id=%s
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO accurate_ledger (mo, bearing_type, in_date, shift_in, pc_no, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
                 VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s::date, %s)
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.pc, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-            handle_auto_forward(cursor, "Accurate", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
+        
+        handle_auto_forward(cursor, "Accurate", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "Accurate entry logged"}
     except Exception as e:
@@ -461,14 +468,17 @@ def submit_cps(entry: CpsEntry):
         out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
-                UPDATE cps_ledger SET mo=%s, bearing_type=%s, item_type=%s, in_date=%s::date, shift_in=%s, rc_no=%s, material_in_from=%s, channel=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
+                UPDATE cps_ledger
+                SET mo=%s, bearing_type=%s, item_type=%s, in_date=%s::date, shift_in=%s, rc_no=%s, material_in_from=%s, channel=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s
+                WHERE id=%s
             """, (entry.mo, entry.type, entry.item, in_d, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO cps_ledger (mo, bearing_type, item_type, in_date, shift_in, rc_no, material_in_from, channel, qty_in, next_station, qty_sent, out_date, shift_out)
                 VALUES (%s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s::date, %s)
             """, (entry.mo, entry.type, entry.item, in_d, entry.shiftIn, entry.rcNo, entry.materialInFrom, entry.channel, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-            handle_auto_forward(cursor, "CPS", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
+        
+        handle_auto_forward(cursor, "CPS", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "CPS entry logged"}
     except Exception as e:
@@ -487,14 +497,17 @@ def submit_rework(entry: ReworkEntry):
         out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
-                UPDATE rework_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, bearing_family=%s WHERE id=%s
+                UPDATE rework_ledger
+                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, bearing_family=%s
+                WHERE id=%s
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.bearingFamily, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO rework_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out, bearing_family)
                 VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s, %s)
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.bearingFamily))
-            handle_auto_forward(cursor, "Rework", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
+        
+        handle_auto_forward(cursor, "Rework", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "Rework entry logged"}
     except Exception as e:
@@ -511,35 +524,28 @@ def submit_vibration(entry: VibrationEntry):
     try:
         in_d = parse_date(entry.inDate)
         out_d = parse_date(entry.outDate)
-        
         if entry.id:
             cursor.execute("""
-                UPDATE vibration_dismantling_ledger 
-                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, 
-                    next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s, 
+                UPDATE vibration_dismantling_ledger
+                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s,
                     ir_scrap=%s, or_scrap=%s, cage_scrap=%s, ball_scrap=%s, roller_scrap=%s, bearing_family=%s, remark=%s,
                     ir_sent=%s, ir_station=%s, or_sent=%s, or_station=%s, cage_sent=%s, cage_station=%s, roller_sent=%s, roller_station=%s
                 WHERE id=%s
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap, entry.rollerScrap, entry.bearingFamily, entry.remark, entry.irSent, entry.irStation, entry.orSent, entry.orStation, entry.cageSent, entry.cageStation, entry.rollerSent, entry.rollerStation, entry.id))
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut,
+                  entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap, entry.rollerScrap, entry.bearingFamily, entry.remark,
+                  entry.irSent, entry.irStation, entry.orSent, entry.orStation, entry.cageSent, entry.cageStation, entry.rollerSent, entry.rollerStation, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO vibration_dismantling_ledger 
-                (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out, ir_scrap, or_scrap, cage_scrap, ball_scrap, roller_scrap, bearing_family, remark, ir_sent, ir_station, or_sent, or_station, cage_sent, cage_station, roller_sent, roller_station)
+                (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out,
+                 ir_scrap, or_scrap, cage_scrap, ball_scrap, roller_scrap, bearing_family, remark,
+                 ir_sent, ir_station, or_sent, or_station, cage_sent, cage_station, roller_sent, roller_station)
                 VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap, entry.rollerScrap, entry.bearingFamily, entry.remark, entry.irSent, entry.irStation, entry.orSent, entry.orStation, entry.cageSent, entry.cageStation, entry.rollerSent, entry.rollerStation))
-            
-            # Forward Generic Main Dispatches
-            handle_auto_forward(cursor, "Dismantling", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
-            # Forward Specific Components dynamically to target tables
-            if entry.irSent and entry.irStation:
-                handle_auto_forward(cursor, "Dismantling (IR Component)", entry.mo, f"{entry.type} (IR)", out_d, entry.shiftOut, entry.irStation, entry.irSent)
-            if entry.orSent and entry.orStation:
-                handle_auto_forward(cursor, "Dismantling (OR Component)", entry.mo, f"{entry.type} (OR)", out_d, entry.shiftOut, entry.orStation, entry.orSent)
-            if entry.cageSent and entry.cageStation:
-                handle_auto_forward(cursor, "Dismantling (Cage)", entry.mo, f"{entry.type} (Cage)", out_d, entry.shiftOut, entry.cageStation, entry.cageSent)
-            if entry.rollerSent and entry.rollerStation:
-                handle_auto_forward(cursor, "Dismantling (Roll/Ball)", entry.mo, f"{entry.type} (Roller/Ball)", out_d, entry.shiftOut, entry.rollerStation, entry.rollerSent)
+            """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut,
+                  entry.irScrap, entry.orScrap, entry.cageScrap, entry.ballScrap, entry.rollerScrap, entry.bearingFamily, entry.remark,
+                  entry.irSent, entry.irStation, entry.orSent, entry.orStation, entry.cageSent, entry.cageStation, entry.rollerSent, entry.rollerStation))
         
+        handle_auto_forward(cursor, "Dismantling", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "Dismantling entry logged"}
     except Exception as e:
@@ -558,14 +564,17 @@ def submit_autopackaging(entry: AutopackagingEntry):
         out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
-                UPDATE autopackaging_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
+                UPDATE autopackaging_ledger
+                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, next_station=%s, qty_sent=%s, out_date=%s::date, shift_out=%s
+                WHERE id=%s
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut, entry.id))
         else:
             cursor.execute("""
                 INSERT INTO autopackaging_ledger (mo, bearing_type, in_date, shift_in, material_in_from, qty_in, next_station, qty_sent, out_date, shift_out)
                 VALUES (%s, %s, %s::date, %s, %s, %s, %s, %s, %s::date, %s)
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.nextStation, entry.qtySent, out_d, entry.shiftOut))
-            handle_auto_forward(cursor, "Autopackaging", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
+        
+        handle_auto_forward(cursor, "Autopackaging", entry.mo, entry.type, out_d, entry.shiftOut, entry.nextStation, entry.qtySent)
         conn.commit()
         return {"status": "success", "message": "Autopackaging entry logged"}
     except Exception as e:
@@ -584,7 +593,9 @@ def submit_fps(entry: FpsEntry):
         out_d = parse_date(entry.outDate)
         if entry.id:
             cursor.execute("""
-                UPDATE fps_ledger SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, customer_order=%s, qty_sent=%s, out_date=%s::date, shift_out=%s WHERE id=%s
+                UPDATE fps_ledger
+                SET mo=%s, bearing_type=%s, in_date=%s::date, shift_in=%s, material_in_from=%s, qty_in=%s, customer_order=%s, qty_sent=%s, out_date=%s::date, shift_out=%s
+                WHERE id=%s
             """, (entry.mo, entry.type, in_d, entry.shiftIn, entry.materialInFrom, entry.qtyIn, entry.customerOrder, entry.qtySent, out_d, entry.shiftOut, entry.id))
         else:
             cursor.execute("""
@@ -617,9 +628,9 @@ def delete_ledger_entry(dept: str, record_id: int):
         if dept not in table_map: raise HTTPException(status_code=400, detail="Invalid dept")
         table = table_map[dept]
         
-        cursor.execute(f"DELETE FROM {table} WHERE id = %s", (record_id,))
+        cursor.execute(f"DELETE FROM {table} WHERE id=%s", (record_id,))
         conn.commit()
-        return {"status": "success", "message": "Record deleted"}
+        return {"status": "success", "message": "Entry deleted"}
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=str(e))

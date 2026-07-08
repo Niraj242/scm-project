@@ -40,11 +40,11 @@ const Afterchannel = () => {
  
   const [expandedMOs, setExpandedMOs] = useState({});
   const [expandedVariants, setExpandedVariants] = useState({});
-
+ 
   // --- NEW VISUAL FLOW STATES ---
   const [selectedFlowNode, setSelectedFlowNode] = useState(null);
   const [flowFilterMo, setFlowFilterMo] = useState('');
- 
+
   useEffect(() => {
     fetchMasterData();
     fetchLedgers();
@@ -250,9 +250,12 @@ const Afterchannel = () => {
     irSentTot: 0, orSentTot: 0, disOutGeneral: 0
   });
  
+  // Prevents counting internal loops (e.g. Accurate -> Rework -> Accurate) 
+  // from continuously inflating the main flow quantities.
   const isLoopback = (dept, val) => {
     if (!val) return false;
     const s = String(val).toLowerCase();
+    // Exclude flows to/from rework, dismantling, or looping into its own department
     return s.includes('rework') || s.includes('dismantling') || s.includes('vibration') || s.includes(dept);
   };
  
@@ -277,11 +280,14 @@ const Afterchannel = () => {
       if (r.qty_in && !isLoopback('fps', mFrom)) node.fpsIn += Number(r.qty_in); 
     }
     else if (dept === 'rework') { 
+      // Rework handles loops, so we record its raw traffic
       if (r.qty_in) node.rwIn += Number(r.qty_in); 
       if (r.qty_sent) node.rwOut += Number(r.qty_sent); 
     }
     else if (dept === 'dismantling') {
       if (r.qty_in) node.disIn += Number(r.qty_in);
+      
+      // Track the general overall amount, and individual IR/OR amounts separately for the "Lower Quantity" calculation
       if (r.qty_sent) node.disOutGeneral += Number(r.qty_sent);
       if (r.ir_sent) node.irSentTot += Number(r.ir_sent);
       if (r.or_sent) node.orSentTot += Number(r.or_sent);
@@ -299,22 +305,23 @@ const Afterchannel = () => {
       ...safeLedgers.rework.map(r=>({...r, _dept:'rework'})), ...safeLedgers.dismantling.map(r=>({...r, _dept:'dismantling'})), 
       ...safeLedgers.autopackaging.map(r=>({...r, _dept:'autopackaging'})), ...safeLedgers.fps.map(r=>({...r, _dept:'fps'}))
     ];
- 
+    
     const summaryMap = {};
     allLists.forEach(item => {
       if (!item.mo) return;
       const mo = item.mo.toUpperCase();
       let variant = (item.bearing_type || item.type || item.item_type || '').toUpperCase();
       if (!variant || variant === 'DGBB' || variant === 'TRB') variant = 'FAMILY / OVERALL';
-      
+ 
       if (!summaryMap[mo]) summaryMap[mo] = { mo, totals: createEmptyFlowObject(), variants: {} };
       if (!summaryMap[mo].variants[variant]) summaryMap[mo].variants[variant] = createEmptyFlowObject();
-      
+ 
       addFlowCounts(summaryMap[mo].variants[variant], item);
       addFlowCounts(summaryMap[mo].totals, item);
       summaryMap[mo].variants[variant].records.push(item);
     });
  
+    // Post-calculation: Make Dismantling OUT purely equal to the lower count of (Total IR Sent+Scrap vs Total OR Sent+Scrap) + general OUT.
     Object.values(summaryMap).forEach(moData => {
       moData.totals.disOut = moData.totals.disOutGeneral + Math.min(moData.totals.irSentTot + moData.totals.irScrap, moData.totals.orSentTot + moData.totals.orScrap);
       Object.values(moData.variants).forEach(vData => {
@@ -329,39 +336,29 @@ const Afterchannel = () => {
  
   const renderMoDispatchDetails = (records) => {
     const outRecs = records.filter(r => r.qty_sent > 0 || r.ir_sent > 0 || r.or_sent > 0 || r.cage_sent > 0 || r.roller_sent > 0 || r.ir_scrap > 0 || r.or_scrap > 0 || r.cage_scrap > 0 || r.ball_scrap > 0 || r.roller_scrap > 0);
-    if (outRecs.length === 0) return <div className="dispatch-empty-note" style={{padding: '10px'}}>No dispatch/scrap events recorded here yet.</div>;
-    
-    const grouped = outRecs.reduce((acc, curr) => {
-      if(!acc[curr._dept]) acc[curr._dept] = [];
-      acc[curr._dept].push(curr);
-      return acc;
-    }, {});
-    
+    if (outRecs.length === 0) return <div className="dispatch-empty-note">No dispatch/scrap events recorded here yet.</div>;
+    const grouped = outRecs.reduce((acc, curr) => { if(!acc[curr._dept]) acc[curr._dept] = []; acc[curr._dept].push(curr); return acc; }, {});
+ 
     return (
-      <div style={{display: 'flex', gap: '15px', padding: '15px', background: '#f8fafc', flexWrap: 'wrap'}}>
-        {Object.entries(grouped).map(([dept, evts]) => (
-          <div key={dept} className="dispatch-dept-card" style={{flex: '1 1 200px', minWidth: '250px'}}>
-            <h4>{dept} DISPATCHES</h4>
+      <div className="dispatch-detail-panel">
+        {Object.keys(grouped).map(dept => (
+          <div key={dept} className="dispatch-dept-card">
+            <h4>{dept} Activity</h4>
             <div className="dispatch-events">
-              {evts.map((e, idx) => (
-                <div key={idx} className="dispatch-event">
-                  {e.qty_sent > 0 && <span>Sent <strong className="qty-highlight">{e.qty_sent}</strong> to {e.next_station || 'Unknown'}</span>}
-                  {(e.ir_sent > 0 || e.or_sent > 0) && (
-                    <div style={{marginTop: '5px'}}>
-                      {e.ir_sent > 0 && <div>IR Sent: <strong>{e.ir_sent}</strong> ({e.ir_station})</div>}
-                      {e.or_sent > 0 && <div>OR Sent: <strong>{e.or_sent}</strong> ({e.or_station})</div>}
-                      {e.cage_sent > 0 && <div>Cage Sent: <strong>{e.cage_sent}</strong></div>}
-                      {e.roller_sent > 0 && <div>Roller Sent: <strong>{e.roller_sent}</strong></div>}
-                    </div>
+              {grouped[dept].map((r, i) => (
+                <div key={i} className="dispatch-event">
+                  {r.qty_sent > 0 && <div><strong className="qty-highlight">{r.qty_sent}</strong> sent to <strong>{r.next_station || 'N/A'}</strong></div>}
+                  {r.ir_sent > 0 && <div><strong className="qty-highlight">{r.ir_sent} IR</strong> sent to <strong>{r.ir_station || 'N/A'}</strong></div>}
+                  {r.or_sent > 0 && <div><strong className="qty-highlight">{r.or_sent} OR</strong> sent to <strong>{r.or_station || 'N/A'}</strong></div>}
+                  {r.cage_sent > 0 && <div><strong className="qty-highlight">{r.cage_sent} Cage</strong> sent to <strong>{r.cage_station || 'N/A'}</strong></div>}
+                  {r.roller_sent > 0 && <div><strong className="qty-highlight">{r.roller_sent} Roller/Ball</strong> sent to <strong>{r.roller_station || 'N/A'}</strong></div>}
+                  {(r.ir_scrap > 0 || r.or_scrap > 0 || r.cage_scrap > 0 || r.ball_scrap > 0 || r.roller_scrap > 0) && (
+                      <div className="scrap-line">
+                          Scrap: {[r.ir_scrap && `${r.ir_scrap} IR`, r.or_scrap && `${r.or_scrap} OR`, r.cage_scrap && `${r.cage_scrap} Cage`, (r.ball_scrap||r.roller_scrap) && `${r.ball_scrap||r.roller_scrap} Ball/Rollers`].filter(Boolean).join(', ')}
+                      </div>
                   )}
-                  {(e.ir_scrap > 0 || e.or_scrap > 0 || e.cage_scrap > 0 || e.ball_scrap > 0) && (
-                    <div className="scrap-line">
-                      Scrap: {e.ir_scrap > 0 && `IR(${e.ir_scrap}) `} {e.or_scrap > 0 && `OR(${e.or_scrap}) `} 
-                      {e.cage_scrap > 0 && `Cage(${e.cage_scrap}) `} {e.ball_scrap > 0 && `Ball/Roll(${e.ball_scrap})`}
-                    </div>
-                  )}
-                  {e.remark && <div className="remark-line">"{e.remark}"</div>}
-                  <small className="meta-line">{e.out_date} | {e.shift_out}</small>
+                  <span className="meta-line">On: {r.out_date || r.outDate} | Shift: {r.shift_out}</span>
+                  {r.remark && <div className="remark-line">"{r.remark}"</div>}
                 </div>
               ))}
             </div>
@@ -370,60 +367,167 @@ const Afterchannel = () => {
       </div>
     );
   };
+ 
+  const renderDepartmentLedger = (deptKey, deptName) => {
+    const deptData = ledgers[deptKey] || [];
+    const records = deptData.filter(l => {
+      const search = ledgerSearchQuery.toUpperCase();
+      const moMatch = (l.mo || '').toUpperCase().includes(search);
+      const typeMatch = (l.bearing_type || l.type || l.item_type || '').toUpperCase().includes(search);
+      return moMatch || typeMatch;
+    });
+ 
+    if (records.length === 0) return (
+      <div className="ledger-empty-card">
+        <div className="ledger-empty-header">
+          <span className="ledger-empty-title">{deptName} - Global Entry Log</span>
+          <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} className="field-input" style={{width: '300px'}} />
+        </div>
+        No entries found.
+      </div>
+    );
+ 
+    return (
+      <div className="ledger-card">
+        <div className="ledger-card-header">
+          <span>{deptName} - Global Entry Log</span>
+          <input type="text" placeholder="Search MO or Variant..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} className="ledger-search-input" />
+        </div>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>MO</th>
+                <th>Variant</th>
+                <th>Date IN</th>
+                <th>Material From</th>
+                <th className="col-qty-in">Qty IN</th>
+                <th>Date OUT</th>
+                <th>Next Station</th>
+                <th className="col-qty-out">Qty OUT</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {records.map((r, i) => {
+                const isScrap = isScrapStation(r.next_station || r.nextStation);
+                return (
+                  <tr key={i}>
+                    <td className="cell-strong">{r.mo || '-'}</td>
+                    <td className="cell-strong">{r.bearing_type || r.type || r.item_type || '-'}</td>
+                    <td>{r.in_date || r.inDate || '-'}</td>
+                    <td>{r.material_in_from || r.materialInFrom || '-'}</td>
+                    <td className="cell-qty-in">{r.qty_in || r.qtyIn || '-'}</td>
+                    <td>{r.out_date || r.outDate || '-'}</td>
+                    <td className={isScrap ? 'cell-scrap-flag' : ''}>
+                      {r.next_station || r.nextStation || '-'}
+                      {isScrap && <span className="scrap-flag-icon">⚠️</span>}
+                    </td>
+                    <td className="cell-qty-out">{r.qty_sent || r.qtySent || r.ir_sent || '-'}</td>
+                    <td>
+                      <button type="button" onClick={() => handleEdit(r)} className="row-action-btn edit-tint" title="Edit">✏️</button>
+                      <button type="button" onClick={() => handleDelete(r.id, deptKey)} className="row-action-btn delete-tint" title="Delete">🗑️</button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
 
-  // --- NEW VISUAL FLOW RENDER LOGIC ---
+  // ================= NEW VISUAL FLOW RENDERING =================
   const renderVisualFlow = () => {
-    const filterData = (ledgerArray) => {
-      if (!ledgerArray) return [];
-      return ledgerArray.filter(record => 
-        flowFilterMo ? (record.mo || '').toUpperCase() === flowFilterMo.toUpperCase() : true
-      );
+    // 1. Filter root lists (implicitly sums all variants under that MO)
+    const getFilteredLedger = (deptKey) => {
+      const data = ledgers[deptKey] || [];
+      if (!flowFilterMo) return data;
+      return data.filter(r => (r.mo || '').toUpperCase() === flowFilterMo.toUpperCase());
     };
 
-    const accData = filterData(ledgers.accurate);
-    const cpsData = filterData(ledgers.cps);
-    const rwData = filterData(ledgers.rework);
-    const disData = filterData(ledgers.dismantling);
-    const apData = filterData(ledgers.autopackaging);
-    const fpsData = filterData(ledgers.fps);
+    const accData = getFilteredLedger('accurate');
+    const cpsData = getFilteredLedger('cps');
+    const rwData = getFilteredLedger('rework');
+    const disData = getFilteredLedger('dismantling');
+    const apData = getFilteredLedger('autopackaging');
+    const fpsData = getFilteredLedger('fps');
 
-    const accurateIn = accData.filter(r => r.qty_in || r.qtyIn).reduce((sum, r) => sum + Number(r.qty_in || r.qtyIn || 0), 0);
-    
-    const getDispatchCount = (dataList, destKeyword) => {
-        return dataList.filter(r => 
-            (r.qty_sent || r.qtySent) && 
-            (r.next_station || r.nextStation || '').toLowerCase().includes(destKeyword.toLowerCase())
-        ).reduce((sum, r) => sum + Number(r.qty_sent || r.qtySent || 0), 0);
+    // 2. Helper to Build Node Data & Breakdown Map
+    const buildNodeData = (title, dataList, excludeOutKeywordForTotal = null) => {
+        let inTotal = 0;
+        let outTotal = 0;
+        let inBreakdown = {};
+        let outBreakdown = {};
+        
+        dataList.forEach(r => {
+            if (r.qty_in || r.qtyIn) {
+                const qty = Number(r.qty_in || r.qtyIn);
+                const from = (r.material_in_from || r.materialInFrom || 'Unknown Station').toUpperCase();
+                inBreakdown[from] = (inBreakdown[from] || 0) + qty;
+                inTotal += qty;
+            }
+            if (r.qty_sent || r.qtySent) {
+                const qty = Number(r.qty_sent || r.qtySent);
+                const to = (r.next_station || r.nextStation || 'Unknown Station').toUpperCase();
+                outBreakdown[to] = (outBreakdown[to] || 0) + qty;
+                // Double Count Prevention: If this is Accurate -> Rework, it doesn't inflate the "Net Out"
+                if (!excludeOutKeywordForTotal || !to.includes(excludeOutKeywordForTotal)) {
+                    outTotal += qty;
+                }
+            }
+            
+            if (title === 'Dismantling') {
+                ['ir', 'or', 'cage', 'roller'].forEach(part => {
+                    if (r[`${part}_sent`]) {
+                        const to = (r[`${part}_station`] || 'Unknown Station').toUpperCase() + ` (${part.toUpperCase()})`;
+                        const qty = Number(r[`${part}_sent`]);
+                        outBreakdown[to] = (outBreakdown[to] || 0) + qty;
+                        outTotal += qty;
+                    }
+                });
+            }
+        });
+        
+        return { title, inTotal, outTotal, inBreakdown, outBreakdown };
     };
 
-    const accurateToCPS = getDispatchCount(accData, 'cps');
-    const accurateToRW = getDispatchCount(accData, 'rework');
-    const accurateToDis = getDispatchCount(accData, 'dismantling') + getDispatchCount(accData, 'vibration');
-    const accurateToAP = getDispatchCount(accData, 'autopackaging');
-    const accurateToFPS = getDispatchCount(accData, 'fps');
-
-    const netAccurateOut = accurateToCPS + accurateToRW + accurateToAP + accurateToFPS + accurateToDis; 
-    const getGeneralOut = (dataList) => dataList.filter(r => r.qty_sent || r.qtySent).reduce((sum, r) => sum + Number(r.qty_sent || r.qtySent || 0), 0);
+    // Calculate Channel node specifically from Accurate's intake
+    const accNodeData = buildNodeData("Accurate", accData, "REWORK"); // Prevents Rework from counting in Total Net Out
+    let channelToAcc = 0;
+    Object.keys(accNodeData.inBreakdown).forEach(k => {
+        if (k.includes('CH') || k.includes('CHANNEL') || k.includes('T')) {
+            channelToAcc += accNodeData.inBreakdown[k];
+        }
+    });
 
     const nodes = {
-      channel: { title: "Channel Out", in: 0, out: accurateIn, color: 'bg-green' },
-      accurate: { title: "Accurate", in: accurateIn, out: netAccurateOut, color: 'bg-blue' },
-      cps: { title: "CPS", in: accurateToCPS, out: getGeneralOut(cpsData), color: 'bg-amber' },
-      rework: { title: "Rework", in: accurateToRW, out: getGeneralOut(rwData), color: 'bg-violet' },
-      dismantling: { title: "Dismantling", in: accurateToDis, out: getGeneralOut(disData), color: 'bg-red' },
-      autopacking: { title: "Autopackaging", in: accurateToAP, out: getGeneralOut(apData), color: 'bg-green' },
-      fps: { title: "FPS", in: accurateToFPS, out: getGeneralOut(fpsData), color: 'bg-blue' }
+        channel: { 
+            title: "Channel Out", 
+            inTotal: 0, 
+            outTotal: channelToAcc, 
+            inBreakdown: {}, 
+            outBreakdown: { 'ACCURATE': channelToAcc }, 
+            color: 'bg-green' 
+        },
+        accurate: { ...accNodeData, color: 'bg-blue' },
+        cps: { ...buildNodeData("CPS", cpsData), color: 'bg-amber' },
+        rework: { ...buildNodeData("Rework", rwData), color: 'bg-violet' },
+        dismantling: { ...buildNodeData("Dismantling", disData), color: 'bg-red' },
+        autopacking: { ...buildNodeData("Autopackaging", apData), color: 'bg-green' },
+        fps: { ...buildNodeData("FPS", fpsData), color: 'bg-blue' }
     };
 
     const allMos = [...new Set(ledgers.accurate.map(r => r.mo))].filter(Boolean);
 
     return (
-      <div className="tab-pane active" style={{padding: '20px'}}>
+      <div className="visual-flow-wrapper">
         <div className="flow-controls">
-          <div className="field-group" style={{minWidth: '300px'}}>
-            <label className="field-label">Filter Topology by MO</label>
+          <div className="field-group" style={{minWidth: '350px'}}>
+            <label className="field-label">Filter Topology by MO (Sums all variants)</label>
             <select className="field-input" value={flowFilterMo} onChange={(e) => setFlowFilterMo(e.target.value)}>
-              <option value="">-- All MOs (Sum of Variants) --</option>
+              <option value="">-- All MOs Aggregated --</option>
               {allMos.map(mo => <option key={mo} value={mo}>{mo}</option>)}
             </select>
           </div>
@@ -445,12 +549,12 @@ const Afterchannel = () => {
                 <div className="node-title">{node.title}</div>
                 <div className="node-stats">
                   <div className="stat-item">
-                    <span className="stat-label">Total IN</span>
-                    <span className="stat-val stat-val-in">{node.in}</span>
+                    <span className="stat-label">Net IN</span>
+                    <span className="stat-val stat-val-in">{node.inTotal}</span>
                   </div>
                   <div className="stat-item" style={{alignItems: 'flex-end'}}>
-                    <span className="stat-label">Total OUT</span>
-                    <span className="stat-val stat-val-out">{node.out}</span>
+                    <span className="stat-label">Net OUT</span>
+                    <span className="stat-val stat-val-out">{node.outTotal}</span>
                   </div>
                 </div>
               </div>
@@ -461,16 +565,34 @@ const Afterchannel = () => {
             <>
               <div className="modal-backdrop" onClick={() => setSelectedFlowNode(null)}></div>
               <div className="node-detail-modal">
-                <h3 style={{marginTop: 0, color: 'var(--ac-navy)'}}>{selectedFlowNode.data.title} - Tracking Details</h3>
-                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '10px'}}>
-                  <p style={{margin: 0}}><strong>Total Incoming:</strong> <span style={{color: 'var(--ac-blue-dark)', fontSize: '18px', fontWeight: 'bold'}}>{selectedFlowNode.data.in}</span></p>
-                  <p style={{margin: 0}}><strong>Total Outgoing:</strong> <span style={{color: 'var(--ac-amber-dark)', fontSize: '18px', fontWeight: 'bold'}}>{selectedFlowNode.data.out}</span></p>
+                <h3 style={{marginTop: 0, color: 'var(--ac-navy)', fontSize: '18px'}}>{selectedFlowNode.data.title} - Full Breakdown</h3>
+                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '15px'}}>
+                  <p style={{margin: 0}}><strong>Net Incoming:</strong> <span style={{color: 'var(--ac-blue-dark)', fontSize: '16px', fontWeight: 'bold'}}>{selectedFlowNode.data.inTotal}</span></p>
+                  <p style={{margin: 0}}><strong>Net Outgoing:</strong> <span style={{color: 'var(--ac-amber-dark)', fontSize: '16px', fontWeight: 'bold'}}>{selectedFlowNode.data.outTotal}</span></p>
                 </div>
+                
+                <div className="modal-breakdown">
+                  <h4>Came From (IN)</h4>
+                  {Object.keys(selectedFlowNode.data.inBreakdown).length > 0 ? (
+                    <ul>
+                      {Object.entries(selectedFlowNode.data.inBreakdown).map(([from, qty]) => (
+                        <li key={from}><span>{from}</span> <span>{qty}</span></li>
+                      ))}
+                    </ul>
+                  ) : <p style={{fontSize: '13px', color: 'var(--ac-text-faint)', fontStyle: 'italic'}}>No inbound records found.</p>}
+                  
+                  <h4>Went To (OUT)</h4>
+                  {Object.keys(selectedFlowNode.data.outBreakdown).length > 0 ? (
+                    <ul>
+                      {Object.entries(selectedFlowNode.data.outBreakdown).map(([to, qty]) => (
+                        <li key={to}><span>{to}</span> <span>{qty}</span></li>
+                      ))}
+                    </ul>
+                  ) : <p style={{fontSize: '13px', color: 'var(--ac-text-faint)', fontStyle: 'italic'}}>No outbound records found.</p>}
+                </div>
+                
                 <hr style={{borderColor: 'var(--ac-border)', margin: '15px 0'}}/>
-                <p style={{fontSize: '13px', color: 'var(--ac-text-faint)'}}>
-                  Aggregated flow breakdown for tracking in this station based on MO <b>{flowFilterMo || "ALL MOs"}</b>. Summing variants concurrently.
-                </p>
-                <button className="tab-pill tab-pill-active" onClick={() => setSelectedFlowNode(null)} style={{width: '100%', marginTop: '15px', padding: '12px'}}>Close Details</button>
+                <button className="submit-btn submit-btn-in" onClick={() => setSelectedFlowNode(null)} style={{width: '100%', marginTop: '5px'}}>Close Details</button>
               </div>
             </>
           )}
@@ -481,86 +603,321 @@ const Afterchannel = () => {
  
   return (
     <div className="afterchannel-container">
+      <datalist id="depts-list"><option value="Channel" /><option value="Accurate" /><option value="CPS" /><option value="Rework" /><option value="Dismantling" /><option value="Autopackaging" /><option value="FPS" /><option value="Scrap" /></datalist>
+      <datalist id="channels-list">
+        {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
+      </datalist>
+      <datalist id="mo-list">
+        {dynamicMosList.map(mo => <option key={mo} value={mo} />)}
+      </datalist>
+      <datalist id="variants-list">
+        {dynamicVariantsList.map(v => <option key={v} value={v} />)}
+      </datalist>
+      
       <div className="ac-header">
-        <h2 className="ac-title">Afterchannel Ledger</h2>
+        <h1 className="ac-title">Afterchannel Processing</h1>
         <div className="tab-buttons">
-          <button className={`tab-pill tab-pill-accurate ${activeTab === 'accurate' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('accurate')}>Accurate</button>
-          <button className={`tab-pill tab-pill-cps ${activeTab === 'cps' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('cps')}>CPS</button>
-          <button className={`tab-pill tab-pill-rework ${activeTab === 'rework' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('rework')}>Rework</button>
-          <button className={`tab-pill tab-pill-dismantling ${activeTab === 'dismantling' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('dismantling')}>Dismantling</button>
-          <button className={`tab-pill tab-pill-autopackaging ${activeTab === 'autopackaging' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('autopackaging')}>Autopackaging</button>
-          <button className={`tab-pill tab-pill-fps ${activeTab === 'fps' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('fps')}>FPS</button>
-          
-          <div style={{width: '1px', height: '24px', background: 'rgba(255,255,255,0.3)', margin: '0 8px'}}></div>
-          
-          <button className={`tab-pill ${activeTab === 'summary' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('summary')}>Summary</button>
-          
-          {/* THE NEW VISUAL FLOW BUTTON */}
-          <button className={`tab-pill ${activeTab === 'visualFlow' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('visualFlow')}>Visual Flow</button>
+          {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
+            <button
+              key={tab}
+              className={`tab-pill tab-pill-${tab} ${activeTab === tab ? 'tab-pill-active' : ''}`}
+              onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily(''); resetComponentScrapStates();}}
+            >
+              {tab.toUpperCase()}
+            </button>
+          ))}
+          <button
+            className={`tab-pill tab-pill-summary ${activeTab === 'summary' ? 'tab-pill-active' : ''}`}
+            onClick={() => setActiveTab('summary')}
+          >
+            📊 SUMMARY
+          </button>
+          <button
+            className={`tab-pill ${activeTab === 'visualFlow' ? 'tab-pill-active' : ''}`}
+            onClick={() => setActiveTab('visualFlow')}
+          >
+            📈 VISUAL FLOW
+          </button>
         </div>
       </div>
-
-      {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].includes(activeTab) && (
+ 
+      {activeTab !== 'summary' && activeTab !== 'visualFlow' && (
         <div className="filter-card">
-           <p style={{fontStyle: 'italic', color: 'var(--ac-text-faint)'}}>Standard forms continue here as normally structured in your component tree.</p>
+          <div className="filter-row">
+            <div className="field-group">
+              <label className="field-label">Variant</label>
+              <input list="variants-list" value={selectedVariant} onChange={handleVariantChange} placeholder="Select or Type Variant..." className="field-input" required />
+            </div>
+            <div className="field-group">
+              <label className="field-label">MO Number</label>
+              <input list="mo-list" value={moNumber} onChange={(e) => setMoNumber(e.target.value)} onBlur={handleMoBlur} placeholder="Select or Type MO..." className="field-input" required />
+            </div>
+            <div className="field-group">
+              <label className="field-label">Target Production Qty</label>
+              <input type="text" value={actualProductionQty > 0 ? actualProductionQty.toLocaleString() : '0'} readOnly className="field-input field-input-readout" />
+            </div>
+          </div>
+          <div className="mode-toggle-row">
+            <button type="button" onClick={() => setEntryMode('IN')} className={`mode-btn mode-btn-in ${entryMode === 'IN' ? 'mode-btn-active' : ''}`}>📥 LOG IN (Receiving)</button>
+            <button type="button" onClick={() => setEntryMode('OUT')} className={`mode-btn mode-btn-out ${entryMode === 'OUT' ? 'mode-btn-active' : ''}`}>📤 LOG OUT (Dispatch)</button>
+            {editingRecord && <button type="button" onClick={() => { setEditingRecord(null); setMoNumber(''); setSelectedVariant(''); setBearingFamily(''); resetComponentScrapStates(); }} className="cancel-edit-btn">Cancel Edit</button>}
+          </div>
         </div>
       )}
+ 
+      <div className="ac-content">
+        {['accurate', 'cps', 'rework', 'autopackaging', 'fps'].includes(activeTab) && (
+          <div>
+            <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, activeTab)}>
+              <fieldset className={`form-fieldset ${entryMode === 'OUT' ? 'form-fieldset-out' : ''}`}>
+              <div className="form-card-title">
+  {activeTab.toUpperCase()} - {entryMode === "IN"
+      ? "Receiving Log"
+      : "Dispatch Log"}
+</div>
 
-      {activeTab === 'summary' && (
-        <div className="tab-pane active" style={{padding: '20px'}}>
-          <div style={{marginBottom: '15px'}}>
-            <input type="text" placeholder="Search MO in Summary..." className="field-input" value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} style={{maxWidth: '300px'}} />
+<div className="form-card-body">
+
+  <div className="form-grid-3">
+                    {entryMode === 'IN' ? (
+                      <>
+                        {activeTab === 'cps' && <div className="field-group"><label className="field-label">Item</label><select name="item" defaultValue={editingRecord?.item_type || ''} className="field-input"><option></option><option>Seal</option><option>Shield</option><option>OM Black</option><option>OM White</option><option>IM Black</option><option>IM White</option></select></div>}
+                        <div className="field-group"><label className="field-label">In Date</label><input type="date" name="inDate" defaultValue={editingRecord?.in_date || ''} onChange={(e) => setFormDate(e.target.value)} className="field-input" required/></div>
+                        <div className="field-group"><label className="field-label">Shift In</label><select name="shiftIn" defaultValue={editingRecord?.shift_in || ''} className="field-input"><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                        {activeTab === 'cps' && <div className="field-group"><label className="field-label">RC No</label><input type="text" name="rcNo" defaultValue={editingRecord?.rc_no || ''} className="field-input"/></div>}
+                        {activeTab === 'accurate' && <div className="field-group"><label className="field-label">PC No</label><input type="text" name="pc" defaultValue={editingRecord?.pc_no || ''} className="field-input"/></div>}
+                        <div className="field-group"><label className="field-label">Material In From</label><input list="depts-list" name="materialInFrom" defaultValue={editingRecord?.material_in_from || ''} className="field-input"/></div>
+                        {activeTab === 'cps' && <div className="field-group"><label className="field-label">Channel</label><input list="channels-list" name="channel" defaultValue={editingRecord?.channel || ''} className="field-input"/></div>}
+                        <div className="field-group"><label className="field-label">Qty In</label><input type="number" name="qtyIn" defaultValue={editingRecord?.qty_in || ''} className="field-input" required/></div>
+                      </>
+                    ) : (
+                      <>
+                        {activeTab === 'fps' ? (
+                          <div className="field-group"><label className="field-label">Customer Order</label><input type="text" name="customerOrder" defaultValue={editingRecord?.customer_order || ''} className="field-input" required/></div>
+                        ) : (
+                          <div className="field-group"><label className="field-label">Next Station</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station || ''} className="field-input"/></div>
+                        )}
+                        <div className="field-group"><label className="field-label">Qty Sent</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent || ''} className="field-input" required/></div>
+                        <div className="field-group"><label className="field-label">Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date || ''} onChange={(e) => setFormDate(e.target.value)} className="field-input" required/></div>
+                        <div className="field-group"><label className="field-label">Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out || ''} className="field-input"><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                      </>
+                    )}
+                </div>
+                </div>
+              </fieldset>
+              <button type="submit" className={`submit-btn ${entryMode === 'IN' ? 'submit-btn-in' : 'submit-btn-out'}`}>{editingRecord ? 'Update Entry' : 'Save Entry'}</button>
+            </form>
+            {renderDepartmentLedger(activeTab, activeTab.toUpperCase())}
           </div>
-          <div style={{overflowX: 'auto', background: '#fff', borderRadius: '12px', border: '1px solid var(--ac-border)'}}>
-            <table className="summary-table">
+        )}
+ 
+        {/* ================= DISMANTLING TAB (MULTI-DISPATCH FEATURE) ================= */}
+        {activeTab === 'dismantling' && (
+          <div>
+            <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'dismantling')}>
+              <div className="family-select-bar">
+                <label>Bearing Family:</label>
+                <select name="bearingFamily" value={bearingFamily} onChange={(e) => setBearingFamily(e.target.value)} required><option></option><option value="DGBB">DGBB</option><option value="TRB">TRB</option></select>
+              </div>
+ 
+              {entryMode === 'IN' ? (
+
+<fieldset className="form-fieldset">
+
+    <div className="form-card-title">
+        ACCURATE - RECEIVING LOG
+    </div>
+
+    <div className="form-card-body">
+
+       <div className="form-grid-3">
+
+    <div className="field-group">
+        <label className="field-label">In Date</label>
+        <input
+            type="date"
+            name="inDate"
+            defaultValue={editingRecord?.in_date || ""}
+            className="field-input"
+            required
+        />
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">Shift In</label>
+        <select
+            name="shiftIn"
+            defaultValue={editingRecord?.shift_in || ""}
+            className="field-input"
+        >
+            <option></option>
+            <option>1</option>
+            <option>2</option>
+            <option>3</option>
+        </select>
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">PC No</label>
+        <input
+            type="text"
+            name="pc"
+            defaultValue={editingRecord?.pc_no || ""}
+            className="field-input"
+        />
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">Material In From</label>
+        <input
+            list="depts-list"
+            name="materialInFrom"
+            defaultValue={editingRecord?.material_in_from || ""}
+            className="field-input"
+        />
+    </div>
+
+    <div className="field-group">
+        <label className="field-label">Qty In</label>
+        <input
+            type="number"
+            name="qtyIn"
+            defaultValue={editingRecord?.qty_in || ""}
+            className="field-input"
+            required
+        />
+    </div>
+
+</div>
+
+    </div>
+
+</fieldset>
+              ) : (
+                <fieldset className="form-fieldset form-fieldset-out">
+                  <legend>Dismantling - Dispatch Log</legend>
+                  
+                  {/* MULTI COMPONENT SPLITTER */}
+                  <div className="component-outbound-card">
+                    <h4>Specific Component Outbound Destinations</h4>
+                    
+                    <div className="component-row">
+                      <div><label>IR Sent Qty</label><input type="number" name="irSent" value={irSentVal} onChange={e=>setIrSentVal(e.target.value)} className="field-input" /></div>
+                      <div><label>IR Next Station</label><input list="depts-list" name="irStation" value={irStationVal} onChange={e=>setIrStationVal(e.target.value)} className="field-input" /></div>
+                    </div>
+                    <div className="component-row">
+                      <div><label>OR Sent Qty</label><input type="number" name="orSent" value={orSentVal} onChange={e=>setOrSentVal(e.target.value)} className="field-input" /></div>
+                      <div><label>OR Next Station</label><input list="depts-list" name="orStation" value={orStationVal} onChange={e=>setOrStationVal(e.target.value)} className="field-input" /></div>
+                    </div>
+                    <div className="component-row">
+                      <div><label>Cage Sent Qty</label><input type="number" name="cageSent" value={cageSentVal} onChange={e=>setCageSentVal(e.target.value)} className="field-input" /></div>
+                      <div><label>Cage Next Station</label><input list="depts-list" name="cageStation" value={cageStationVal} onChange={e=>setCageStationVal(e.target.value)} className="field-input" /></div>
+                    </div>
+                    <div className="component-row">
+                      <div><label>{bearingFamily === 'TRB' ? 'Roller' : 'Ball'} Sent Qty</label><input type="number" name="rollerSent" value={rollerSentVal} onChange={e=>setRollerSentVal(e.target.value)} className="field-input" /></div>
+                      <div><label>{bearingFamily === 'TRB' ? 'Roller' : 'Ball'} Next Station</label><input list="depts-list" name="rollerStation" value={rollerStationVal} onChange={e=>setRollerStationVal(e.target.value)} className="field-input" /></div>
+                    </div>
+                  </div>
+ 
+                  <div className="scrap-entry-card">
+                    <h4>Component Scrap Entry</h4>
+                    <div className="scrap-grid-4">
+                      <div><label>IR Scrap</label><input type="number" name="irScrap" value={irScrapVal} onChange={e=>setIrScrapVal(e.target.value)} className="field-input" /></div>
+                      <div><label>OR Scrap</label><input type="number" name="orScrap" value={orScrapVal} onChange={e=>setOrScrapVal(e.target.value)} className="field-input" /></div>
+                      <div><label>Cage Scrap</label><input type="number" name="cageScrap" value={cageScrapVal} onChange={e=>setCageScrapVal(e.target.value)} className="field-input" /></div>
+                      <div><label>Ball/Roll Scrap</label><input type="number" name="ballScrap" value={ballScrapVal} onChange={e=>setBallScrapVal(e.target.value)} className="field-input" /></div>
+                    </div>
+                  </div>
+ 
+                  <div className="form-grid-3">
+                    <div className="field-group"><label className="field-label">Overall Qty Sent (Optional)</label><input type="number" name="qtySent" defaultValue={editingRecord?.qty_sent||''} className="field-input"/></div>
+                    <div className="field-group"><label className="field-label">Next Station (Overall)</label><input list="depts-list" name="nextStation" defaultValue={editingRecord?.next_station||''} className="field-input"/></div>
+                    <div className="field-group"><label className="field-label">Remarks</label><input type="text" name="remark" value={remarkVal} onChange={e=>setRemarkVal(e.target.value)} className="field-input" placeholder="General remarks..."/></div>
+                    <div className="field-group"><label className="field-label">Out Date</label><input type="date" name="outDate" defaultValue={editingRecord?.out_date||''} onChange={(e) => setFormDate(e.target.value)} className="field-input" required/></div>
+                    <div className="field-group"><label className="field-label">Shift Out</label><select name="shiftOut" defaultValue={editingRecord?.shift_out||''} className="field-input"><option></option><option>1</option><option>2</option><option>3</option></select></div>
+                  </div>
+                </fieldset>
+              )}
+              <button type="submit" className={`submit-btn ${entryMode === 'IN' ? 'submit-btn-in' : 'submit-btn-out'}`}>{editingRecord ? 'Update Entry' : 'Save Entry'}</button>
+            </form>
+            {renderDepartmentLedger('dismantling', 'Dismantling Processing')}
+          </div>
+        )}
+ 
+        {/* ================= SUMMARY VIEW ================= */}
+        {activeTab === 'summary' && (
+          <div className="summary-view">
+            <div className="summary-view-header">
+              <h2 className="summary-view-title">MO Variant Flow Hierarchy</h2>
+              <input type="text" placeholder="Search Master Order (MO)..." value={ledgerSearchQuery} onChange={(e) => setLedgerSearchQuery(e.target.value)} className="summary-search-input" />
+            </div>
+ 
+            <div className="table-scroll">
+              <table className="summary-table">
                 <thead>
                   <tr>
-                    <th>MO NUMBER / VARIANT</th>
-                    <th colSpan="2">REWORK</th>
-                    <th colSpan="2">DISMANTLING</th>
-                    <th colSpan="2">CPS</th>
-                    <th colSpan="2">ACCURATE</th>
-                    <th colSpan="2">AUTOPACKAGING</th>
-                    <th>FPS</th>
-                  </tr>
-                  <tr>
-                    <th></th>
-                    <th>IN</th><th>OUT</th>
-                    <th>IN</th><th>OUT</th>
-                    <th>IN</th><th>OUT</th>
-                    <th>IN</th><th>OUT</th>
-                    <th>IN</th><th>OUT</th>
-                    <th>IN</th>
+                    <th className="col-mo">Master Order / Variant</th>
+                    <th>Rw IN</th><th>Rw OUT</th>
+                    <th>Dism IN</th><th>Dism OUT</th>
+                    <th>CPS IN</th><th>CPS OUT</th>
+                    <th>Acc IN</th><th>Acc OUT</th>
+                    <th>Pkg IN</th><th>Pkg OUT</th>
+                    <th>FPS IN</th>
+                    <th className="col-scrap">IR Scrp</th>
+                    <th className="col-scrap">OR Scrp</th>
+                    <th className="col-scrap">Cg Scrp</th>
+                    <th className="col-scrap">Rl Scrp</th>
+                    <th className="col-scrap">Tot Scrp</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {generateSummaryData().map((moData) => (
+                  {generateSummaryData().map(moData => (
                     <React.Fragment key={moData.mo}>
-                      <tr style={{background: '#eaf0fd', fontWeight: 'bold', cursor: 'pointer'}} onClick={() => setExpandedMOs(prev => ({...prev, [moData.mo]: !prev[moData.mo]}))}>
-                        <td className="label-cell">{moData.mo} {expandedMOs[moData.mo] ? '▼' : '▶'}</td>
-                        <td colSpan="11">Click to {expandedMOs[moData.mo] ? 'collapse' : 'expand'} variants</td>
+                      {/* LEVEL 0: MO ROW */}
+                      <tr onClick={() => setExpandedMOs(p => ({...p, [moData.mo]: !p[moData.mo]}))} className={`row-mo ${expandedMOs[moData.mo] ? 'row-mo-expanded' : ''}`}>
+                        <td className="mo-toggle-cell">{expandedMOs[moData.mo] ? '▼' : '▶'} {moData.mo}</td>
+                        <td>{moData.totals.rwIn || '-'}</td><td>{moData.totals.rwOut || '-'}</td>
+                        <td>{moData.totals.disIn || '-'}</td><td className="cell-dis-out">{moData.totals.disOut || '-'}</td>
+                        <td>{moData.totals.cpsIn || '-'}</td><td>{moData.totals.cpsOut || '-'}</td>
+                        <td>{moData.totals.accIn || '-'}</td><td>{moData.totals.accOut || '-'}</td>
+                        <td>{moData.totals.apIn || '-'}</td><td>{moData.totals.apOut || '-'}</td>
+                        <td>{moData.totals.fpsIn || '-'}</td>
+                        <td className="cell-scrap-sub">{moData.totals.irScrap || '-'}</td>
+                        <td className="cell-scrap-sub">{moData.totals.orScrap || '-'}</td>
+                        <td className="cell-scrap-sub">{moData.totals.cageScrap || '-'}</td>
+                        <td className="cell-scrap-sub">{moData.totals.ballScrap || '-'}</td>
+                        <td className="cell-scrap-total">{moData.totals.totalScrap || '-'}</td>
                       </tr>
-                      {expandedMOs[moData.mo] && Object.entries(moData.variants).map(([vKey, vData]) => {
-                        const rowId = `${moData.mo}-${vKey}`;
+ 
+                      {expandedMOs[moData.mo] && Object.entries(moData.variants).map(([variant, vData]) => {
+                        const vKey = `${moData.mo}-${variant}`;
                         return (
-                          <React.Fragment key={rowId}>
-                            <tr>
-                              <td className="label-cell" style={{paddingLeft: '30px', color: 'var(--ac-blue)'}} onClick={() => setExpandedVariants(prev => ({...prev, [rowId]: !prev[rowId]}))} style={{cursor: 'pointer'}}>
-                                {vKey} {expandedVariants[rowId] ? '▼' : '▶'}
-                              </td>
+                          <React.Fragment key={variant}>
+                            {/* LEVEL 1: VARIANT ROW */}
+                            <tr onClick={() => setExpandedVariants(p => ({...p, [vKey]: !p[vKey]}))} className="row-variant">
+                              <td className="variant-toggle-cell">{expandedVariants[vKey] ? '▼' : '▶'} {variant}</td>
                               <td>{vData.rwIn || '-'}</td><td>{vData.rwOut || '-'}</td>
                               <td>{vData.disIn || '-'}</td><td className="cell-dis-out">{vData.disOut || '-'}</td>
                               <td>{vData.cpsIn || '-'}</td><td>{vData.cpsOut || '-'}</td>
                               <td>{vData.accIn || '-'}</td><td>{vData.accOut || '-'}</td>
                               <td>{vData.apIn || '-'}</td><td>{vData.apOut || '-'}</td>
                               <td>{vData.fpsIn || '-'}</td>
+                              <td className="cell-scrap-sub">{vData.irScrap || '-'}</td>
+                              <td className="cell-scrap-sub">{vData.orScrap || '-'}</td>
+                              <td className="cell-scrap-sub">{vData.cageScrap || '-'}</td>
+                              <td className="cell-scrap-sub">{vData.ballScrap || '-'}</td>
+                              <td className="cell-scrap-total">{vData.totalScrap || '-'}</td>
                             </tr>
-                            {expandedVariants[rowId] && (
-                              <tr><td colSpan="12" style={{padding: 0}}>{renderMoDispatchDetails(vData.records)}</td></tr>
+                                                        
+                             {/* LEVEL 2: COMPONENT DISPATCH DETAILS */}
+                            {expandedVariants[vKey] && (
+                              <tr><td colSpan="17" style={{padding: 0}}>{renderMoDispatchDetails(vData.records)}</td></tr>
                             )}
                           </React.Fragment>
                         );
                       })}
+ 
+                      {/* MO BOTTOM TOTAL ROW */}
                       {expandedMOs[moData.mo] && (
                         <tr className="row-total">
                           <td className="label-cell">TOTAL FOR {moData.mo}:</td>
@@ -570,19 +927,20 @@ const Afterchannel = () => {
                           <td>{moData.totals.accIn || '-'}</td><td>{moData.totals.accOut || '-'}</td>
                           <td>{moData.totals.apIn || '-'}</td><td>{moData.totals.apOut || '-'}</td>
                           <td>{moData.totals.fpsIn || '-'}</td>
+                          <td colSpan="5" className="scrap-grand-total-cell">Grand Total Scrap: {moData.totals.totalScrap}</td>
                         </tr>
                       )}
                     </React.Fragment>
                   ))}
                 </tbody>
-            </table>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* RENDER THE NEW VISUAL FLOW */}
-      {activeTab === 'visualFlow' && renderVisualFlow()}
-      
+        {/* ================= NEW VISUAL FLOW VIEW ================= */}
+        {activeTab === 'visualFlow' && renderVisualFlow()}
+      </div>
     </div>
   );
 };

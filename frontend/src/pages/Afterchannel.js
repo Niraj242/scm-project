@@ -44,7 +44,7 @@ const Afterchannel = () => {
   const [pvsmType, setPvsmType] = useState('');
   const [isFlowLoaded, setIsFlowLoaded] = useState(false);
 
-  // NEW: Scrap Data States
+  // XA Scrap states
   const [scrapData, setScrapData] = useState({});
   const [expandedScrap, setExpandedScrap] = useState({});
 
@@ -128,6 +128,7 @@ const Afterchannel = () => {
     }, 0);
   };
  
+  // Two-way cross filter engines (Master Data)
   const allUniqueVariants = [...new Set(Object.values(moCache).flatMap(rows => rows.map(r => getTypeFromRow(r))))].filter(Boolean);
   const allUniqueMos = Object.keys(moCache);
  
@@ -355,7 +356,7 @@ const Afterchannel = () => {
          total: shoScrapTotal + channelScrapTotal,
          reasons: reasonBreakdown
       };
-      
+
       Object.values(moData.variants).forEach(vData => {
         vData.disOut = vData.disOutGeneral + Math.min(vData.irSentTot + vData.irScrap, vData.orSentTot + vData.orScrap);
       });
@@ -457,48 +458,65 @@ const Afterchannel = () => {
   };
  
   const renderPVSMFlow = () => {
-    const handleFlowSearch = () => { setIsFlowLoaded(true); };
-    
+    // 1. Triggered on button click
+    const handleFlowSearch = () => {
+      setIsFlowLoaded(true);
+    };
+
+    // 2. Filter Data based on selection
     const getFiltered = (deptKey) => {
       let data = ledgers[deptKey] || [];
       if (isFlowLoaded) {
-        if (pvsmMo && pvsmMo !== 'Select MO') data = data.filter(r => (r.mo || '').toUpperCase() === pvsmMo.toUpperCase());
-        if (pvsmType && pvsmType !== 'Select Type') data = data.filter(r => (r.bearing_type || r.type || r.item_type || '').toUpperCase() === pvsmType.toUpperCase());
+        if (pvsmMo && pvsmMo !== 'Select MO') {
+          data = data.filter(r => (r.mo || '').toUpperCase() === pvsmMo.toUpperCase());
+        }
+        if (pvsmType && pvsmType !== 'Select Type') {
+          data = data.filter(r => (r.bearing_type || r.type || r.item_type || '').toUpperCase() === pvsmType.toUpperCase());
+        }
       } else {
         return [];
       }
       return data;
     };
- 
+
     const dataAccurate = getFiltered('accurate');
     const dataCps = getFiltered('cps');
     const dataRework = getFiltered('rework');
     const dataDismantling = getFiltered('dismantling');
     const dataAutopackaging = getFiltered('autopackaging');
     const dataFps = getFiltered('fps');
- 
+
+    // Strict Double Count Prevention for Accurate Net Logic
     const accIn = dataAccurate.reduce((sum, r) => {
       const from = String(r.material_in_from || r.materialInFrom || '').toLowerCase();
-      if (!from.includes('rework') && !from.includes('dismantling') && !from.includes('vibration')) return sum + (Number(r.qty_in || 0));
+      if (!from.includes('rework') && !from.includes('dismantling') && !from.includes('vibration')) {
+        return sum + (Number(r.qty_in || 0));
+      }
       return sum;
     }, 0);
+
     const accOut = dataAccurate.reduce((sum, r) => {
       const to = String(r.next_station || r.nextStation || '').toLowerCase();
-      if (!to.includes('autopackaging')) return sum + (Number(r.qty_sent || 0));
+      if (!to.includes('autopackaging')) {
+        return sum + (Number(r.qty_sent || 0));
+      }
       return sum;
     }, 0);
- 
+
     const sumSimple = (arr, key1, key2) => arr.reduce((s, r) => s + (Number(r[key1] || r[key2] || 0)), 0);
- 
+    
+    // Dismantling Specifics
     const disInTot = sumSimple(dataDismantling, 'qty_in', 'qtyIn');
     const disOutGen = sumSimple(dataDismantling, 'qty_sent', 'qtySent');
     const disIrScrap = sumSimple(dataDismantling, 'ir_scrap', 'irScrap');
     const disOrScrap = sumSimple(dataDismantling, 'or_scrap', 'orScrap');
+    
     const disIrSent = sumSimple(dataDismantling, 'ir_sent', 'irSent');
     const disOrSent = sumSimple(dataDismantling, 'or_sent', 'orSent');
+    
     const disOutComp = Math.min(disIrSent + disIrScrap, disOrSent + disOrScrap);
     const disTotalOut = disOutGen + disOutComp;
- 
+
     const totals = {
       dis: { in: disInTot, out: disTotalOut, visited: isFlowLoaded ? 'Visited' : 'Not Visited' },
       cps: { in: sumSimple(dataCps, 'qty_in', 'qtyIn'), out: sumSimple(dataCps, 'qty_sent', 'qtySent'), visited: isFlowLoaded ? 'Visited' : 'Not Visited' },
@@ -507,7 +525,7 @@ const Afterchannel = () => {
       ap: { in: sumSimple(dataAutopackaging, 'qty_in', 'qtyIn'), out: sumSimple(dataAutopackaging, 'qty_sent', 'qtySent'), visited: isFlowLoaded ? 'Visited' : 'Not Visited' },
       fps: { in: sumSimple(dataFps, 'qty_in', 'qtyIn'), out: sumSimple(dataFps, 'qty_sent', 'qtySent'), visited: isFlowLoaded ? 'Finished' : 'Not Visited' }
     };
- 
+
     const NodeCard = ({ title, subtitle, icon, mIn, mOut, customMetrics, visited, borderCls }) => (
       <div className={`pvsm-card ${borderCls}`}>
         <div className="pvsm-card-header">
@@ -532,6 +550,7 @@ const Afterchannel = () => {
               <strong className="blue">{mOut}</strong> <sub>PCS</sub>
             </div>
           )}
+          {/* Dynamically Map Custom Metrics (like the individual Scraps) */}
           {customMetrics && customMetrics.map((cm, i) => (
             <div key={i} className="pvsm-metric" style={{flexBasis: '40%'}}>
               <span className={`pvsm-metric-icon ${cm.color}`}>○</span>
@@ -545,7 +564,7 @@ const Afterchannel = () => {
         </div>
       </div>
     );
- 
+
     return (
       <div className="pvsm-flow-wrapper">
         <div className="filter-card" style={{ display: 'flex', gap: '15px', alignItems: 'flex-end', marginBottom: '25px', padding: '15px 22px' }}>
@@ -567,7 +586,7 @@ const Afterchannel = () => {
             Generate VSM
           </button>
         </div>
- 
+
         <div className="pvsm-canvas-container">
           <svg className="pvsm-svg-overlay">
             <defs>
@@ -578,19 +597,27 @@ const Afterchannel = () => {
                 <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
               </marker>
             </defs>
+            {/* Top Row Connectors (DM -> SHO -> Disassembly -> CPS) */}
             <path d="M 160 65 L 173 65" markerEnd="url(#arrow)" />
             <path d="M 340 65 L 353 65" markerEnd="url(#arrow)" />
             <path d="M 520 65 L 533 65" markerEnd="url(#arrow)" />
             <path d="M 700 65 L 873 65" markerEnd="url(#arrow)" />
+            
+            {/* To CPS (Left-down) */}
             <path d="M 620 130 Q 620 180 980 180 L 980 155" markerEnd="url(#arrow)" />
+            
+            {/* Row 2 Connectors (Disassembly -> Rework -> Accurate -> Autopacking) */}
             <path d="M 700 225 L 713 225" markerEnd="url(#arrow)" className="dashed-arrow" />
             <path d="M 880 225 L 893 225" markerEnd="url(#arrow)" className="dashed-arrow" />
             <path d="M 1060 225 L 1073 225" markerEnd="url(#arrow)" />
+            
+            {/* Row 2 to Row 3 (Autopacking -> FPS) and (Disassembly -> Common Scrap) */}
             <path d="M 1160 290 Q 1160 330 980 330 L 980 315" markerEnd="url(#arrow)" />
             <path d="M 620 290 L 620 312" markerEnd="url(#arrow-dash)" className="dashed-arrow" />
           </svg>
- 
+
           <div className="pvsm-grid">
+            {/* ROW 1 */}
             <div className="node-pos-dmstore">
               <NodeCard title="DM Store" subtitle="Material Storage" icon="🏛" mIn={0} mOut={0} visited="Not Visited" borderCls="" />
             </div>
@@ -603,6 +630,8 @@ const Afterchannel = () => {
             <div className="node-pos-cps">
               <NodeCard title="CPS" subtitle="Washing / Insp" icon="💧" mIn={totals.cps.in} mOut={totals.cps.out} visited={totals.cps.visited} borderCls="border-purple" />
             </div>
+            
+            {/* ROW 2 */}
             <div className="node-pos-rework">
               <NodeCard title="Rework" subtitle="Correction Dept" icon="🔧" mIn={totals.rw.in} mOut={totals.rw.out} visited={totals.rw.visited} borderCls="border-amber" />
             </div>
@@ -612,6 +641,8 @@ const Afterchannel = () => {
             <div className="node-pos-autopacking">
               <NodeCard title="Auto Packing" subtitle="End of Line" icon="📦" mIn={totals.ap.in} mOut={totals.ap.out} visited={totals.ap.visited} borderCls="border-green" />
             </div>
+
+            {/* ROW 3 */}
             <div className="node-pos-common-scrap">
               <NodeCard title="Common Scrap" subtitle="Final Disposition" icon="🗑️" mIn={disIrScrap + disOrScrap} visited={disIrScrap + disOrScrap > 0 ? 'Visited' : 'Not Visited'} borderCls="" />
             </div>
@@ -626,7 +657,14 @@ const Afterchannel = () => {
  
   return (
     <div className="afterchannel-container">
-      <datalist id="depts-list"><option value="CPS" /><option value="Rework" /><option value="Accurate" /><option value="Autopackaging" /><option value="FPS" /><option value="Scrap" /></datalist>
+      <datalist id="depts-list">
+        <option value="CPS" />
+        <option value="Rework" />
+        <option value="Accurate" />
+        <option value="Autopackaging" />
+        <option value="FPS" />
+        <option value="Scrap" />
+      </datalist>
       <datalist id="channels-list">
         {['CH01','CH02','CH03','CH04','CH05','CH06','CH07','CH08','T1','T2','T3','T4','T5','T6','T7','T8','T9','T10','T11','T12'].map(ch => <option key={ch} value={ch} />)}
       </datalist>
@@ -641,12 +679,32 @@ const Afterchannel = () => {
         <h1 className="ac-title">Afterchannel Processing</h1>
         <div className="tab-buttons">
           {['accurate', 'cps', 'rework', 'dismantling', 'autopackaging', 'fps'].map(tab => (
-            <button key={tab} className={`tab-pill tab-pill-${tab} ${activeTab === tab ? 'tab-pill-active' : ''}`} onClick={() => {setActiveTab(tab); setEditingRecord(null); setLedgerSearchQuery(''); setBearingFamily(''); resetComponentScrapStates();}}>
+            <button 
+              key={tab} 
+              className={`tab-pill tab-pill-${tab} ${activeTab === tab ? 'tab-pill-active' : ''}`} 
+              onClick={() => {
+                setActiveTab(tab); 
+                setEditingRecord(null); 
+                setLedgerSearchQuery(''); 
+                setBearingFamily(''); 
+                resetComponentScrapStates();
+              }}
+            >
               {tab.toUpperCase()}
             </button>
           ))}
-          <button className={`tab-pill tab-pill-summary ${activeTab === 'summary' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('summary')}>📊 SUMMARY</button>
-          <button className={`tab-pill ${activeTab === 'visualFlow' ? 'tab-pill-active' : ''}`} onClick={() => setActiveTab('visualFlow')}>📈 VISUAL FLOW</button>
+          <button 
+            className={`tab-pill tab-pill-summary ${activeTab === 'summary' ? 'tab-pill-active' : ''}`} 
+            onClick={() => setActiveTab('summary')}
+          >
+            📊 SUMMARY
+          </button>
+          <button 
+            className={`tab-pill ${activeTab === 'visualFlow' ? 'tab-pill-active' : ''}`} 
+            onClick={() => setActiveTab('visualFlow')}
+          >
+            📈 VISUAL FLOW
+          </button>
         </div>
       </div>
  
@@ -793,7 +851,9 @@ const Afterchannel = () => {
                   {generateSummaryData().map((moData) => (
                     <React.Fragment key={moData.mo}>
                       <tr className="row-mo" onClick={() => toggleMO(moData.mo)}>
-                        <td className="mo-title"><span className="expand-icon">{expandedMOs[moData.mo] ? '▼' : '▶'}</span> {moData.mo}</td>
+                        <td className="mo-title">
+                          <span className="expand-icon">{expandedMOs[moData.mo] ? '▼' : '▶'}</span> {moData.mo}
+                        </td>
                         <td colSpan="11" style={{background: 'transparent'}}></td>
                         <td colSpan="3" style={{background: 'var(--ac-red-soft)'}}></td>
                       </tr>
@@ -815,7 +875,11 @@ const Afterchannel = () => {
                               <td colSpan="3" style={{background: 'var(--ac-surface-alt)'}}>-</td>
                             </tr>
                             {expandedVariants[vKey] && vData.records && vData.records.some(r => r.qty_sent > 0 || r.ir_sent > 0 || r.or_sent > 0 || r.cage_sent > 0 || r.roller_sent > 0 || r.totalScrap > 0 || r.ir_scrap > 0 || r.or_scrap > 0 || r.cage_scrap > 0 || r.ball_scrap > 0 || r.roller_scrap > 0) && (
-                               <tr className="row-details"><td colSpan="15" style={{padding: 0}}>{renderMoDispatchDetails(vData.records)}</td></tr>
+                               <tr className="row-details">
+                                 <td colSpan="15" style={{padding: 0}}>
+                                   {renderMoDispatchDetails(vData.records)}
+                                 </td>
+                               </tr>
                             )}
                           </React.Fragment>
                         );
@@ -877,6 +941,7 @@ const Afterchannel = () => {
           </div>
         )}
 
+        {/* ================= NEW P-VSM VISUAL FLOW ================= */}
         {activeTab === 'visualFlow' && renderPVSMFlow()}
       </div>
     </div>

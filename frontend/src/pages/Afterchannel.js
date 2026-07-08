@@ -18,10 +18,8 @@ const Afterchannel = () => {
  
   const [formDate, setFormDate] = useState('');
  
-  // Top Level Family state for Rework/Dismantling
   const [bearingFamily, setBearingFamily] = useState(''); 
  
-  // Component Scraps & Dispatches
   const [irScrapVal, setIrScrapVal] = useState('');
   const [orScrapVal, setOrScrapVal] = useState('');
   const [cageScrapVal, setCageScrapVal] = useState('');
@@ -41,9 +39,10 @@ const Afterchannel = () => {
   const [expandedMOs, setExpandedMOs] = useState({});
   const [expandedVariants, setExpandedVariants] = useState({});
  
-  // --- NEW VISUAL FLOW STATES ---
-  const [selectedFlowNode, setSelectedFlowNode] = useState(null);
-  const [flowFilterMo, setFlowFilterMo] = useState('');
+  // P-VSM Flow States
+  const [pvsmMo, setPvsmMo] = useState('');
+  const [pvsmType, setPvsmType] = useState('');
+  const [isFlowLoaded, setIsFlowLoaded] = useState(false);
 
   useEffect(() => {
     fetchMasterData();
@@ -112,7 +111,6 @@ const Afterchannel = () => {
     }, 0);
   };
  
-  // Two-way cross filter engines
   const allUniqueVariants = [...new Set(Object.values(moCache).flatMap(rows => rows.map(r => getTypeFromRow(r))))].filter(Boolean);
   const allUniqueMos = Object.keys(moCache);
  
@@ -129,7 +127,6 @@ const Afterchannel = () => {
     if (moCache[key]) {
       const rawRows = moCache[key];
       const uniqueVariants = [...new Set(rawRows.map(r => getTypeFromRow(r)))].filter(Boolean);
- 
       if (uniqueVariants.length === 1) {
         const vType = uniqueVariants[0];
         setSelectedVariant(vType);
@@ -141,7 +138,6 @@ const Afterchannel = () => {
   const handleVariantChange = (e) => {
     const variantName = e.target.value.toUpperCase();
     setSelectedVariant(variantName);
-    
     if (moNumber && moCache[moNumber.toUpperCase()]) {
       setActualProductionQty(calculateProduction(moCache[moNumber.toUpperCase()], variantName));
     }
@@ -242,7 +238,6 @@ const Afterchannel = () => {
  
   const isScrapStation = (val) => String(val || '').trim().toLowerCase().includes('scrap');
  
-  // --- CORE SUMMARY HIERARCHY LOGIC WITH DOUBLE-COUNT PREVENTION ---
   const createEmptyFlowObject = () => ({
     accIn: 0, accOut: 0, cpsIn: 0, cpsOut: 0, rwIn: 0, rwOut: 0,
     disIn: 0, disOut: 0, apIn: 0, apOut: 0, fpsIn: 0, 
@@ -250,12 +245,9 @@ const Afterchannel = () => {
     irSentTot: 0, orSentTot: 0, disOutGeneral: 0
   });
  
-  // Prevents counting internal loops (e.g. Accurate -> Rework -> Accurate) 
-  // from continuously inflating the main flow quantities.
   const isLoopback = (dept, val) => {
     if (!val) return false;
     const s = String(val).toLowerCase();
-    // Exclude flows to/from rework, dismantling, or looping into its own department
     return s.includes('rework') || s.includes('dismantling') || s.includes('vibration') || s.includes(dept);
   };
  
@@ -280,18 +272,14 @@ const Afterchannel = () => {
       if (r.qty_in && !isLoopback('fps', mFrom)) node.fpsIn += Number(r.qty_in); 
     }
     else if (dept === 'rework') { 
-      // Rework handles loops, so we record its raw traffic
       if (r.qty_in) node.rwIn += Number(r.qty_in); 
       if (r.qty_sent) node.rwOut += Number(r.qty_sent); 
     }
     else if (dept === 'dismantling') {
       if (r.qty_in) node.disIn += Number(r.qty_in);
-      
-      // Track the general overall amount, and individual IR/OR amounts separately for the "Lower Quantity" calculation
       if (r.qty_sent) node.disOutGeneral += Number(r.qty_sent);
       if (r.ir_sent) node.irSentTot += Number(r.ir_sent);
       if (r.or_sent) node.orSentTot += Number(r.or_sent);
- 
       node.irScrap += (Number(r.ir_scrap) || 0); node.orScrap += (Number(r.or_scrap) || 0);
       node.cageScrap += (Number(r.cage_scrap) || 0); node.ballScrap += (Number(r.ball_scrap) || 0) + (Number(r.roller_scrap) || 0);
       node.totalScrap = node.irScrap + node.orScrap + node.cageScrap + node.ballScrap;
@@ -321,7 +309,6 @@ const Afterchannel = () => {
       summaryMap[mo].variants[variant].records.push(item);
     });
  
-    // Post-calculation: Make Dismantling OUT purely equal to the lower count of (Total IR Sent+Scrap vs Total OR Sent+Scrap) + general OUT.
     Object.values(summaryMap).forEach(moData => {
       moData.totals.disOut = moData.totals.disOutGeneral + Math.min(moData.totals.irSentTot + moData.totals.irScrap, moData.totals.orSentTot + moData.totals.orScrap);
       Object.values(moData.variants).forEach(vData => {
@@ -333,8 +320,9 @@ const Afterchannel = () => {
     if (ledgerSearchQuery.trim()) result = result.filter(item => item.mo.includes(ledgerSearchQuery.toUpperCase()));
     return result;
   };
- 
+
   const renderMoDispatchDetails = (records) => {
+    // unchanged...
     const outRecs = records.filter(r => r.qty_sent > 0 || r.ir_sent > 0 || r.or_sent > 0 || r.cage_sent > 0 || r.roller_sent > 0 || r.ir_scrap > 0 || r.or_scrap > 0 || r.cage_scrap > 0 || r.ball_scrap > 0 || r.roller_scrap > 0);
     if (outRecs.length === 0) return <div className="dispatch-empty-note">No dispatch/scrap events recorded here yet.</div>;
     const grouped = outRecs.reduce((acc, curr) => { if(!acc[curr._dept]) acc[curr._dept] = []; acc[curr._dept].push(curr); return acc; }, {});
@@ -369,6 +357,7 @@ const Afterchannel = () => {
   };
  
   const renderDepartmentLedger = (deptKey, deptName) => {
+    // unchanged...
     const deptData = ledgers[deptKey] || [];
     const records = deptData.filter(l => {
       const search = ledgerSearchQuery.toUpperCase();
@@ -438,166 +427,196 @@ const Afterchannel = () => {
     );
   };
 
-  // ================= NEW VISUAL FLOW RENDERING =================
-  const renderVisualFlow = () => {
-    // 1. Filter root lists (implicitly sums all variants under that MO)
-    const getFilteredLedger = (deptKey) => {
-      const data = ledgers[deptKey] || [];
-      if (!flowFilterMo) return data;
-      return data.filter(r => (r.mo || '').toUpperCase() === flowFilterMo.toUpperCase());
-    };
-
-    const accData = getFilteredLedger('accurate');
-    const cpsData = getFilteredLedger('cps');
-    const rwData = getFilteredLedger('rework');
-    const disData = getFilteredLedger('dismantling');
-    const apData = getFilteredLedger('autopackaging');
-    const fpsData = getFilteredLedger('fps');
-
-    // 2. Helper to Build Node Data & Breakdown Map
-    const buildNodeData = (title, dataList, excludeOutKeywordForTotal = null) => {
-        let inTotal = 0;
-        let outTotal = 0;
-        let inBreakdown = {};
-        let outBreakdown = {};
-        
-        dataList.forEach(r => {
-            if (r.qty_in || r.qtyIn) {
-                const qty = Number(r.qty_in || r.qtyIn);
-                const from = (r.material_in_from || r.materialInFrom || 'Unknown Station').toUpperCase();
-                inBreakdown[from] = (inBreakdown[from] || 0) + qty;
-                inTotal += qty;
+  // ================= P-VSM VISUAL FLOW RENDER (EXACT IMAGE REPLICA) =================
+  const renderPVSMFlow = () => {
+    
+    // Filtering Data based on Top Controls
+    const getFiltered = (deptKey) => {
+        let data = ledgers[deptKey] || [];
+        if (isFlowLoaded) {
+            if (pvsmMo && pvsmMo !== 'Select MO') {
+                data = data.filter(r => (r.mo || '').toUpperCase() === pvsmMo.toUpperCase());
             }
-            if (r.qty_sent || r.qtySent) {
-                const qty = Number(r.qty_sent || r.qtySent);
-                const to = (r.next_station || r.nextStation || 'Unknown Station').toUpperCase();
-                outBreakdown[to] = (outBreakdown[to] || 0) + qty;
-                // Double Count Prevention: If this is Accurate -> Rework, it doesn't inflate the "Net Out"
-                if (!excludeOutKeywordForTotal || !to.includes(excludeOutKeywordForTotal)) {
-                    outTotal += qty;
-                }
+            if (pvsmType && pvsmType !== 'Select Type') {
+                data = data.filter(r => (r.bearing_type || r.type || r.item_type || '').toUpperCase() === pvsmType.toUpperCase());
             }
-            
-            if (title === 'Dismantling') {
-                ['ir', 'or', 'cage', 'roller'].forEach(part => {
-                    if (r[`${part}_sent`]) {
-                        const to = (r[`${part}_station`] || 'Unknown Station').toUpperCase() + ` (${part.toUpperCase()})`;
-                        const qty = Number(r[`${part}_sent`]);
-                        outBreakdown[to] = (outBreakdown[to] || 0) + qty;
-                        outTotal += qty;
-                    }
-                });
-            }
-        });
-        
-        return { title, inTotal, outTotal, inBreakdown, outBreakdown };
-    };
-
-    // Calculate Channel node specifically from Accurate's intake
-    const accNodeData = buildNodeData("Accurate", accData, "REWORK"); // Prevents Rework from counting in Total Net Out
-    let channelToAcc = 0;
-    Object.keys(accNodeData.inBreakdown).forEach(k => {
-        if (k.includes('CH') || k.includes('CHANNEL') || k.includes('T')) {
-            channelToAcc += accNodeData.inBreakdown[k];
+        } else {
+            return []; // Show 0s if not loaded
         }
-    });
-
-    const nodes = {
-        channel: { 
-            title: "Channel Out", 
-            inTotal: 0, 
-            outTotal: channelToAcc, 
-            inBreakdown: {}, 
-            outBreakdown: { 'ACCURATE': channelToAcc }, 
-            color: 'bg-green' 
-        },
-        accurate: { ...accNodeData, color: 'bg-blue' },
-        cps: { ...buildNodeData("CPS", cpsData), color: 'bg-amber' },
-        rework: { ...buildNodeData("Rework", rwData), color: 'bg-violet' },
-        dismantling: { ...buildNodeData("Dismantling", disData), color: 'bg-red' },
-        autopacking: { ...buildNodeData("Autopackaging", apData), color: 'bg-green' },
-        fps: { ...buildNodeData("FPS", fpsData), color: 'bg-blue' }
+        return data;
     };
 
-    const allMos = [...new Set(ledgers.accurate.map(r => r.mo))].filter(Boolean);
+    const dataAccurate = getFiltered('accurate');
+    const dataCps = getFiltered('cps');
+    const dataRework = getFiltered('rework');
+    const dataDismantling = getFiltered('dismantling');
+    const dataAutopackaging = getFiltered('autopackaging');
+    const dataFps = getFiltered('fps');
+
+    // Strict Double Count Prevention Logic
+    // Accurate IN: strictly from channel
+    const accIn = dataAccurate.reduce((sum, r) => {
+        const from = String(r.material_in_from || r.materialInFrom || '').toLowerCase();
+        if (!from.includes('rework') && !from.includes('dismantling') && !from.includes('vibration')) {
+            return sum + (Number(r.qty_in || r.qtyIn) || 0);
+        }
+        return sum;
+    }, 0);
+
+    // Accurate OUT: strictly forward flow
+    const accOut = dataAccurate.reduce((sum, r) => {
+        const to = String(r.next_station || r.nextStation || '').toLowerCase();
+        if (!to.includes('rework') && !to.includes('dismantling') && !to.includes('vibration')) {
+            return sum + (Number(r.qty_sent || r.qtySent) || 0);
+        }
+        return sum;
+    }, 0);
+
+    const sumSimple = (dataList, field1, field2) => dataList.reduce((sum, r) => sum + (Number(r[field1] || r[field2]) || 0), 0);
+    
+    // Dismantling Specific Scrap
+    const dismScrap = dataDismantling.reduce((sum, r) => {
+        return sum + (Number(r.ir_scrap)||0) + (Number(r.or_scrap)||0) + (Number(r.cage_scrap)||0) + (Number(r.ball_scrap)||0) + (Number(r.roller_scrap)||0);
+    }, 0);
+
+    const metrics = {
+        channel: { in: 0, out: accIn, scrap: 0, visited: isFlowLoaded ? 'Visited' : 'Not Visited' },
+        cps: { in: sumSimple(dataCps, 'qty_in', 'qtyIn'), out: sumSimple(dataCps, 'qty_sent', 'qtySent'), scrap: 0, visited: isFlowLoaded ? 'Visited - Channel' : 'Not Visited - Channel' },
+        disassembly: { in: sumSimple(dataDismantling, 'qty_in', 'qtyIn'), out: sumSimple(dataDismantling, 'qty_sent', 'qtySent'), scrap: dismScrap, visited: isFlowLoaded ? 'Visited - Channel' : 'Not Visited - Channel' },
+        rework: { in: sumSimple(dataRework, 'qty_in', 'qtyIn'), out: sumSimple(dataRework, 'qty_sent', 'qtySent'), scrap: 0, visited: isFlowLoaded ? 'Visited - Channel' : 'Not Visited - Channel' },
+        accurate: { in: accIn, out: accOut, scrap: 0, visited: isFlowLoaded ? 'Visited' : 'Not Visited' },
+        autoPacking: { in: sumSimple(dataAutopackaging, 'qty_in', 'qtyIn'), out: sumSimple(dataAutopackaging, 'qty_sent', 'qtySent'), scrap: 0, visited: isFlowLoaded ? 'Visited' : 'Not Visited' },
+        fps: { in: sumSimple(dataFps, 'qty_in', 'qtyIn'), out: sumSimple(dataFps, 'qty_sent', 'qtySent'), scrap: 0, visited: isFlowLoaded ? 'Finished' : 'Not Visited' },
+        commonScrap: { scrap: dismScrap }
+    };
+
+    const NodeCard = ({ title, subtitle, icon, type, mIn, mOut, mScrap, visited, borderCls }) => (
+        <div className={`pvsm-card ${borderCls}`}>
+            <div className="pvsm-card-header">
+                <span className="pvsm-card-icon">{icon}</span>
+                <div className="pvsm-card-title-area">
+                    <h4>{title}</h4>
+                    <span>{subtitle}</span>
+                </div>
+            </div>
+            <div className="pvsm-card-metrics">
+                {mIn !== undefined && (
+                    <div className="pvsm-metric">
+                        <span className="pvsm-metric-icon green">↓</span>
+                        <label>Incoming</label>
+                        <strong className="green">{mIn}</strong>
+                        <sub>PCS</sub>
+                    </div>
+                )}
+                {mOut !== undefined && (
+                    <div className="pvsm-metric">
+                        <span className="pvsm-metric-icon blue">↑</span>
+                        <label>Outgoing</label>
+                        <strong className="blue">{mOut}</strong>
+                        <sub>PCS</sub>
+                    </div>
+                )}
+                {mScrap !== undefined && (
+                    <div className="pvsm-metric">
+                        <span className="pvsm-metric-icon red">🗑</span>
+                        <label>Scrap</label>
+                        <strong className="red">{mScrap}</strong>
+                        <sub>PCS</sub>
+                    </div>
+                )}
+            </div>
+            {visited && (
+                <div className="pvsm-card-footer">
+                    <span className={`pvsm-badge ${visited.includes('Visited') ? (borderCls==='border-green'?'green':'blue') : ''}`}>{visited}</span>
+                </div>
+            )}
+        </div>
+    );
 
     return (
-      <div className="visual-flow-wrapper">
-        <div className="flow-controls">
-          <div className="field-group" style={{minWidth: '350px'}}>
-            <label className="field-label">Filter Topology by MO (Sums all variants)</label>
-            <select className="field-input" value={flowFilterMo} onChange={(e) => setFlowFilterMo(e.target.value)}>
-              <option value="">-- All MOs Aggregated --</option>
-              {allMos.map(mo => <option key={mo} value={mo}>{mo}</option>)}
-            </select>
-          </div>
+        <div className="pvsm-wrapper">
+            <div className="pvsm-header">
+                <div className="pvsm-title">
+                    <h2>P-VSM</h2>
+                    <span>Process Value Stream Mapping</span>
+                </div>
+                <div className="pvsm-controls">
+                    <div className="pvsm-control-group">
+                        <label>Select MO</label>
+                        <select className="pvsm-select" value={pvsmMo} onChange={e=>setPvsmMo(e.target.value)}>
+                            <option>Select MO</option>
+                            {[...new Set(allUniqueMos)].map(m => <option key={m}>{m}</option>)}
+                        </select>
+                    </div>
+                    <div className="pvsm-control-group">
+                        <label>Select Type</label>
+                        <select className="pvsm-select" value={pvsmType} onChange={e=>setPvsmType(e.target.value)}>
+                            <option>Select Type</option>
+                            {[...new Set(allUniqueVariants)].map(v => <option key={v}>{v}</option>)}
+                        </select>
+                    </div>
+                    <button className="pvsm-btn-load" onClick={() => setIsFlowLoaded(true)}>
+                        ▶ Load Flow
+                    </button>
+                </div>
+            </div>
+
+            <div className="pvsm-canvas">
+                <div className="pvsm-grid">
+                    
+                    {/* ROW 1 */}
+                    <div className="node-pos-dmstore">
+                        <NodeCard title="DM Store" subtitle="Material Storage" icon="🏛" mIn={0} mOut={0} visited="Not Visited" borderCls="" />
+                    </div>
+                    <div className="node-pos-sho">
+                        <NodeCard title="SHO" subtitle="Shared Handling" icon="📈" mIn={0} mOut={0} mScrap={0} visited="Not Visited" borderCls="" />
+                    </div>
+                    <div className="node-pos-transit">
+                        <NodeCard title="Transit Buffer" subtitle="Buffer" icon="🚚" mIn={0} mOut={0} visited="Not Visited" borderCls="" />
+                    </div>
+                    <div className="node-pos-channel">
+                        <NodeCard title="Channel" subtitle="Production" icon="🖧" mIn={metrics.channel.in} mOut={metrics.channel.out} mScrap={metrics.channel.scrap} visited={metrics.channel.visited} borderCls="" />
+                    </div>
+                    <div className="node-pos-bearingstore">
+                        <NodeCard title="Bearing Storage" subtitle="Storage" icon="📦" mIn={0} mOut={0} visited="Not Visited" borderCls="" />
+                    </div>
+
+                    {/* ROW 2 */}
+                    <div className="node-pos-cps">
+                        <NodeCard title="CPS" subtitle="Storage" icon="🏢" mIn={metrics.cps.in} mOut={metrics.cps.out} visited={metrics.cps.visited} borderCls="border-dashed" />
+                    </div>
+                    <div className="node-pos-disassembly">
+                        <NodeCard title="Disassembly Area" subtitle="Rework" icon="🔧" mIn={metrics.disassembly.in} mOut={metrics.disassembly.out} mScrap={metrics.disassembly.scrap} visited={metrics.disassembly.visited} borderCls="border-dashed" />
+                    </div>
+                    <div className="node-pos-rework">
+                        <NodeCard title="Rework Area" subtitle="Repair" icon="🔄" mIn={metrics.rework.in} mOut={metrics.rework.out} mScrap={metrics.rework.scrap} visited={metrics.rework.visited} borderCls="border-dashed" />
+                    </div>
+                    <div className="node-pos-accurate">
+                        <NodeCard title="Accurate" subtitle="Inspection" icon="🎯" mIn={metrics.accurate.in} mOut={metrics.accurate.out} visited={metrics.accurate.visited} borderCls="border-green" />
+                    </div>
+                    <div className="node-pos-autopacking">
+                        <NodeCard title="Auto Packing" subtitle="Packing" icon="🏭" mIn={metrics.autoPacking.in} mOut={metrics.autoPacking.out} visited={metrics.autoPacking.visited} borderCls="border-green" />
+                    </div>
+
+                    {/* ROW 3 */}
+                    <div className="node-pos-legend">
+                        <div className="pvsm-legend">
+                            <h4>Flow Legend</h4>
+                            <div className="pvsm-legend-item"><div className="pvsm-legend-line line-green"></div> Material Flow</div>
+                            <div className="pvsm-legend-item"><div className="pvsm-legend-line line-red"></div> Return Flow</div>
+                            <div className="pvsm-legend-item"><div className="pvsm-legend-line line-orange-dash"></div> Scrap Flow</div>
+                        </div>
+                    </div>
+                    <div className="node-pos-commonscrap">
+                        <NodeCard title="Common Scrap" subtitle="Scrap" icon="🗑" mScrap={metrics.commonScrap.scrap} visited="Not Visited" borderCls="border-red" />
+                    </div>
+                    <div className="node-pos-fps">
+                        <NodeCard title="FPS" subtitle="Finished Product" icon="🛡" mIn={metrics.fps.in} mOut={metrics.fps.out} visited={metrics.fps.visited} borderCls="border-green" />
+                    </div>
+
+                </div>
+            </div>
         </div>
-
-        <div className="visual-flow-container">
-          <svg className="flow-svg-overlay">
-            <path d="M 300 240 L 380 240" />
-            <path d="M 580 240 L 630 240 L 630 100 L 680 100" />
-            <path d="M 580 240 L 680 240" />
-            <path d="M 580 240 L 630 240 L 630 380 L 680 380" />
-            <path d="M 580 240 L 610 240 L 610 520 L 680 520" />
-            <path d="M 580 240 L 590 240 L 590 660 L 680 660" />
-          </svg>
-
-          <div className="flow-nodes-wrapper">
-            {Object.entries(nodes).map(([key, node]) => (
-              <div key={key} className={`flow-node node-${key} ${node.color}`} onClick={() => setSelectedFlowNode({ key, data: node })}>
-                <div className="node-title">{node.title}</div>
-                <div className="node-stats">
-                  <div className="stat-item">
-                    <span className="stat-label">Net IN</span>
-                    <span className="stat-val stat-val-in">{node.inTotal}</span>
-                  </div>
-                  <div className="stat-item" style={{alignItems: 'flex-end'}}>
-                    <span className="stat-label">Net OUT</span>
-                    <span className="stat-val stat-val-out">{node.outTotal}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          {selectedFlowNode && (
-            <>
-              <div className="modal-backdrop" onClick={() => setSelectedFlowNode(null)}></div>
-              <div className="node-detail-modal">
-                <h3 style={{marginTop: 0, color: 'var(--ac-navy)', fontSize: '18px'}}>{selectedFlowNode.data.title} - Full Breakdown</h3>
-                <div style={{display: 'flex', justifyContent: 'space-between', marginBottom: '15px'}}>
-                  <p style={{margin: 0}}><strong>Net Incoming:</strong> <span style={{color: 'var(--ac-blue-dark)', fontSize: '16px', fontWeight: 'bold'}}>{selectedFlowNode.data.inTotal}</span></p>
-                  <p style={{margin: 0}}><strong>Net Outgoing:</strong> <span style={{color: 'var(--ac-amber-dark)', fontSize: '16px', fontWeight: 'bold'}}>{selectedFlowNode.data.outTotal}</span></p>
-                </div>
-                
-                <div className="modal-breakdown">
-                  <h4>Came From (IN)</h4>
-                  {Object.keys(selectedFlowNode.data.inBreakdown).length > 0 ? (
-                    <ul>
-                      {Object.entries(selectedFlowNode.data.inBreakdown).map(([from, qty]) => (
-                        <li key={from}><span>{from}</span> <span>{qty}</span></li>
-                      ))}
-                    </ul>
-                  ) : <p style={{fontSize: '13px', color: 'var(--ac-text-faint)', fontStyle: 'italic'}}>No inbound records found.</p>}
-                  
-                  <h4>Went To (OUT)</h4>
-                  {Object.keys(selectedFlowNode.data.outBreakdown).length > 0 ? (
-                    <ul>
-                      {Object.entries(selectedFlowNode.data.outBreakdown).map(([to, qty]) => (
-                        <li key={to}><span>{to}</span> <span>{qty}</span></li>
-                      ))}
-                    </ul>
-                  ) : <p style={{fontSize: '13px', color: 'var(--ac-text-faint)', fontStyle: 'italic'}}>No outbound records found.</p>}
-                </div>
-                
-                <hr style={{borderColor: 'var(--ac-border)', margin: '15px 0'}}/>
-                <button className="submit-btn submit-btn-in" onClick={() => setSelectedFlowNode(null)} style={{width: '100%', marginTop: '5px'}}>Close Details</button>
-              </div>
-            </>
-          )}
-        </div>
-      </div>
     );
   };
  
@@ -711,7 +730,6 @@ const Afterchannel = () => {
           </div>
         )}
  
-        {/* ================= DISMANTLING TAB (MULTI-DISPATCH FEATURE) ================= */}
         {activeTab === 'dismantling' && (
           <div>
             <form key={editingRecord ? editingRecord.id : 'new'} onSubmit={(e) => handleFormSubmit(e, 'dismantling')}>
@@ -797,7 +815,6 @@ const Afterchannel = () => {
                 <fieldset className="form-fieldset form-fieldset-out">
                   <legend>Dismantling - Dispatch Log</legend>
                   
-                  {/* MULTI COMPONENT SPLITTER */}
                   <div className="component-outbound-card">
                     <h4>Specific Component Outbound Destinations</h4>
                     
@@ -844,7 +861,6 @@ const Afterchannel = () => {
           </div>
         )}
  
-        {/* ================= SUMMARY VIEW ================= */}
         {activeTab === 'summary' && (
           <div className="summary-view">
             <div className="summary-view-header">
@@ -938,8 +954,8 @@ const Afterchannel = () => {
           </div>
         )}
 
-        {/* ================= NEW VISUAL FLOW VIEW ================= */}
-        {activeTab === 'visualFlow' && renderVisualFlow()}
+        {/* ================= NEW VISUAL FLOW VIEW (P-VSM UI) ================= */}
+        {activeTab === 'visualFlow' && renderPVSMFlow()}
       </div>
     </div>
   );

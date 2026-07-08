@@ -17,11 +17,9 @@ router = APIRouter()
 DATABASE_URL = os.getenv("DATABASE_URL")
 DGBB_MASTER_URL = os.getenv("DGBB_MASTER_URL")
 TRB_MASTER_URL = os.getenv("TRB_MASTER_URL")
-XA_SCRAP_URL = os.getenv("XA_SCRAP_URL")
 
 # --- Global Caches & State ---
 MASTER_DATA_CACHE = {}
-SCRAP_DATA_CACHE = {}
 IS_UPDATING = False
 INITIALIZED = False
 CACHE_DURATION_MINUTES = 10
@@ -217,50 +215,6 @@ def load_excel_sheets(url):
         print(f"Error reading workbook stream for Afterchannel: {e}")
         return {}
 
-def process_scrap_data():
-    """Processes Scrap Data from the provided XA_SCRAP_URL sheet."""
-    global SCRAP_DATA_CACHE
-    try:
-        sheets = load_excel_sheets(XA_SCRAP_URL)
-        if not sheets: return
-        df = list(sheets.values())[0]
-        if df.empty: return
-        
-        mo_col = find_column(df, ["mo", "mono", "order", "orderno", "masterorder"])
-        qty_col = 'Scrap Qty_1' if 'Scrap Qty_1' in df.columns else find_column(df, ["scrapqty1", "scrapqty_1", "scrapqty", "qty", "quantity"])
-        reason_col = 'Reason Code' if 'Reason Code' in df.columns else find_column(df, ["reasoncode", "reason", "code"])
-        
-        if not mo_col or not qty_col or not reason_col: return
-        
-        temp_scrap = {}
-        df_records = df.to_dict('records')
-        
-        for row in df_records:
-            mo_val = str(row.get(mo_col, "")).strip().upper()
-            if not mo_val or mo_val in ["NAN", "NONE", ""]: continue
-            
-            raw_qty = row.get(qty_col, 0)
-            if pd.isna(raw_qty) or str(raw_qty).strip() in ['-', 'NAN', 'NONE', '']:
-                raw_qty = 0
-            try:
-                qty_val = int(float(str(raw_qty).replace(',', '')))
-            except (ValueError, TypeError):
-                qty_val = 0
-                
-            reason = str(row.get(reason_col, "")).strip().upper()
-            if not reason or reason in ["NAN", "NONE", ""]: continue
-            
-            if mo_val not in temp_scrap:
-                temp_scrap[mo_val] = {}
-            if reason not in temp_scrap[mo_val]:
-                temp_scrap[mo_val][reason] = 0
-                
-            temp_scrap[mo_val][reason] += qty_val
-            
-        SCRAP_DATA_CACHE = temp_scrap
-    except Exception as e:
-        print(f"Scrap Data Compile Error: {e}")
-
 def process_mo_sheets(sheets_dict, temp_cache):
     for sheet_name, df in sheets_dict.items():
         time.sleep(0.01) 
@@ -329,7 +283,6 @@ def process_master_data():
         process_mo_sheets(dgbb_sheets, temp_cache)
         process_mo_sheets(trb_sheets, temp_cache)
         MASTER_DATA_CACHE = temp_cache
-        process_scrap_data()
     except Exception as e:
         print(f"Afterchannel Cache Compilation Fault: {str(e)}")
     finally:
@@ -352,11 +305,6 @@ def mo_lookup(refresh: Optional[str] = Query(None)):
     if refresh == "true": process_master_data()
     if not INITIALIZED: return {"status": "initializing", "message": "Compiling data...", "data": {}}
     return {"status": "success", "data": MASTER_DATA_CACHE}
-
-@router.get("/api/afterchannel/scrap_data")
-def get_scrap_data():
-    if not INITIALIZED: return {"status": "initializing", "data": {}}
-    return {"status": "success", "data": SCRAP_DATA_CACHE}
 
 @router.get("/api/afterchannel/summary_ledgers")
 def get_summary_ledgers():

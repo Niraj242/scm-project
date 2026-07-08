@@ -825,9 +825,7 @@ const Afterchannel = () => {
     </div>
   );
 };
+};
  
 export default Afterchannel;
-
-
-
 

@@ -12,11 +12,6 @@ const Afterchannel = () => {
   const [moNumber, setMoNumber] = useState('');
   const [selectedVariant, setSelectedVariant] = useState('');
   const [actualProductionQty, setActualProductionQty] = useState(0);
-
- // Paste these near line 16, under your other useState declarations
-  const [scrapData, setScrapData] = useState([]);
-  const [expandedScrapMOs, setExpandedScrapMOs] = useState({});
- 
  
   const [editingRecord, setEditingRecord] = useState(null);
   const [ledgerSearchQuery, setLedgerSearchQuery] = useState('');
@@ -39,6 +34,39 @@ const Afterchannel = () => {
   const [cageStationVal, setCageStationVal] = useState('');
   const [rollerSentVal, setRollerSentVal] = useState('');
   const [rollerStationVal, setRollerStationVal] = useState('');
+ 
+  
+  // Add the new states here
+  const [scrapData, setScrapData] = useState([]);
+  const [expandedScrapMOs, setExpandedScrapMOs] = useState({});
+
+  // ==========================================
+  // PASTE THE NEW HOOK HERE (Top-Level Scope)
+  // ==========================================
+  useEffect(() => {
+    const fetchScrapData = async () => {
+      try {
+        const res = await fetch(`${API}/api/xa-scrap`);
+        const json = await res.json();
+        if(json.status === 'success') {
+          setScrapData(json.data);
+        }
+      } catch(err) {
+        console.error("Error fetching scrap data:", err);
+      }
+    };
+    fetchScrapData();
+  }, []);
+
+  const toggleScrapRow = (mo) => {
+    setExpandedScrapMOs(prev => ({ ...prev, [mo]: !prev[mo] }));
+  };
+  // ==========================================
+
+  // Your existing functions follow...
+  const handleFormSubmit = async (e) => {
+      // ... existing logic
+   
  
   const [expandedMOs, setExpandedMOs] = useState({});
   const [expandedVariants, setExpandedVariants] = useState({});
@@ -157,26 +185,6 @@ const Afterchannel = () => {
       type: selectedVariant.toUpperCase(),
       bearingFamily: bearingFamily || null
     };
-
-   // Paste this right after your existing useEffect hooks end
-  useEffect(() => {
-    const fetchScrapData = async () => {
-      try {
-        const res = await fetch(`${API}/api/xa-scrap`);
-        const json = await res.json();
-        if(json.status === 'success') {
-          setScrapData(json.data);
-        }
-      } catch(err) {
-        console.error("Error fetching scrap data:", err);
-      }
-    };
-    fetchScrapData();
-  }, []);
-
-  const toggleScrapRow = (mo) => {
-    setExpandedScrapMOs(prev => ({ ...prev, [mo]: !prev[mo] }));
-  };
 
 
 

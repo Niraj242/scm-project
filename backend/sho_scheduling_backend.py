@@ -20,7 +20,7 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 # --- 1. PERFORMANCE CACHE ---
 EXCEL_CACHE = {}
-CACHE_TTL = 3600  # Increased to 1 hour for significantly faster generation 
+CACHE_TTL = 3600  # 1 hour cache for ultra-fast generation
 
 PARSED_MASTER_DATA = {
     "box_matrix": ({}, 0),  
@@ -32,14 +32,12 @@ MONTHLY_FILE = "monthly_tracking.json"
 
 # --- 3. HARDCODED PROCESS FLEXIBILITY MATRIX ---
 # Format: "CHANNEL_NAME": {"IR": {"FACE": True/False, "OD": True/False}, "OR": {"FACE": True/False, "OD": True/False}}
-# False means "No" (Process is skipped). If a channel isn't listed, it defaults to True for everything.
+# False means "No" (Process is skipped). Overrides Excel sheet if present.
 HARDCODED_PROCESS_FLEXIBILITY = {
     "T4": {
         "IR": {"FACE": True, "OD": False},
         "OR": {"FACE": True, "OD": True}
-    },
-    # Add or modify other channels as needed based on the matrix image:
-    # "CH01": { "IR": {"FACE": True, "OD": True}, "OR": {"FACE": True, "OD": True} },
+    }
 }
 
 def load_monthly_tracking():
@@ -88,14 +86,13 @@ def normalize_channel(ch_str):
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
     return ch
 
-def get_process_flexibility(channel_norm, p_code):
-    default_flex = {'FACE': True, 'OD': True}
+def get_process_flexibility(channel_norm, p_code, flex_map):
     # Check hardcoded map first to override 
     for hard_ch, flex_data in HARDCODED_PROCESS_FLEXIBILITY.items():
         if hard_ch.replace(" ", "") in channel_norm or channel_norm in hard_ch.replace(" ", ""):
             if p_code in flex_data:
                 return flex_data[p_code]
-    return default_flex
+    return flex_map.get(channel_norm, {}).get(p_code, {'FACE': True, 'OD': True})
 
 def is_invalid_part(raw_text):
     if pd.isna(raw_text) or not raw_text: return True
@@ -232,7 +229,16 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs=None,
         if var in box_matrix and p_code in box_matrix[var]: 
             qty = box_matrix[var][p_code]['qty']
             source = box_matrix[var][p_code]['source']
+            if debug_logs is not None and logged_set is not None:
+                if (display_name, p_code) not in logged_set:
+                    debug_logs.append(f"Bearing : {display_name} {p_code}\nVariants Checked :\n" + "\n".join(variants) + f"\nMatched :\n{var}\nSource :\n{source}\nRings/Box :\n{qty}")
+                    logged_set.add((display_name, p_code))
             return qty, source, var
+            
+    if debug_logs is not None and logged_set is not None:
+        if (display_name, p_code) not in logged_set:
+            debug_logs.append(f"Bearing : {display_name} {p_code}\nVariants Checked :\n" + "\n".join(variants) + f"\nResult :\nNo Rings Per Box Found\nDisplaying:\nXXXX Rings (Q)")
+            logged_set.add((display_name, p_code))
             
     return 0.0, "NONE", variants[0] if variants else display_name
 
@@ -258,6 +264,28 @@ def format_time(rel_hrs):
     day_plus = f" (+{days_added})" if days_added > 0 else ""
     return f"{h:02d}:{m:02d}{day_plus}"
 
+class WorkItem:
+    def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, flex):
+        self.stage = stage
+        self.disp = disp
+        self.pc = pc
+        self.day_idx = day_idx
+        self.channel = channel
+        self.qty = qty
+        self.ready_time = ready_time
+        self.priority = priority
+        self.flex = flex
+
+class Resource:
+    def __init__(self, r_id, r_type, capacity_info):
+        self.id = r_id
+        self.type = r_type
+        self.ready_time = 0.0
+        self.last_fam = None
+        self.last_pc = None
+        self.blocked = False
+        self.capacity_info = capacity_info 
+        self.rows = []
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -286,7 +314,7 @@ def generate_schedule(payload: ScheduleRequest):
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
                 # Apply 2x IR logic for HUB/THUB/TBHU
-                ir_multiplier = 2 if ("HUB" in sheet_str_upper or "TBHU" in sheet_str_upper) else 1
+                ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
                 
                 r_idx, type_col_idx, mv_col_idx = None, None, None
                 c1_col, c2_col = None, None
@@ -426,6 +454,43 @@ def generate_schedule(payload: ScheduleRequest):
             furnace_map = {}
             machines_data = {'FACE': {}, 'OD': {}}
             channel_flex_map = {} 
+
+            flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
+            if flex_sheet_key:
+                df_flex = sheets_prod[flex_sheet_key].fillna('')
+                header_idx = -1
+                for i in range(min(10, len(df_flex))):
+                    row_strs = [str(x).upper().strip() for x in df_flex.iloc[i].values]
+                    if any("CH" in x or "CHANNEL" in x for x in row_strs) and any("FACE" in x for x in row_strs):
+                        header_idx = i
+                        break
+                if header_idx != -1:
+                    headers = [str(x).upper().strip() for x in df_flex.iloc[header_idx].values]
+                    ch_col = next((j for j, h in enumerate(headers) if 'CH' in h or 'CHANNEL' in h), -1)
+                    ring_col = next((j for j, h in enumerate(headers) if 'RING' in h or 'IR/OR' in h), -1)
+                    face_col = next((j for j, h in enumerate(headers) if 'FACE' in h), -1)
+                    od_col = next((j for j, h in enumerate(headers) if 'OD' in h), -1)
+                    
+                    if ch_col != -1 and ring_col != -1:
+                        for idx in range(header_idx + 1, len(df_flex)):
+                            ch_raw = str(df_flex.iloc[idx, ch_col]).strip()
+                            if not ch_raw or is_invalid_part(ch_raw): continue
+                            c_norm = normalize_channel(ch_raw)
+                            r_raw = str(df_flex.iloc[idx, ring_col]).strip().upper()
+                            p_code = 'OR' if 'OR' in r_raw or '100' in r_raw else ('IR' if 'IR' in r_raw or '010' in r_raw or '120' in r_raw else None)
+                            
+                            face_req = True
+                            od_req = True
+                            if face_col != -1:
+                                face_val = str(df_flex.iloc[idx, face_col]).strip().upper()
+                                if face_val == "NO": face_req = False
+                            if od_col != -1:
+                                od_val = str(df_flex.iloc[idx, od_col]).strip().upper()
+                                if od_val == "NO": od_req = False
+                                
+                            if p_code:
+                                if c_norm not in channel_flex_map: channel_flex_map[c_norm] = {}
+                                channel_flex_map[c_norm][p_code] = {'FACE': face_req, 'OD': od_req}
 
             if 'WEIGHTS' in sheets_prod:
                 df_w = sheets_prod['WEIGHTS'].fillna('')
@@ -614,9 +679,7 @@ def generate_schedule(payload: ScheduleRequest):
                     if req_rings <= 0: continue
                     
                     rpb = get_box_for_part(display_name, side, box_matrix)
-                    
-                    # Fetch Flexibility considering hardcoded matrix logic
-                    flex = get_process_flexibility(ch_norm, side)
+                    flex = get_process_flexibility(ch_norm, side, channel_flex_map)
                     req_face = flex['FACE']
                     req_od = flex['OD']
                     
@@ -640,22 +703,24 @@ def generate_schedule(payload: ScheduleRequest):
 
                     current_req = req_rings
                     
+                    # Backwards buffer consumption: CH -> OD -> FACE -> HT
+                    used_ch_buf = apply_buf('CH', current_req, rpb)
+                    current_req = max(0.0, current_req - used_ch_buf)
+                    
                     if req_od:
-                        used_buf = apply_buf('OD', current_req, rpb)
-                        current_req = max(0.0, current_req - used_buf)
                         if current_req > 0:
                             if display_name not in o_req: o_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                             o_req[display_name][side] += current_req
+                        used_od_buf = apply_buf('OD', current_req, rpb)
+                        current_req = max(0.0, current_req - used_od_buf)
                     
                     if req_face:
-                        used_buf = apply_buf('FACE', current_req, rpb)
-                        current_req = max(0.0, current_req - used_buf)
                         if current_req > 0:
                             if display_name not in f_req: f_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                             f_req[display_name][side] += current_req
+                        used_face_buf = apply_buf('FACE', current_req, rpb)
+                        current_req = max(0.0, current_req - used_face_buf)
                     
-                    used_buf = apply_buf('CH', current_req, rpb)
-                    current_req = max(0.0, current_req - used_buf)
                     if current_req > 0:
                         if display_name not in h_req: h_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                         h_req[display_name][side] += current_req
@@ -687,7 +752,7 @@ def generate_schedule(payload: ScheduleRequest):
                 self.type = r_type
                 self.ready_time = 0.0
                 self.last_fam = None
-                self.last_pc = None  # To track IR vs OR shifts
+                self.last_pc = None  
                 self.blocked = False
                 self.capacity_info = capacity_info 
                 self.rows = []
@@ -700,7 +765,7 @@ def generate_schedule(payload: ScheduleRequest):
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
                 for p_code in ['IR', 'OR']:
-                    flex = get_process_flexibility(ch_norm, p_code)
+                    flex = get_process_flexibility(ch_norm, p_code, channel_flex_map)
                     
                     req_o = o_req.get(display_name, {}).get(p_code, 0.0) if display_name in o_req else 0.0
                     req_f = f_req.get(display_name, {}).get(p_code, 0.0) if display_name in f_req else 0.0
@@ -716,14 +781,13 @@ def generate_schedule(payload: ScheduleRequest):
                         
                     init_h = req_h
                     ch_score = ch_stats.get(ch_norm, {}).get('score', 0.0)
-                    priority = ch_score * 1000 - (day_idx * 5000)
                     
                     if init_h > 0:
-                        work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, priority, flex))
+                        work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, ch_score, flex))
                     if init_f > 0:
-                        work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, priority, flex))
+                        work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, ch_score, flex))
                     if init_o > 0:
-                        work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, priority, flex))
+                        work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, ch_score, flex))
 
         resources = []
         for f_name, cap in FURNACE_SPECS.items():
@@ -740,7 +804,7 @@ def generate_schedule(payload: ScheduleRequest):
             if not active_items: break
             
             best_pair = None
-            best_key = (float('inf'), float('-inf'))
+            best_key = (float('inf'), float('inf'), float('-inf'))
             
             for item in active_items:
                 for res in resources:
@@ -758,26 +822,29 @@ def generate_schedule(payload: ScheduleRequest):
                         rate_or_cap = get_rate_for_part(item.disp, item.pc, res.capacity_info)
                         if rate_or_cap <= 0: continue
                         
-                    # RESETTING / SETUP TIME LOGIC
                     setup = 0.5 if res.type == 'HT' else 2.0
                     if res.last_fam == item.disp:
                         if res.last_pc == item.pc:
-                            setup = 0.0 # Exact same Type and PC (IR/OR)
+                            setup = 0.0 
                         else:
-                            setup = 2.0 # Same Type, but shifting IR <-> OR
+                            setup = 2.0 
                         
                     start_time = max(res.ready_time + setup, item.ready_time)
                     if start_time >= 24.0: continue
                     
-                    key = (start_time, -item.priority)
+                    # Strictly prioritize Day 1 over Day 2 UNLESS Day 2 is the exact continuation of current part
+                    is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
+                    effective_day = 0 if is_continuation else item.day_idx
+                    
+                    key = (effective_day, start_time, -item.priority)
                     if key < best_key:
                         best_key = key
-                        best_pair = (res, item, start_time, setup, rate_or_cap)
+                        best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
                         
             if not best_pair:
                 break
                 
-            res, item, start_time, setup, rate_or_cap = best_pair
+            res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
             
             if res.type == 'HT':
                 weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
@@ -806,8 +873,6 @@ def generate_schedule(payload: ScheduleRequest):
                 out_time = res_ready_time
                 display_rate = rate_or_cap
                 
-            # Check if this batch is completely continuous with the previous one, meaning the machine was not starved waiting for buffers.
-            is_continuous = (start_time <= res.ready_time + 0.01)
             is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
 
             res.ready_time = res_ready_time
@@ -831,10 +896,8 @@ def generate_schedule(payload: ScheduleRequest):
                 
             rpb, source, lookup_key = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
             
-            # --- ROW MERGING LOGIC FOR D1+D2 ---
             can_merge = False
-            if res.rows and is_same_item and is_continuous:
-                # Merge if the machine wasn't starved (urgent missing buffer break) and part is perfectly identical
+            if res.rows and is_same_item and is_continuation:
                 can_merge = True
 
             if can_merge:
@@ -843,16 +906,13 @@ def generate_schedule(payload: ScheduleRequest):
                 new_qty = old_qty + int(chunk_qty)
                 last_row["qty"] = str(new_qty)
 
-                # Update nomenclature to (D1+D2)
                 if "(D1+D2)" not in last_row["part"]:
                     last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").strip() + " (D1+D2)"
                 
-                # Update out time
                 old_start = last_row["timing"].split('-')[0]
                 new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
                 last_row["timing"] = f"{old_start}-{new_end}"
 
-                # Update boxes
                 if rpb > 0:
                     calculated_boxes = math.ceil(new_qty / rpb)
                     display_val = f"{calculated_boxes} Boxes"
@@ -863,7 +923,6 @@ def generate_schedule(payload: ScheduleRequest):
                     last_row["std_box"] = display_val
 
             else:
-                # Standard append if merge conditions aren't met
                 if rpb > 0:
                     calculated_boxes = math.ceil(chunk_qty / rpb)
                     display_val = f"{calculated_boxes} Boxes"

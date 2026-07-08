@@ -322,7 +322,6 @@ def generate_schedule(payload: ScheduleRequest):
                     row_joined = " ".join(row_strs)
                     
                     if type_col_idx is None:
-                        # Prioritize exact "TYPE" match to avoid "MF" overwriting it
                         for j, val in enumerate(row_strs):
                             if val == "TYPE" or "TYPE " in val or " TYPE" in val:
                                 type_col_idx = j
@@ -819,7 +818,7 @@ def generate_schedule(payload: ScheduleRequest):
             if not active_items: break
             
             best_pair = None
-            best_key = (float('inf'), float('inf'), float('-inf'))
+            best_key = (float('inf'), float('inf'), float('inf'), float('-inf'))
             
             for item in active_items:
                 for res in resources:
@@ -847,11 +846,12 @@ def generate_schedule(payload: ScheduleRequest):
                     start_time = max(res.ready_time + setup, item.ready_time)
                     if start_time >= 24.0: continue
                     
-                    # D2 Optimization: Pull exactly matching Day 2 part forward instantly to avoid resetting penalty
                     is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
-                    effective_day = -1 if is_continuation else item.day_idx
                     
-                    key = (effective_day, start_time, -item.priority)
+                    # Strict Day 1 priority. Optimization for setup steps happens only within the matching target day context.
+                    setup_priority = 0 if is_continuation else 1
+                    
+                    key = (item.day_idx, setup_priority, start_time, -item.priority)
                     if key < best_key:
                         best_key = key
                         best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
@@ -1030,3 +1030,4 @@ def generate_schedule(payload: ScheduleRequest):
     except Exception as e:
         import traceback
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
+}

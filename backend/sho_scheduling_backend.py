@@ -20,9 +20,8 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 # --- 1. PERFORMANCE CACHE ---
 EXCEL_CACHE = {}
-CACHE_TTL = 600
+CACHE_TTL = 3600  # Increased to 1 hour for significantly faster generation 
 
-# Cache for parsed lookup dictionaries to prevent redundant O(N) worksheet scans
 PARSED_MASTER_DATA = {
     "box_matrix": ({}, 0),  
     "production": ({}, {}, {}, {}, 0) 
@@ -30,6 +29,18 @@ PARSED_MASTER_DATA = {
 
 # --- 2. MONTHLY TRACKING STORAGE ---
 MONTHLY_FILE = "monthly_tracking.json"
+
+# --- 3. HARDCODED PROCESS FLEXIBILITY MATRIX ---
+# Format: "CHANNEL_NAME": {"IR": {"FACE": True/False, "OD": True/False}, "OR": {"FACE": True/False, "OD": True/False}}
+# False means "No" (Process is skipped). If a channel isn't listed, it defaults to True for everything.
+HARDCODED_PROCESS_FLEXIBILITY = {
+    "T4": {
+        "IR": {"FACE": True, "OD": False},
+        "OR": {"FACE": True, "OD": True}
+    },
+    # Add or modify other channels as needed based on the matrix image:
+    # "CH01": { "IR": {"FACE": True, "OD": True}, "OR": {"FACE": True, "OD": True} },
+}
 
 def load_monthly_tracking():
     if os.path.exists(MONTHLY_FILE):
@@ -77,7 +88,15 @@ def normalize_channel(ch_str):
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
     return ch
 
-# Validate rows to prevent scheduling headers/summaries
+def get_process_flexibility(channel_norm, p_code):
+    default_flex = {'FACE': True, 'OD': True}
+    # Check hardcoded map first to override 
+    for hard_ch, flex_data in HARDCODED_PROCESS_FLEXIBILITY.items():
+        if hard_ch.replace(" ", "") in channel_norm or channel_norm in hard_ch.replace(" ", ""):
+            if p_code in flex_data:
+                return flex_data[p_code]
+    return default_flex
+
 def is_invalid_part(raw_text):
     if pd.isna(raw_text) or not raw_text: return True
     t = str(raw_text).upper()
@@ -100,10 +119,8 @@ def get_lookup_variants(raw_text, p_code=None):
     numeric_parts = [p for p in parts if any(c.isdigit() for c in p) and len(re.sub(r'\D', '', p)) >= 3]
     
     if len(numeric_parts) >= 2 and p_code:
-        if p_code == 'IR':
-            t = parts[0]
-        elif p_code == 'OR':
-            t = numeric_parts[1]
+        if p_code == 'IR': t = parts[0]
+        elif p_code == 'OR': t = numeric_parts[1]
     elif '/' in t:
         if not any(x in parts[1] for x in ['Q', 'X']):
             t = parts[0].strip()
@@ -215,16 +232,7 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs=None,
         if var in box_matrix and p_code in box_matrix[var]: 
             qty = box_matrix[var][p_code]['qty']
             source = box_matrix[var][p_code]['source']
-            if debug_logs is not None and logged_set is not None:
-                if (display_name, p_code) not in logged_set:
-                    debug_logs.append(f"Bearing : {display_name} {p_code}\nVariants Checked :\n" + "\n".join(variants) + f"\nMatched :\n{var}\nSource :\n{source}\nRings/Box :\n{qty}")
-                    logged_set.add((display_name, p_code))
             return qty, source, var
-            
-    if debug_logs is not None and logged_set is not None:
-        if (display_name, p_code) not in logged_set:
-            debug_logs.append(f"Bearing : {display_name} {p_code}\nVariants Checked :\n" + "\n".join(variants) + f"\nResult :\nNo Rings Per Box Found\nDisplaying:\nXXXX Rings (Q)")
-            logged_set.add((display_name, p_code))
             
     return 0.0, "NONE", variants[0] if variants else display_name
 
@@ -250,12 +258,6 @@ def format_time(rel_hrs):
     day_plus = f" (+{days_added})" if days_added > 0 else ""
     return f"{h:02d}:{m:02d}{day_plus}"
 
-class ScheduleRequest(BaseModel):
-    sector: str
-    date: str
-    unit_mode: str
-    entries: Dict[str, Any]
-    unlocked_blocks: List[str]
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -282,6 +284,10 @@ def generate_schedule(payload: ScheduleRequest):
         
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
+                sheet_str_upper = str(sheet_name).strip().upper()
+                # Apply 2x IR logic for HUB/THUB/TBHU
+                ir_multiplier = 2 if ("HUB" in sheet_str_upper or "TBHU" in sheet_str_upper) else 1
+                
                 r_idx, type_col_idx, mv_col_idx = None, None, None
                 c1_col, c2_col = None, None
                 monthly_cols = []
@@ -334,13 +340,13 @@ def generate_schedule(payload: ScheduleRequest):
                         if r1 > 0:
                             if display_name not in channel_demands_day1: 
                                 channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
-                            channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1)
+                            channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
                             channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
                             
                         if r2 > 0:
                             if display_name not in channel_demands_day2: 
                                 channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
-                            channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2)
+                            channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
                             channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
         del sheets_zero
 
@@ -421,43 +427,6 @@ def generate_schedule(payload: ScheduleRequest):
             machines_data = {'FACE': {}, 'OD': {}}
             channel_flex_map = {} 
 
-            flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
-            if flex_sheet_key:
-                df_flex = sheets_prod[flex_sheet_key].fillna('')
-                header_idx = -1
-                for i in range(min(10, len(df_flex))):
-                    row_strs = [str(x).upper().strip() for x in df_flex.iloc[i].values]
-                    if any("CH" in x or "CHANNEL" in x for x in row_strs) and any("FACE" in x for x in row_strs):
-                        header_idx = i
-                        break
-                if header_idx != -1:
-                    headers = [str(x).upper().strip() for x in df_flex.iloc[header_idx].values]
-                    ch_col = next((j for j, h in enumerate(headers) if 'CH' in h or 'CHANNEL' in h), -1)
-                    ring_col = next((j for j, h in enumerate(headers) if 'RING' in h or 'IR/OR' in h), -1)
-                    face_col = next((j for j, h in enumerate(headers) if 'FACE' in h), -1)
-                    od_col = next((j for j, h in enumerate(headers) if 'OD' in h), -1)
-                    
-                    if ch_col != -1 and ring_col != -1:
-                        for idx in range(header_idx + 1, len(df_flex)):
-                            ch_raw = str(df_flex.iloc[idx, ch_col]).strip()
-                            if not ch_raw or is_invalid_part(ch_raw): continue
-                            c_norm = normalize_channel(ch_raw)
-                            r_raw = str(df_flex.iloc[idx, ring_col]).strip().upper()
-                            p_code = 'OR' if 'OR' in r_raw or '100' in r_raw else ('IR' if 'IR' in r_raw or '010' in r_raw or '120' in r_raw else None)
-                            
-                            face_req = True
-                            od_req = True
-                            if face_col != -1:
-                                face_val = str(df_flex.iloc[idx, face_col]).strip().upper()
-                                if face_val == "NO": face_req = False
-                            if od_col != -1:
-                                od_val = str(df_flex.iloc[idx, od_col]).strip().upper()
-                                if od_val == "NO": od_req = False
-                                
-                            if p_code:
-                                if c_norm not in channel_flex_map: channel_flex_map[c_norm] = {}
-                                channel_flex_map[c_norm][p_code] = {'FACE': face_req, 'OD': od_req}
-
             if 'WEIGHTS' in sheets_prod:
                 df_w = sheets_prod['WEIGHTS'].fillna('')
                 header_idx = -1
@@ -524,7 +493,6 @@ def generate_schedule(payload: ScheduleRequest):
                 
                 current_m_num = None
                 current_m_type = "UNKNOWN"
-                header_idx = -1
                 
                 for r in range(str_matrix.shape[0]):
                     row_text = " ".join(str_matrix[r]).upper()
@@ -646,7 +614,9 @@ def generate_schedule(payload: ScheduleRequest):
                     if req_rings <= 0: continue
                     
                     rpb = get_box_for_part(display_name, side, box_matrix)
-                    flex = channel_flex_map.get(ch_norm, {}).get(side, {'FACE': True, 'OD': True})
+                    
+                    # Fetch Flexibility considering hardcoded matrix logic
+                    flex = get_process_flexibility(ch_norm, side)
                     req_face = flex['FACE']
                     req_od = flex['OD']
                     
@@ -697,7 +667,6 @@ def generate_schedule(payload: ScheduleRequest):
 
         # ==========================================
         # 5. GLOBAL OPTIMIZATION SCHEDULING (HYBRID PIPELINE)
-        # Full Batch scheduling past 24h allowed once per machine
         # ==========================================
         
         class WorkItem:
@@ -718,6 +687,7 @@ def generate_schedule(payload: ScheduleRequest):
                 self.type = r_type
                 self.ready_time = 0.0
                 self.last_fam = None
+                self.last_pc = None  # To track IR vs OR shifts
                 self.blocked = False
                 self.capacity_info = capacity_info 
                 self.rows = []
@@ -730,7 +700,7 @@ def generate_schedule(payload: ScheduleRequest):
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
                 for p_code in ['IR', 'OR']:
-                    flex = channel_flex_map.get(ch_norm, {}).get(p_code, {'FACE': True, 'OD': True})
+                    flex = get_process_flexibility(ch_norm, p_code)
                     
                     req_o = o_req.get(display_name, {}).get(p_code, 0.0) if display_name in o_req else 0.0
                     req_f = f_req.get(display_name, {}).get(p_code, 0.0) if display_name in f_req else 0.0
@@ -766,7 +736,6 @@ def generate_schedule(payload: ScheduleRequest):
             resources.append(res)
 
         while True:
-            # Active items are items that have arrived and have quantity left
             active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < 24.0]
             if not active_items: break
             
@@ -789,9 +758,13 @@ def generate_schedule(payload: ScheduleRequest):
                         rate_or_cap = get_rate_for_part(item.disp, item.pc, res.capacity_info)
                         if rate_or_cap <= 0: continue
                         
+                    # RESETTING / SETUP TIME LOGIC
                     setup = 0.5 if res.type == 'HT' else 2.0
-                    if res.last_fam == item.disp or res.last_fam is None:
-                        setup = 0.0
+                    if res.last_fam == item.disp:
+                        if res.last_pc == item.pc:
+                            setup = 0.0 # Exact same Type and PC (IR/OR)
+                        else:
+                            setup = 2.0 # Same Type, but shifting IR <-> OR
                         
                     start_time = max(res.ready_time + setup, item.ready_time)
                     if start_time >= 24.0: continue
@@ -812,7 +785,6 @@ def generate_schedule(payload: ScheduleRequest):
                 total_weight = item.qty * weight
                 time_needed = total_weight / kg_per_hr
                 
-                # FULL BATCH scheduling: Do not truncate by 24h
                 actual_time = time_needed
                 actual_weight = total_weight
                 chunk_qty = item.qty
@@ -823,11 +795,8 @@ def generate_schedule(payload: ScheduleRequest):
                 
                 if item.disp in monthly_data.get(month_str, {}):
                     monthly_data[month_str][item.disp]["produced"] += chunk_qty
-                    
             else:
-                # FULL BATCH scheduling: Do not arbitrarily slice 8 hours or truncate by 24h
                 chunk_qty = item.qty
-                
                 if chunk_qty <= 0.01:
                     res.blocked = True
                     continue
@@ -837,8 +806,13 @@ def generate_schedule(payload: ScheduleRequest):
                 out_time = res_ready_time
                 display_rate = rate_or_cap
                 
+            # Check if this batch is completely continuous with the previous one, meaning the machine was not starved waiting for buffers.
+            is_continuous = (start_time <= res.ready_time + 0.01)
+            is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
+
             res.ready_time = res_ready_time
             res.last_fam = item.disp
+            res.last_pc = item.pc
             
             if res.ready_time >= 24.0:
                 res.blocked = True
@@ -856,34 +830,69 @@ def generate_schedule(payload: ScheduleRequest):
                 work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.flex))
                 
             rpb, source, lookup_key = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
-            if rpb > 0:
-                calculated_boxes = math.ceil(chunk_qty / rpb)
-                display_val = f"{calculated_boxes} Boxes"
-            else:
-                display_val = f"{int(chunk_qty)} Rings (Q)"
-                
-            timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
             
-            if res.type == 'HT':
-                res.rows.append({
-                    "part": f"{item.disp}-{item.pc}" + (" (D2)" if item.day_idx==1 else ""),
-                    "qty": str(int(chunk_qty)),
-                    "cha": item.channel,
-                    "rate": display_rate,
-                    "timing": timing_display,
-                    "alert": False
-                })
+            # --- ROW MERGING LOGIC FOR D1+D2 ---
+            can_merge = False
+            if res.rows and is_same_item and is_continuous:
+                # Merge if the machine wasn't starved (urgent missing buffer break) and part is perfectly identical
+                can_merge = True
+
+            if can_merge:
+                last_row = res.rows[-1]
+                old_qty = int(float(last_row["qty"]))
+                new_qty = old_qty + int(chunk_qty)
+                last_row["qty"] = str(new_qty)
+
+                # Update nomenclature to (D1+D2)
+                if "(D1+D2)" not in last_row["part"]:
+                    last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").strip() + " (D1+D2)"
+                
+                # Update out time
+                old_start = last_row["timing"].split('-')[0]
+                new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
+                last_row["timing"] = f"{old_start}-{new_end}"
+
+                # Update boxes
+                if rpb > 0:
+                    calculated_boxes = math.ceil(new_qty / rpb)
+                    display_val = f"{calculated_boxes} Boxes"
+                else:
+                    display_val = f"{int(new_qty)} Rings (Q)"
+                
+                if res.type != 'HT':
+                    last_row["std_box"] = display_val
+
             else:
-                res.rows.append({
-                    "part": f"{item.disp} {item.pc}" + (" (D2)" if item.day_idx==1 else ""),
-                    "qty": str(int(chunk_qty)),
-                    "std_box": display_val,
-                    "timing": timing_display,
-                    "p_2nd": "1" if len(res.rows) == 0 else "",
-                    "p_3rd": "1" if len(res.rows) == 1 else "",
-                    "alert": False,
-                    "p_label": f"P{len(res.rows) + 1}"
-                })
+                # Standard append if merge conditions aren't met
+                if rpb > 0:
+                    calculated_boxes = math.ceil(chunk_qty / rpb)
+                    display_val = f"{calculated_boxes} Boxes"
+                else:
+                    display_val = f"{int(chunk_qty)} Rings (Q)"
+                    
+                timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
+                day_label = " (D2)" if item.day_idx == 1 else ""
+                
+                if res.type == 'HT':
+                    res.rows.append({
+                        "part": f"{item.disp}-{item.pc}{day_label}",
+                        "qty": str(int(chunk_qty)),
+                        "cha": item.channel,
+                        "rate": display_rate,
+                        "timing": timing_display,
+                        "alert": False
+                    })
+                else:
+                    res.rows.append({
+                        "part": f"{item.disp} {item.pc}{day_label}",
+                        "qty": str(int(chunk_qty)),
+                        "std_box": display_val,
+                        "timing": timing_display,
+                        "p_2nd": "1" if len(res.rows) == 0 else "",
+                        "p_3rd": "1" if len(res.rows) == 1 else "",
+                        "alert": False,
+                        "p_label": f"P{len(res.rows) + 1}"
+                    })
 
         for item in work_items:
             if item.qty <= 0.01: continue

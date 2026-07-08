@@ -59,7 +59,7 @@ const Afterchannel = () => {
     if (activeTab === 'scrapData' && scrapData.length === 0) {
       fetchScrapData();
     }
-  }, [activeTab]);
+  }, [activeTab, scrapData.length]);
  
   const fetchMasterData = async () => {
     try {
@@ -92,7 +92,6 @@ const Afterchannel = () => {
     }
   };
 
-
   const fetchScrapData = async () => {
     try {
       const res = await fetch(`${API}/api/xa-scrap`);
@@ -101,7 +100,6 @@ const Afterchannel = () => {
       if (json.status === 'success') {
         setScrapData(json.data || []);
       } else {
-        // This alerts you if there is a parsing error, missing columns, or bad URL
         console.error("Backend returned error:", json.message);
         alert(`Failed to load Scrap Data:\n\n${json.message}`);
       }
@@ -110,7 +108,18 @@ const Afterchannel = () => {
       alert("Network Error: Could not reach the server to fetch scrap data.");
     }
   };
-
+ 
+  // DECLARE UTILITY FUNCTIONS FIRST TO AVOID NO-UNDEF ERRORS
+  const getQtyFromRow = (row) => {
+    for (const key in row) {
+      const cleanKey = key.toLowerCase().replace(/[^a-z]/g, '');
+      if (['qty', 'quantity', 'production', 'target', 'plan', 'total'].some(w => cleanKey.includes(w))) {
+        const val = parseFloat(String(row[key]).replace(/,/g, ''));
+        if (!isNaN(val) && val > 0) return val;
+      }
+    }
+    return 0;
+  };
  
   const getTypeFromRow = (row) => {
     for (const key in row) {
@@ -143,6 +152,7 @@ const Afterchannel = () => {
     ? allUniqueMos.filter(mo => moCache[mo].some(r => getTypeFromRow(r).toUpperCase() === selectedVariant.trim().toUpperCase()))
     : allUniqueMos;
  
+  // EVENT HANDLERS
   const handleMoBlur = () => {
     const key = moNumber.trim().toUpperCase();
     if (moCache[key]) {
@@ -446,10 +456,7 @@ const Afterchannel = () => {
     );
   };
 
-  // ================= P-VSM VISUAL FLOW RENDER (EXACT IMAGE REPLICA) =================
   const renderPVSMFlow = () => {
-    
-    // Filtering Data based on Top Controls
     const getFiltered = (deptKey) => {
         let data = ledgers[deptKey] || [];
         if (isFlowLoaded) {
@@ -578,8 +585,6 @@ const Afterchannel = () => {
 
             <div className="pvsm-canvas">
                 <div className="pvsm-grid">
-                    
-                    {/* ROW 1 */}
                     <div className="node-pos-dmstore">
                         <NodeCard title="DM Store" subtitle="Material Storage" icon="🏛" mIn={0} mOut={0} visited="Not Visited" borderCls="" />
                     </div>
@@ -595,8 +600,6 @@ const Afterchannel = () => {
                     <div className="node-pos-bearingstore">
                         <NodeCard title="Bearing Storage" subtitle="Storage" icon="📦" mIn={0} mOut={0} visited="Not Visited" borderCls="" />
                     </div>
-
-                    {/* ROW 2 */}
                     <div className="node-pos-cps">
                         <NodeCard title="CPS" subtitle="Storage" icon="🏢" mIn={metrics.cps.in} mOut={metrics.cps.out} visited={metrics.cps.visited} borderCls="border-dashed" />
                     </div>
@@ -612,8 +615,6 @@ const Afterchannel = () => {
                     <div className="node-pos-autopacking">
                         <NodeCard title="Auto Packing" subtitle="Packing" icon="🏭" mIn={metrics.autoPacking.in} mOut={metrics.autoPacking.out} visited={metrics.autoPacking.visited} borderCls="border-green" />
                     </div>
-
-                    {/* ROW 3 */}
                     <div className="node-pos-legend">
                         <div className="pvsm-legend">
                             <h4>Flow Legend</h4>
@@ -628,7 +629,6 @@ const Afterchannel = () => {
                     <div className="node-pos-fps">
                         <NodeCard title="FPS" subtitle="Finished Product" icon="🛡" mIn={metrics.fps.in} mOut={metrics.fps.out} visited={metrics.fps.visited} borderCls="border-green" />
                     </div>
-
                 </div>
             </div>
         </div>

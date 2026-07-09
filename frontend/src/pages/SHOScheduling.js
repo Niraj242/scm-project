@@ -174,7 +174,6 @@ const SHOScheduling = () => {
         <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')}>4. Production Summary</button>
       </div>
 
-      {/* TAB 1: BUFFER ENTRY */}
       {activeTab === 'buffer' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div className="controls-panel">
@@ -261,14 +260,13 @@ const SHOScheduling = () => {
         </div>
       )}
 
-      {/* TAB 2: MACHINE AVAILABILITY */}
       {activeTab === 'availability' && (
         <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
           <h2 style={{ color: '#0056b3', marginTop: 0 }}>Machine Availability Settings</h2>
-          <p style={{ color: '#555', marginBottom: '20px' }}>Adjust machine status before running the schedule. Changes here will be applied when you click "Generate".</p>
+          <p style={{ color: '#555', marginBottom: '20px' }}>Adjust machine status before running the schedule.</p>
           
           {isLoadingMachines ? (
-             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines from Master Sheet (this ensures 100% accuracy)...</div>
+             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines from Master Sheet...</div>
           ) : (
             <table className="img-table" style={{ width: '100%', maxWidth: '900px' }}>
               <thead>
@@ -307,7 +305,6 @@ const SHOScheduling = () => {
         </div>
       )}
 
-      {/* TAB 3: PRODUCTION SCHEDULE */}
       {activeTab === 'schedule' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
           <div className="controls-panel" style={{ backgroundColor: '#eef8ff' }}>
@@ -316,7 +313,7 @@ const SHOScheduling = () => {
               <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
             </div>
             <button className="btn-save" style={{backgroundColor: '#28a745', borderColor: '#1e7e34'}} onClick={fetchSchedule} disabled={isLoadingPlan}>
-              {isLoadingPlan ? "Running Rapid Scheduler (Downloading Sheets)..." : "Generate Production Schedule"}
+              {isLoadingPlan ? "Running Rapid Scheduler..." : "Generate Production Schedule"}
             </button>
             {scheduleData && (
               <button className="btn-save" style={{backgroundColor: '#17a2b8', borderColor: '#117a8b'}} onClick={handleSavePlan} disabled={isSavingPlan}>
@@ -333,8 +330,6 @@ const SHOScheduling = () => {
               </div>
 
               <div className="schedule-grid-wrapper">
-                
-                {/* 1. FACE GRINDING (WITH STICKY HEADERS) */}
                 <div className="schedule-column scrollable-col">
                   <table className="img-table sticky-header-table">
                     <thead>
@@ -371,7 +366,6 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                {/* 2. OD GRINDING (WITH STICKY HEADERS) */}
                 <div className="schedule-column scrollable-col">
                   <table className="img-table sticky-header-table">
                     <thead>
@@ -408,8 +402,7 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                {/* 3. HEAT TREATMENT */}
-                <div className="schedule-column ht-column scrollable-col" style={{ flex: 1.6 }}>
+                <div className="schedule-column ht-column scrollable-col">
                   <table className="img-table sticky-header-table">
                     <thead>
                       <tr className="sticky-row-1">
@@ -469,7 +462,6 @@ const SHOScheduling = () => {
                 </div>
               </div>
 
-              {/* UNSCHEDULED ALERTS */}
               {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
                 <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff5f5', border: '1px solid #ffcccc', borderRadius: '5px' }}>
                     <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data Limit)</h3>
@@ -502,7 +494,6 @@ const SHOScheduling = () => {
         </div>
       )}
 
-      {/* TAB 4: PRODUCTION SUMMARY */}
       {activeTab === 'summary' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div className="controls-panel">

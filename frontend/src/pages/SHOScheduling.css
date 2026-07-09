@@ -1,6 +1,3 @@
-/* =========================================================
-   1. MAIN CONTAINER & LAYOUT
-   ========================================================= */
 .sho-container {
   font-family: Arial, sans-serif;
   padding: 15px;
@@ -11,9 +8,6 @@
   flex-direction: column;
 }
 
-/* =========================================================
-   2. CONTROLS PANEL (Top inputs & buttons)
-   ========================================================= */
 .controls-panel {
   display: flex;
   gap: 15px;
@@ -49,49 +43,9 @@
   cursor: pointer;
   margin-left: auto;
 }
+.btn-save:hover:not(:disabled) { background-color: #004494; }
+.btn-save:disabled { background-color: #7b9bb9; cursor: not-allowed; }
 
-.btn-save:hover:not(:disabled) { 
-  background-color: #004494; 
-}
-
-.btn-save:disabled { 
-  background-color: #7b9bb9; 
-  cursor: not-allowed; 
-}
-
-/* =========================================================
-   3. TAB NAVIGATION BUTTONS
-   ========================================================= */
-.tab-buttons {
-  display: flex;
-  margin-bottom: 10px;
-  gap: 5px;
-}
-
-.tab-buttons button {
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: bold;
-  border: 1px solid #aaa;
-  border-bottom: none;
-  background-color: #e9ecef;
-  cursor: pointer;
-  transition: background-color 0.2s, color 0.2s;
-}
-
-.tab-buttons button.active {
-  background-color: white;
-  border-top: 3px solid #0056b3;
-  color: #004085;
-}
-
-.tab-buttons button:hover:not(.active) {
-  background-color: #d1d4d7;
-}
-
-/* =========================================================
-   4. BUFFER ENTRY TABLE (Excel Style)
-   ========================================================= */
 .table-scroll-container {
   flex-grow: 1;
   overflow: auto;
@@ -112,11 +66,9 @@
   background-color: #f8f9fa;
   z-index: 2;
 }
-
 .excel-table thead tr:nth-child(1) th { top: 0; }
 .excel-table thead tr:nth-child(2) th { top: 25px; }
 .excel-table thead tr:nth-child(3) th { top: 50px; }
-.excel-table thead th:first-child { left: 0; z-index: 3; }
 
 .excel-table th, 
 .excel-table td {
@@ -126,6 +78,16 @@
   white-space: nowrap;
 }
 
+.border-thick-right { border-right: 2px solid #000 !important; }
+.border-thick-bottom { border-bottom: 2px solid #000 !important; }
+
+.text-blue { color: #004085; font-weight: bold; }
+.font-bold { font-weight: bold; }
+.text-left { text-align: left; }
+.text-right { text-align: right; }
+.pl-2 { padding-left: 10px !important; }
+.pr-2 { padding-right: 10px !important; }
+
 .row-label {
   background-color: #f8f9fa;
   padding: 2px 8px;
@@ -134,6 +96,7 @@
   left: 0;
   z-index: 1;
 }
+.excel-table thead th:first-child { left: 0; z-index: 3; }
 
 .input-cell {
   padding: 0 !important;
@@ -163,23 +126,26 @@
   background-color: #d6d8db; 
 }
 
-.solid-blocked-cell {
-  background: repeating-linear-gradient(45deg, #e9ecef, #e9ecef 6px, #dee2e6 6px, #dee2e6 12px);
+.tab-buttons {
+  display: flex;
+  margin-bottom: 10px;
+  gap: 5px;
+}
+.tab-buttons button {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: bold;
+  border: 1px solid #aaa;
+  border-bottom: none;
+  background-color: #e9ecef;
+  cursor: pointer;
+}
+.tab-buttons button.active {
+  background-color: white;
+  border-top: 3px solid #0056b3;
+  color: #004085;
 }
 
-/* Utilities for Buffer Grid */
-.border-thick-right { border-right: 2px solid #000 !important; }
-.border-thick-bottom { border-bottom: 2px solid #000 !important; }
-.text-blue { color: #004085; font-weight: bold; }
-.font-bold { font-weight: bold; }
-.text-left { text-align: left; }
-.text-right { text-align: right; }
-.pl-2 { padding-left: 10px !important; }
-.pr-2 { padding-right: 10px !important; }
-
-/* =========================================================
-   5. PRODUCTION SCHEDULE DASHBOARD (Sticky Headers & Fit)
-   ========================================================= */
 .image-layout-container {
   background-color: white;
   border: 2px solid #000;
@@ -201,7 +167,7 @@
   flex-shrink: 0;
 }
 
-/* Grid Wrapper to keep columns side-by-side */
+/* HORIZONTAL FIT */
 .schedule-grid-wrapper {
   display: flex;
   width: 100%;
@@ -238,11 +204,11 @@
   border-bottom: 2px solid #0056b3; 
 }
 .sticky-header-table .sticky-row-2 th { 
-  top: 31px; /* Adjust if font-size changes */
+  top: 27px; 
   z-index: 11; 
 }
 .sticky-header-table .sticky-row-3 th { 
-  top: 62px; /* Adjust if font-size changes */
+  top: 52px; 
   z-index: 11; 
   border-bottom: 2px solid #0056b3; 
 }
@@ -251,7 +217,7 @@
 .img-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 11px; /* Scaled down slightly to fit entirely on screen */
+  font-size: 11px;
 }
 
 .img-table th, 
@@ -262,7 +228,7 @@
 
 .col-main-title {
   color: #004085;
-  font-size: 15px;
+  font-size: 14px;
   text-align: center;
   background-color: #eef8ff;
   padding: 6px;
@@ -289,7 +255,6 @@
   font-size: 12px;
 }
 
-/* Schedule Cell Utilities */
 .part-name { 
   text-align: left; 
   padding-left: 10px; 
@@ -308,7 +273,6 @@
   background: white !important;
 }
 
-/* Nested Tables for HT Split Layout */
 .inner-ht-table { 
   width: 100%; 
   border-collapse: collapse; 

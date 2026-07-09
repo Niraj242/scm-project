@@ -13,7 +13,7 @@ const Afterchannel = () => {
   const [scrapData, setScrapData] = useState([]);
   const [scrapSearchQuery, setScrapSearchQuery] = useState('');
   const [expandedScrapMOs, setExpandedScrapMOs] = useState({});
-  const [expandedScrapVariants, setExpandedScrapVariants] = useState({}); // Used for toggling variant -> reason
+  const [expandedScrapVariants, setExpandedScrapVariants] = useState({}); 
 
   const [moNumber, setMoNumber] = useState('');
   const [selectedVariant, setSelectedVariant] = useState('');
@@ -658,27 +658,23 @@ const Afterchannel = () => {
                             };
                         }
 
-                        // Base data mapped properly based on API expected keys (IM/OM)
-                        const irTot = Number(vStats.IM || vStats.IR || 0);
-                        const orTot = Number(vStats.OM || vStats.OR || 0);
+                        const irTot = Number(vStats.IM || 0);
+                        const orTot = Number(vStats.OM || 0);
 
-                        // Safe mapping for SHO / Channel splits at deepest level
-                        const irSho = Number(vStats.IM_sho || vStats.IR_sho || 0);
-                        const orSho = Number(vStats.OM_sho || vStats.OR_sho || 0);
-                        const irChan = Number(vStats.IM_chan || vStats.IR_chan || 0);
-                        const orChan = Number(vStats.OM_chan || vStats.OR_chan || 0);
+                        // New direct mapping from the updated backend
+                        const irSho = Number(vStats.IM_sho || 0);
+                        const orSho = Number(vStats.OM_sho || 0);
+                        const irChan = Number(vStats.IM_chan || 0);
+                        const orChan = Number(vStats.OM_chan || 0);
 
-                        // Roll-ups to variant level
                         variants[vName].ir.tot += irTot; variants[vName].or.tot += orTot;
                         variants[vName].ir.sho += irSho; variants[vName].or.sho += orSho;
                         variants[vName].ir.chan += irChan; variants[vName].or.chan += orChan;
 
-                        // Roll-ups to MO level
                         moIrTot += irTot; moOrTot += orTot;
                         moIrSho += irSho; moOrSho += orSho;
                         moIrChan += irChan; moOrChan += orChan;
 
-                        // Inject reason level object
                         variants[vName].reasons[reason] = {
                             ir: { sho: irSho || '-', chan: irChan || '-', tot: irTot },
                             or: { sho: orSho || '-', chan: orChan || '-', tot: orTot }
@@ -688,19 +684,10 @@ const Afterchannel = () => {
             });
         }
 
-        // Final MO level values with fallback mapping if backend doesn't provide explicit bottom-up splits
         return {
             mo: moRow.mo,
-            ir: { 
-                sho: moIrSho > 0 ? moIrSho : (moRow.ir_sho_scrap || '-'), 
-                chan: moIrChan > 0 ? moIrChan : (moRow.ir_channel_scrap || '-'), 
-                tot: moIrTot > 0 ? moIrTot : (moRow.ir_total_scrap || '-') 
-            },
-            or: { 
-                sho: moOrSho > 0 ? moOrSho : (moRow.or_sho_scrap || '-'), 
-                chan: moOrChan > 0 ? moOrChan : (moRow.or_channel_scrap || '-'), 
-                tot: moOrTot > 0 ? moOrTot : (moRow.or_total_scrap || '-') 
-            },
+            ir: { sho: moIrSho || '-', chan: moIrChan || '-', tot: moIrTot },
+            or: { sho: moOrSho || '-', chan: moOrChan || '-', tot: moOrTot },
             variants: variants
         };
     });
@@ -1008,13 +995,13 @@ const Afterchannel = () => {
                         <td rowSpan="2" onClick={() => setExpandedScrapMOs(p => ({...p, [node.mo]: !p[node.mo]}))} style={{border: '1px solid #ddd', padding: '10px', fontWeight: 'bold', cursor: 'pointer', verticalAlign: 'middle', textAlign: 'left', color: '#1a1a1a'}}>
                             {expandedScrapMOs[node.mo] ? '▼' : '▶'} {node.mo}
                         </td>
-                        <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#1a1a1a'}}>IR</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#1a1a1a', textAlign: 'center'}}>IR</td>
                         <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.ir.sho}</td>
                         <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.ir.chan}</td>
                         <td style={{border: '1px solid #ddd', padding: '6px', color: 'var(--ac-red)', fontWeight: 'bold'}}>{node.ir.tot}</td>
                       </tr>
                       <tr style={{background: '#eaeff5'}}>
-                        <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#1a1a1a'}}>OR</td>
+                        <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#1a1a1a', textAlign: 'center'}}>OR</td>
                         <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.or.sho}</td>
                         <td style={{border: '1px solid #ddd', padding: '6px', color: '#333'}}>{node.or.chan}</td>
                         <td style={{border: '1px solid #ddd', padding: '6px', color: 'var(--ac-red)', fontWeight: 'bold'}}>{node.or.tot}</td>
@@ -1029,13 +1016,13 @@ const Afterchannel = () => {
                                     <td rowSpan="2" onClick={() => setExpandedScrapVariants(p => ({...p, [vKey]: !p[vKey]}))} style={{border: '1px solid #ddd', padding: '8px', paddingLeft: '30px', cursor: 'pointer', verticalAlign: 'middle', textAlign: 'left', color: '#0f1b33', fontWeight: '500'}}>
                                         {expandedScrapVariants[vKey] ? '▼' : '▶'} {vName}
                                     </td>
-                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#2b2b2b'}}>IR</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#2b2b2b', textAlign: 'center'}}>IR</td>
                                     <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.ir.sho || '-'}</td>
                                     <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.ir.chan || '-'}</td>
                                     <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#d32f2f'}}>{vData.ir.tot}</td>
                                 </tr>
                                 <tr style={{background: '#fcfcfc'}}>
-                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#2b2b2b'}}>OR</td>
+                                    <td style={{border: '1px solid #ddd', padding: '6px', color: '#2b2b2b', textAlign: 'center'}}>OR</td>
                                     <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.or.sho || '-'}</td>
                                     <td style={{border: '1px solid #ddd', padding: '6px', color: '#555'}}>{vData.or.chan || '-'}</td>
                                     <td style={{border: '1px solid #ddd', padding: '6px', fontWeight: '600', color: '#d32f2f'}}>{vData.or.tot}</td>
@@ -1048,13 +1035,13 @@ const Afterchannel = () => {
                                             <td rowSpan="2" style={{border: '1px solid #ddd', padding: '6px', paddingLeft: '50px', verticalAlign: 'middle', textAlign: 'left', fontSize: '13px', color: '#5b6478', fontWeight: '500'}}>
                                                 {reason}
                                             </td>
-                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#555'}}>IR</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#555', textAlign: 'center'}}>IR</td>
                                             <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.ir.sho}</td>
                                             <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.ir.chan}</td>
                                             <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', fontWeight: '600', color: '#e53935'}}>{rData.ir.tot}</td>
                                         </tr>
                                         <tr style={{background: '#ffffff'}}>
-                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#555'}}>OR</td>
+                                            <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#555', textAlign: 'center'}}>OR</td>
                                             <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.or.sho}</td>
                                             <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', color: '#777'}}>{rData.or.chan}</td>
                                             <td style={{border: '1px solid #ddd', padding: '4px', fontSize: '13px', fontWeight: '600', color: '#e53935'}}>{rData.or.tot}</td>

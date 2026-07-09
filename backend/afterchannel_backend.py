@@ -323,7 +323,7 @@ def get_xa_scrap_data():
         except ImportError:
             df = pd.read_excel(content, engine='openpyxl')
         
-        # Highly Resilient Column Matching (ignores spaces, cases, and symbols)
+        # Highly Resilient Column Matching
         orig_cols = list(df.columns)
         norm_cols = {re.sub(r'[^a-z0-9]', '', str(c).lower()): c for c in orig_cols}
         
@@ -333,7 +333,6 @@ def get_xa_scrap_data():
         reason_col = norm_cols.get('reasoncode') or norm_cols.get('reason') or next((c for c in orig_cols if 'reason' in str(c).lower()), None)
         qty_col = norm_cols.get('scrapqty1') or norm_cols.get('scrapqty') or next((c for c in orig_cols if 'scrapqty' in str(c).lower().replace(' ', '')), None)
         
-        # Fallback for QTY if 'Scrap' column exists but 'Scrap Qty_1' doesn't map perfectly
         if not qty_col and norm_cols.get('scrap'):
             qty_col = norm_cols.get('scrap')
             
@@ -348,12 +347,32 @@ def get_xa_scrap_data():
             if raw_mo.upper() in ['UNKNOWN', 'NAN', 'NONE', '']:
                 continue
                 
-            # Extract first 4 chars (e.g. M0X0)
             base_mo = raw_mo[:4].upper() if raw_mo.upper().startswith('M') else raw_mo.upper()
-            
             reason_code = str(row[reason_col]).strip().upper() if reason_col and pd.notna(row[reason_col]) else 'UNKNOWN'
-            variant = str(row[type_col]).strip().upper() if type_col and pd.notna(row[type_col]) else 'STANDARD'
+            
+            raw_variant = str(row[type_col]).strip().upper() if type_col and pd.notna(row[type_col]) else ''
             component = str(row[comp_col]).strip().upper() if comp_col and pd.notna(row[comp_col]) else 'UNKNOWN'
+            
+            # --- INTELLIGENT VARIANT EXTRACTION ---
+            # If variant is missing, extract it dynamically from the Component column!
+            variant = raw_variant
+            if not variant or variant in ['STANDARD', 'NAN', 'NONE', '']:
+                if component.startswith('IM') or component.startswith('IR') or component.startswith('OM') or component.startswith('OR'):
+                    # Strip the 2-letter prefix (IM/IR/OM/OR) to get pure type (e.g., IM30308 -> 30308)
+                    variant = component[2:].strip('- ')
+                else:
+                    variant = component
+                    
+            if not variant or variant == 'UNKNOWN':
+                variant = 'STANDARD'
+                
+            # Determine if it's IM or OM
+            if component.startswith('IM') or component.startswith('IR') or 'IM' in component or 'IR' in component:
+                comp_type = "IM"
+            elif component.startswith('OM') or component.startswith('OR') or 'OM' in component or 'OR' in component:
+                comp_type = "OM"
+            else:
+                comp_type = "other"
             
             try:
                 scrap_qty = float(row[qty_col]) if qty_col and pd.notna(row[qty_col]) else 0.0
@@ -398,9 +417,10 @@ def get_xa_scrap_data():
                 
             rc_node["types"][variant]["total"] += scrap_qty
             
-            if 'IM' in component or 'IR' in component:
+            # Categorize component amount exactly where frontend expects it
+            if comp_type == "IM":
                 rc_node["types"][variant]["IM"] += scrap_qty
-            elif 'OM' in component or 'OR' in component:
+            elif comp_type == "OM":
                 rc_node["types"][variant]["OM"] += scrap_qty
             else:
                 rc_node["types"][variant]["other"] += scrap_qty

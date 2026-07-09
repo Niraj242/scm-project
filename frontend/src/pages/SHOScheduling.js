@@ -1,29 +1,35 @@
 import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
+// Ensure this matches your deployment URL
 const API_BASE = 'https://scm-backend-pshv.onrender.com';
 
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
   
+  // Tab 1: Buffer State
   const [sector, setSector] = useState('DGBB');
   const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Days');
   const [tableData, setTableData] = useState({});
   const [isSaving, setIsSaving] = useState(false);
   
+  // Tab 3: Schedule State
   const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().split('T')[0]);
   const [scheduleData, setScheduleData] = useState(null);
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
   const [isSavingPlan, setIsSavingPlan] = useState(false);
 
+  // Tab 4: Summary State
   const [summaryDate, setSummaryDate] = useState(new Date().toISOString().split('T')[0]);
   const [summaryData, setSummaryData] = useState([]);
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
 
+  // Tab 2: Machine Availability State
   const [machineAvailability, setMachineAvailability] = useState([]);
   const [isLoadingMachines, setIsLoadingMachines] = useState(false);
 
+  // -- CONSTANTS --
   const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
     TRB: ['T 1', 'T 2', 'T 3', 'T 4', 'T 5', 'T 6', 'T 7', 'T 8', 'T 9', 'T10'],
@@ -31,8 +37,14 @@ const SHOScheduling = () => {
   };
 
   const DEFAULT_BLOCKED = {
-    DGBB: { OD: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH05: ['IR'], CH08: ['IR'], CH11: ['IR'] }, FACE: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'] } },
-    TRB: { OD: { 'T 1': ['IR'], 'T 2': ['IR'], 'T 3': ['IR'], 'T 4': ['IR'], 'T 5': ['IR'], 'T 6': ['IR'], 'T 7': ['IR'], 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'], 'T10': ['IR'] }, FACE: { 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'] } },
+    DGBB: { 
+        OD: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH05: ['IR'], CH08: ['IR'], CH11: ['IR'] }, 
+        FACE: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'] } 
+    },
+    TRB: { 
+        OD: { 'T 1': ['IR'], 'T 2': ['IR'], 'T 3': ['IR'], 'T 4': ['IR'], 'T 5': ['IR'], 'T 6': ['IR'], 'T 7': ['IR'], 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'], 'T10': ['IR'] }, 
+        FACE: { 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'] } 
+    },
     HUB: { OD: {}, FACE: {} }
   };
 
@@ -59,12 +71,18 @@ const SHOScheduling = () => {
     { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
   ];
 
+  // Load Initial Buffer State
   useEffect(() => {
-    const savedData = localStorage.getItem(`sho_db_${sector}_${bufferDate}`);
-    if (savedData) setTableData(JSON.parse(savedData).entries || {});
-    else setTableData({});
+    const storageKey = `sho_db_${sector}_${bufferDate}`;
+    const savedData = localStorage.getItem(storageKey);
+    if (savedData) {
+      setTableData(JSON.parse(savedData).entries || {});
+    } else {
+      setTableData({});
+    }
   }, [sector, bufferDate]);
 
+  // Dynamically Fetch ALL Face & OD Machines from Production Sheet
   useEffect(() => {
     const fetchMachines = async () => {
       setIsLoadingMachines(true);
@@ -76,6 +94,8 @@ const SHOScheduling = () => {
             id: m, machine: m, enabled: true, off_whole_day: false, start_time: '10:00', end_time: ''
           }));
           setMachineAvailability(loadedMachines);
+        } else {
+          console.warn("Failed to load machine list: " + result.detail);
         }
       } catch (err) {
         console.warn("Could not connect to backend to fetch machines.");
@@ -106,25 +126,38 @@ const SHOScheduling = () => {
         body: JSON.stringify({ sector, date: summaryDate, unit_mode: 'Days', entries: {}, unlocked_blocks: [] })
       });
       const result = await response.json();
-      if (response.ok && result.status === 'success') setSummaryData(result.data || []);
-      else alert("Error loading summary: " + result.detail);
-    } catch (e) { alert("Failed to connect to backend."); }
+      if (response.ok && result.status === 'success') {
+        setSummaryData(result.data || []);
+      } else {
+        alert("Error loading summary: " + result.detail);
+      }
+    } catch (e) {
+      alert("Failed to connect to backend. Verify your backend is running.");
+    }
     setIsLoadingSummary(false);
   };
 
   const handleSavePlan = async () => {
     if (!scheduleData) return;
     setIsSavingPlan(true);
-    const planToSave = { face: scheduleData.face_grinding || [], od: scheduleData.od_grinding || [], ht: scheduleData.heat_treatment || [] };
+    const planToSave = {
+      face: scheduleData.face_grinding || [],
+      od: scheduleData.od_grinding || [],
+      ht: scheduleData.heat_treatment || []
+    };
+
     try {
       const response = await fetch(`${API_BASE}/api/save_plan`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date: scheduleDate, plan: planToSave })
       });
       const result = await response.json();
       if (result.status === 'success') alert('Production Plan saved successfully.');
       else alert('Error saving plan: ' + result.detail);
-    } catch (error) { alert('Error connecting to server.'); }
+    } catch (error) {
+      alert('Error connecting to server.');
+    }
     setIsSavingPlan(false);
   };
 
@@ -133,7 +166,12 @@ const SHOScheduling = () => {
     const availabilityMap = {};
     machineAvailability.forEach(c => {
       if (c.machine.trim()) {
-        availabilityMap[c.machine.trim()] = { enabled: c.enabled, off_whole_day: c.off_whole_day, start_time: c.start_time, end_time: c.end_time };
+        availabilityMap[c.machine.trim()] = {
+          enabled: c.enabled,
+          off_whole_day: c.off_whole_day,
+          start_time: c.start_time,
+          end_time: c.end_time
+        };
       }
     });
 
@@ -141,12 +179,21 @@ const SHOScheduling = () => {
       const response = await fetch(`${API_BASE}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: [], machine_availability: availabilityMap })
+        body: JSON.stringify({ 
+          sector, 
+          date: scheduleDate, 
+          unit_mode: unitMode, 
+          entries: tableData, 
+          unlocked_blocks: [],
+          machine_availability: availabilityMap 
+        })
       });
       const result = await response.json();
       if (response.ok && result.status === 'success') { 
         setScheduleData(result.data); 
-        if (result.data.summary) setSummaryData(result.data.summary);
+        if (result.data.summary) {
+          setSummaryData(result.data.summary);
+        }
       } else { 
         alert("Server failed to generate schedule: " + (result.detail || result.message)); 
       }
@@ -167,6 +214,7 @@ const SHOScheduling = () => {
 
   return (
     <div className="sho-container">
+      {/* 4 NAVIGATION TABS */}
       <div className="tab-buttons" style={{ marginBottom: '15px' }}>
         <button className={activeTab === 'buffer' ? 'active' : ''} onClick={() => setActiveTab('buffer')}>1. Buffer Entry</button>
         <button className={activeTab === 'availability' ? 'active' : ''} onClick={() => setActiveTab('availability')}>2. Machine Availability</button>
@@ -174,6 +222,7 @@ const SHOScheduling = () => {
         <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')}>4. Production Summary</button>
       </div>
 
+      {/* TAB 1: BUFFER ENTRY */}
       {activeTab === 'buffer' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div className="controls-panel">
@@ -260,13 +309,14 @@ const SHOScheduling = () => {
         </div>
       )}
 
+      {/* TAB 2: MACHINE AVAILABILITY */}
       {activeTab === 'availability' && (
         <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
           <h2 style={{ color: '#0056b3', marginTop: 0 }}>Machine Availability Settings</h2>
-          <p style={{ color: '#555', marginBottom: '20px' }}>Adjust machine status before running the schedule.</p>
+          <p style={{ color: '#555', marginBottom: '20px' }}>Adjust machine status before running the schedule. Changes here will be applied when you click "Generate".</p>
           
           {isLoadingMachines ? (
-             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines from Master Sheet...</div>
+             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines from Master Sheet (this ensures 100% accuracy)...</div>
           ) : (
             <table className="img-table" style={{ width: '100%', maxWidth: '900px' }}>
               <thead>
@@ -305,6 +355,7 @@ const SHOScheduling = () => {
         </div>
       )}
 
+      {/* TAB 3: PRODUCTION SCHEDULE */}
       {activeTab === 'schedule' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
           <div className="controls-panel" style={{ backgroundColor: '#eef8ff' }}>
@@ -313,7 +364,7 @@ const SHOScheduling = () => {
               <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
             </div>
             <button className="btn-save" style={{backgroundColor: '#28a745', borderColor: '#1e7e34'}} onClick={fetchSchedule} disabled={isLoadingPlan}>
-              {isLoadingPlan ? "Running Rapid Scheduler..." : "Generate Production Schedule"}
+              {isLoadingPlan ? "Running Rapid Scheduler (Downloading Sheets)..." : "Generate Production Schedule"}
             </button>
             {scheduleData && (
               <button className="btn-save" style={{backgroundColor: '#17a2b8', borderColor: '#117a8b'}} onClick={handleSavePlan} disabled={isSavingPlan}>
@@ -329,8 +380,10 @@ const SHOScheduling = () => {
                 <div className="header-date">Date :- {scheduleDate.split('-').reverse().join('/')}</div>
               </div>
 
-              <div className="schedule-grid-wrapper">
-                <div className="schedule-column scrollable-col">
+              <div className="schedule-grid-wrapper" style={{ display: 'flex', minWidth: '1300px' }}>
+                
+                {/* 1. FACE GRINDING (WITH STICKY HEADERS) */}
+                <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
                   <table className="img-table sticky-header-table">
                     <thead>
                       <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">Face Grinding</th></tr>
@@ -366,7 +419,8 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                <div className="schedule-column scrollable-col">
+                {/* 2. OD GRINDING (WITH STICKY HEADERS) */}
+                <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
                   <table className="img-table sticky-header-table">
                     <thead>
                       <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">OD Grinding</th></tr>
@@ -402,7 +456,8 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                <div className="schedule-column ht-column scrollable-col">
+                {/* 3. HEAT TREATMENT */}
+                <div className="schedule-column ht-column" style={{ flex: 1.6, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
                   <table className="img-table sticky-header-table">
                     <thead>
                       <tr className="sticky-row-1">
@@ -462,6 +517,7 @@ const SHOScheduling = () => {
                 </div>
               </div>
 
+              {/* UNSCHEDULED ALERTS */}
               {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
                 <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff5f5', border: '1px solid #ffcccc', borderRadius: '5px' }}>
                     <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data Limit)</h3>
@@ -494,6 +550,7 @@ const SHOScheduling = () => {
         </div>
       )}
 
+      {/* TAB 4: PRODUCTION SUMMARY */}
       {activeTab === 'summary' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div className="controls-panel">
@@ -515,7 +572,7 @@ const SHOScheduling = () => {
                   <th>Channel</th>
                   <th>Monthly Requirement</th>
                   <th>Today's Requirement</th>
-                  <th>Today's Final Scheduled Prod</th>
+                  <th>Today's Scheduled Prod</th>
                   <th>MTD Produced</th>
                   <th>Balance Left</th>
                 </tr>

@@ -322,123 +322,91 @@ class Resource:
         self.capacity_info = capacity_info 
         self.rows = []
 
-def parse_machines_only():
-    sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
-    machines_list = []
-    
-    if sheets_prod:
-        for sheet_name, df_m in sheets_prod.items():
-            if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
-            str_matrix = df_m.fillna('').astype(str).values
-            
-            for r in range(str_matrix.shape[0]):
-                row_text = " ".join(str_matrix[r]).upper()
-                if 'MACHINE' in row_text or 'M/C' in row_text:
-                    cells = [c.strip() for c in str_matrix[r] if c.strip()]
-                    m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
-                    if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
-                        if m_cand not in machines_list:
-                            machines_list.append(m_cand)
-                            
-    for f in FURNACE_SPECS.keys():
-        if f not in machines_list:
-            machines_list.append(f)
-            
-    return machines_list
-
-def parse_zeroset_summary(req_date_str):
-    req_date = datetime.strptime(req_date_str, "%Y-%m-%d")
-    day_1 = req_date + timedelta(days=1)
-    day_2 = req_date + timedelta(days=2)
-    month_str = req_date.strftime("%Y-%m")
-    
-    monthly_data = load_monthly_tracking()
-    if month_str not in monthly_data:
-        monthly_data[month_str] = {}
+@router.post("/api/summary")
+def generate_summary(payload: ScheduleRequest):
+    """ Fast endpoint to only read zeroset and return the initial summary. """
+    try:
+        req_date = datetime.strptime(payload.date, "%Y-%m-%d")
+        day_1 = req_date + timedelta(days=1)
+        month_str = req_date.strftime("%Y-%m")
         
-    sheets_zero, _ = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
-    summary_list = []
-    
-    if sheets_zero:
+        monthly_data = load_monthly_tracking()
+        if month_str not in monthly_data:
+            monthly_data[month_str] = {}
+            
+        sheets_zero, _ = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
+        summary_list = []
         channel_demands_day1 = {}
-        for sheet_name, df_zero in sheets_zero.items():
-            sheet_str_upper = str(sheet_name).strip().upper()
-            ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
-            is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
-            
-            r_idx, type_col_idx, mv_col_idx = None, None, None
-            c1_col = None
-            monthly_cols = []
-            
-            for i in range(min(25, len(df_zero))):
-                row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
-                row_joined = " ".join(row_strs)
+
+        if sheets_zero:
+            for sheet_name, df_zero in sheets_zero.items():
+                sheet_str_upper = str(sheet_name).strip().upper()
+                ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
+                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
                 
-                if type_col_idx is None:
-                    for j, val in enumerate(row_strs):
-                        if val == "TYPE" or "TYPE " in val or " TYPE" in val:
-                            type_col_idx = j
-                            break
+                r_idx, type_col_idx, mv_col_idx, c1_col = None, None, None, None
+                monthly_cols = []
+                
+                for i in range(min(25, len(df_zero))):
+                    row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
+                    row_joined = " ".join(row_strs)
+                    
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
-                            if val in ["MF", "PART NO", "BRG NO"]:
-                                type_col_idx = j
-                                break
+                            if val == "TYPE" or "TYPE " in val or " TYPE" in val:
+                                type_col_idx = j; break
+                        if type_col_idx is None:
+                            for j, val in enumerate(row_strs):
+                                if val in ["MF", "PART NO", "BRG NO"]:
+                                    type_col_idx = j; break
+                                    
+                    if mv_col_idx is None:
+                        for j, val in enumerate(row_strs):
+                            if val in ["MV", "FV", "VAR", "VARIANT"]:
+                                mv_col_idx = j; break
                                 
-                if mv_col_idx is None:
-                    for j, val in enumerate(row_strs):
-                        if val in ["MV", "FV", "VAR", "VARIANT"]:
-                            mv_col_idx = j
-                            break
-                            
-                if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
-                    r_idx = i
-                    for j, val in enumerate(df_zero.iloc[i].values):
-                        if is_target_date(val, day_1): c1_col = j
-                        if pd.notna(val):
-                            if isinstance(val, (datetime, pd.Timestamp)) and val.month == req_date.month:
-                                monthly_cols.append(j)
-                            elif str(val).strip().isdigit() and 1 <= int(str(val).strip()) <= 31:
-                                monthly_cols.append(j)
-                if r_idx is not None and type_col_idx is not None: 
-                    break
-                    
-            if r_idx is not None and type_col_idx is not None:
-                last_mf = ""
-                for idx in range(r_idx + 1, len(df_zero)):
-                    mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
-                    if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
-                    
-                    if is_trb_hub:
-                        mv_val = str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else ""
-                        raw_t = mv_val if mv_val and mv_val not in ["NAN", "NONE"] else last_mf
-                    else:
-                        raw_t = last_mf
-                    
-                    if is_invalid_part(raw_t): continue
-                    display_name = get_display_name(raw_t)
-
-                    if display_name not in monthly_data[month_str]:
-                        monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
-                    
-                    row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
-                    if row_monthly_sum > 0:
-                        monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
-                    
-                    val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
-                    r1 = val1 * 1000 if val1 > 0 else 0.0
-                    
-                    if r1 > 0:
-                        if display_name not in channel_demands_day1: 
-                            channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
-                        channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
-                        channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
+                    if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
+                        r_idx = i
+                        for j, val in enumerate(df_zero.iloc[i].values):
+                            if is_target_date(val, day_1): c1_col = j
+                            if pd.notna(val):
+                                if isinstance(val, (datetime, pd.Timestamp)) and val.month == req_date.month:
+                                    monthly_cols.append(j)
+                                elif str(val).strip().isdigit() and 1 <= int(str(val).strip()) <= 31:
+                                    monthly_cols.append(j)
+                    if r_idx is not None and type_col_idx is not None: 
+                        break
+                        
+                if r_idx is not None and type_col_idx is not None:
+                    last_mf = ""
+                    for idx in range(r_idx + 1, len(df_zero)):
+                        mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
+                        if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
+                        raw_t = (str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else "") if is_trb_hub else last_mf
+                        if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
+                        if is_invalid_part(raw_t): continue
+                        
+                        display_name = get_display_name(raw_t)
+                        if display_name not in monthly_data[month_str]:
+                            monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
+                        
+                        row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
+                        if row_monthly_sum > 0:
+                            monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
+                        
+                        val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
+                        r1 = val1 * 1000 if val1 > 0 else 0.0
+                        
+                        if r1 > 0:
+                            if display_name not in channel_demands_day1: 
+                                channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
+                            channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
+                            channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
 
         for disp_name, data in monthly_data.get(month_str, {}).items():
             ch = data.get("channel", "Unknown")
             mo_req = data.get("total_req", 0)
             mtd_prod = data.get("produced", 0)
-            
             d1_data = channel_demands_day1.get(disp_name, {})
             d1_req = max(d1_data.get("IR", 0), d1_data.get("OR", 0))
             
@@ -451,24 +419,13 @@ def parse_zeroset_summary(req_date_str):
                 "mtd_prod": int(mtd_prod),
                 "balance": int(mo_req - mtd_prod),
                 "remaining_pct": round(((mo_req - mtd_prod) / mo_req * 100), 1) if mo_req > 0 else 0,
-                "difference": int(0 - d1_req) 
+                "difference": int(0 - d1_req)
             })
-    return summary_list
-
-@router.post("/api/pre_data")
-def get_pre_data(payload: ScheduleRequest):
-    try:
-        machines = parse_machines_only()
-        summary = parse_zeroset_summary(payload.date)
-        return {
-            "status": "success",
-            "data": {
-                "machines": machines,
-                "summary": summary
-            }
-        }
+            
+        return {"status": "success", "data": summary_list}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):

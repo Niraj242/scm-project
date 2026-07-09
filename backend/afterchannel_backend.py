@@ -190,7 +190,6 @@ def handle_auto_forward(cursor, source_dept, mo, b_type, out_date, shift_out, ne
         except psycopg2.Error:
             pass 
 
-# --- Excel Loading Helpers ---
 def find_column(df, patterns):
     for p in patterns:
         norm_p = re.sub(r'[^a-z0-9]', '', str(p).lower())
@@ -354,11 +353,9 @@ def get_xa_scrap_data():
             component = str(row[comp_col]).strip().upper() if comp_col and pd.notna(row[comp_col]) else 'UNKNOWN'
             
             # --- INTELLIGENT VARIANT EXTRACTION ---
-            # If variant is missing, extract it dynamically from the Component column!
             variant = raw_variant
             if not variant or variant in ['STANDARD', 'NAN', 'NONE', '']:
                 if component.startswith('IM') or component.startswith('IR') or component.startswith('OM') or component.startswith('OR'):
-                    # Strip the 2-letter prefix (IM/IR/OM/OR) to get pure type (e.g., IM30308 -> 30308)
                     variant = component[2:].strip('- ')
                 else:
                     variant = component
@@ -391,7 +388,7 @@ def get_xa_scrap_data():
                     "breakdown": {}
                 }
             
-            # SHO vs Channel Grouping
+            # SHO vs Channel Check (HTS, FODS, HT, FOD, etc.)
             is_sho = reason_code.startswith("HT") or reason_code.startswith("FOD")
             
             if is_sho:
@@ -412,18 +409,35 @@ def get_xa_scrap_data():
             rc_node = grouped_data[base_mo]["breakdown"][reason_code]
             rc_node["total"] += scrap_qty
             
+            # Make sure IM/OM specific splits exist
             if variant not in rc_node["types"]:
-                rc_node["types"][variant] = {"total": 0, "IM": 0, "OM": 0, "other": 0}
+                rc_node["types"][variant] = {
+                    "total": 0, "IM": 0, "OM": 0, "other": 0,
+                    "IM_sho": 0, "OM_sho": 0, "other_sho": 0,
+                    "IM_chan": 0, "OM_chan": 0, "other_chan": 0
+                }
                 
             rc_node["types"][variant]["total"] += scrap_qty
             
-            # Categorize component amount exactly where frontend expects it
+            # Categorize component amounts with SHO/Channel Split!
             if comp_type == "IM":
                 rc_node["types"][variant]["IM"] += scrap_qty
+                if is_sho:
+                    rc_node["types"][variant]["IM_sho"] += scrap_qty
+                else:
+                    rc_node["types"][variant]["IM_chan"] += scrap_qty
             elif comp_type == "OM":
                 rc_node["types"][variant]["OM"] += scrap_qty
+                if is_sho:
+                    rc_node["types"][variant]["OM_sho"] += scrap_qty
+                else:
+                    rc_node["types"][variant]["OM_chan"] += scrap_qty
             else:
                 rc_node["types"][variant]["other"] += scrap_qty
+                if is_sho:
+                    rc_node["types"][variant]["other_sho"] += scrap_qty
+                else:
+                    rc_node["types"][variant]["other_chan"] += scrap_qty
 
         result = list(grouped_data.values())
         return {"status": "success", "data": result}

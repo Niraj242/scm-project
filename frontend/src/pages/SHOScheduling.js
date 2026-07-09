@@ -140,10 +140,12 @@ const SHOScheduling = () => {
   const handleSavePlan = async () => {
     if (!scheduleData) return;
     setIsSavingPlan(true);
+    
+    // Updated keys to perfectly match backend expected model variables
     const planToSave = {
-      face: scheduleData.face_grinding || [],
-      od: scheduleData.od_grinding || [],
-      ht: scheduleData.heat_treatment || []
+      face_grinding: scheduleData.face_grinding || [],
+      od_grinding: scheduleData.od_grinding || [],
+      heat_treatment: scheduleData.heat_treatment || []
     };
 
     try {
@@ -287,7 +289,7 @@ const SHOScheduling = () => {
                             row.sectionIndex === 0 ? <td rowSpan={4} className="solid-blocked-cell" style={{backgroundColor: '#b3b3b3'}}></td> : null
                           ) : (
                             <td className="input-cell"><input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/></td>
-                          )}
+                          ) }
                           {orBlocked ? (
                             row.sectionIndex === 0 ? <td rowSpan={4} className="solid-blocked-cell border-thick-right" style={{backgroundColor: '#b3b3b3'}}></td> : null
                           ) : (
@@ -573,13 +575,15 @@ const SHOScheduling = () => {
                   <th>Monthly Requirement</th>
                   <th>Today's Requirement</th>
                   <th>Today's Scheduled Prod</th>
+                  <th>Difference</th>
                   <th>MTD Produced</th>
                   <th>Balance Left</th>
+                  <th>Remaining %</th>
                 </tr>
               </thead>
               <tbody>
                 {summaryData.length === 0 ? (
-                  <tr><td colSpan="7" style={{ textAlign: 'center', padding: '20px', color: '#666' }}>Click "Load Requirement Summary" to fetch the Master ZEROSET plan for the selected date.</td></tr>
+                  <tr><td colSpan="9" style={{ textAlign: 'center', padding: '20px', color: '#666' }}>Click "Load Requirement Summary" to fetch the Master ZEROSET plan for the selected date.</td></tr>
                 ) : (
                   summaryData.map((s, i) => (
                     <tr key={i}>
@@ -588,8 +592,12 @@ const SHOScheduling = () => {
                       <td style={{ textAlign: 'center' }}>{s.monthly_req}</td>
                       <td style={{ textAlign: 'center', fontWeight: 'bold', color: '#0056b3' }}>{s.today_req}</td>
                       <td style={{ textAlign: 'center', fontWeight: 'bold', color: s.today_prod > 0 ? 'green' : 'gray' }}>{s.today_prod || 0}</td>
+                      <td style={{ textAlign: 'center', fontWeight: 'bold', color: (s.difference ?? 0) < 0 ? '#dc3545' : '#28a745' }}>
+                        {s.difference !== undefined ? (s.difference > 0 ? `+${s.difference}` : s.difference) : '0'}
+                      </td>
                       <td style={{ textAlign: 'center' }}>{s.mtd_prod}</td>
                       <td style={{ textAlign: 'center' }}>{s.balance}</td>
+                      <td style={{ textAlign: 'center', color: '#555', fontSize: '0.9em' }}>{s.remaining_pct != null ? `${s.remaining_pct}%` : '0%'}</td>
                     </tr>
                   ))
                 )}

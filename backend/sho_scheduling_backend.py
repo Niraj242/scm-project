@@ -218,12 +218,26 @@ def get_furnaces_for_part(display_name, p_code, furnace_map):
     FURNACE_CACHE[key] = default_f
     return default_f
 
-def get_box_for_part_detailed(display_name, p_code, box_matrix):
+def get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs=None, logged_set=None):
     for var in get_lookup_variants(display_name, p_code):
         if var in box_matrix and p_code in box_matrix[var]: 
             return box_matrix[var][p_code]['qty'], box_matrix[var][p_code]['source'], var
     variants = get_lookup_variants(display_name, p_code)
     return 0.0, "NONE", variants[0] if variants else display_name
+
+def get_box_for_part(display_name, p_code, box_matrix, debug_logs=None, logged_set=None):
+    qty, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_set)
+    return qty
+
+def format_time(rel_hrs):
+    rel_hrs = max(0.0, rel_hrs)
+    total_minutes = int(round(rel_hrs * 60))
+    base_hour = 10 
+    h = (base_hour + (total_minutes // 60)) % 24
+    m = total_minutes % 60
+    days_added = (base_hour + (total_minutes // 60)) // 24
+    day_plus = f" (+{days_added})" if days_added > 0 else ""
+    return f"{h:02d}:{m:02d}{day_plus}"
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, flex):
@@ -237,15 +251,24 @@ class Resource:
         self.last_fam = None; self.last_pc = None; self.blocked = False
         self.capacity_info = capacity_info; self.rows = []
 
-@router.get("/api/health")
-def health_check(): return {"status": "ok"}
-
-@router.post("/api/save_plan")
-def save_plan(payload: SavePlanRequest):
-    try:
-        with open(SAVED_PLAN_FILE, "w") as f: json.dump(payload.dict(), f)
-        return {"status": "success"}
-    except Exception as e: return {"status": "error", "detail": str(e)}
+def parse_master_production_data():
+    sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
+    machines_data = {'FACE': {}, 'OD': {}}
+    if sheets_prod:
+        for sheet_name, df_m in sheets_prod.items():
+            if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
+            str_matrix = df_m.fillna('').astype(str).values
+            for r in range(str_matrix.shape[0]):
+                row_text = " ".join(str_matrix[r]).upper()
+                if 'MACHINE' in row_text or 'M/C' in row_text:
+                    cells = [c.strip() for c in str_matrix[r] if c.strip()]
+                    m_cand = cells[1] if len(cells) > 1 else None
+                    if m_cand and m_cand not in ["MACHINE", "M/C"]:
+                        if "FACE" in row_text or "DDS" in m_cand.upper() or "BG" in m_cand.upper():
+                            machines_data['FACE'][m_cand] = True
+                        elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand:
+                            machines_data['OD'][m_cand] = True
+    return machines_data
 
 @router.get("/api/machines")
 def get_machines_list():
@@ -641,7 +664,7 @@ def generate_schedule(payload: ScheduleRequest):
                                     if not clean_keys: continue
                                         
                                     rate_rings = 0.0
-                                    rpb, _, _ = get_box_for_part_detailed(raw_t, pc, box_matrix)
+                                    rpb = get_box_for_part(raw_t, pc, box_matrix, None, None)
                                     if rpb_idx != -1 and safe_float(row_vals[rpb_idx]) > 0: rpb = safe_float(row_vals[rpb_idx])
                                     if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0: rate_rings = safe_float(row_vals[ring_hr_idx])
                                     elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
@@ -835,7 +858,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if not best_pair: break
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
-                # --- NEW PRODUCTION MATRIX LOGIC ---
+                # --- FINAL STAGE SUMMARY LOGIC ---
                 final_stage = 'HT'
                 if item.flex['OD']: final_stage = 'OD'
                 elif item.flex['FACE']: final_stage = 'FACE'
@@ -908,7 +931,7 @@ def generate_schedule(payload: ScheduleRequest):
                     elif all(r.blocked for r in resources if r.id in valid_f): reason = "Exceeds Planning Window"
             else:
                 rates_found = any(get_rate_for_part(item.disp, item.pc, r.capacity_info, r.id) > 0 for r in resources if r.type == item.stage)
-                if not rates_found: reason = "Missing Machine Rate (Check Part Number Master)"
+                if not rates_found: reason = "Missing Machine Rate (Check Part Number)"
                 elif all(r.blocked for r in resources if r.type == item.stage and get_rate_for_part(item.disp, item.pc, r.capacity_info, r.id) > 0): reason = "Exceeds Planning Window"
             unscheduled.append({"stage": item.stage, "part": f"{item.disp} {item.pc} ({day_label})", "missed_boxes": f"{missed_val} - {reason}"})
 

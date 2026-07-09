@@ -129,13 +129,10 @@ def is_invalid_part(raw_text):
 def get_lookup_variants(raw_text, p_code=None):
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
-    
     if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
     if t.startswith("MF"): t = t[2:].strip()
-    
     parts = [p.strip() for p in t.split('/') if p.strip()]
     numeric_parts = [p for p in parts if any(c.isdigit() for c in p) and len(re.sub(r'\D', '', p)) >= 3]
-    
     if len(numeric_parts) >= 2 and p_code:
         if p_code == 'IR': t = parts[0]
         elif p_code == 'OR': t = numeric_parts[1]
@@ -174,7 +171,6 @@ def get_lookup_variants(raw_text, p_code=None):
         pf_val = f"{found_prefix}{t_nopfx}"
         if pf_val not in variants: variants.append(pf_val)
     if t_nopfx and t_nopfx not in variants: variants.append(t_nopfx)
-    
     return variants
 
 def get_display_name(raw_text):
@@ -209,15 +205,12 @@ def is_target_date(val, target_date):
     if val is None or pd.isna(val): return False
     if isinstance(val, (datetime, pd.Timestamp)):
         return val.day == target_date.day and val.month == target_date.month
-        
     v_str = str(val).strip().upper()
     for symbol in ['-', '/', '.', '_', ':', ' ']: 
         v_str = v_str.replace(symbol, ' ')
     tokens = v_str.split()
-    
     day_str = str(target_date.day)
     day_padded = f"{target_date.day:02d}"
-    
     if day_str in tokens or day_padded in tokens:
         month_str = target_date.strftime("%b").upper()
         if any(m in v_str for m in ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]):
@@ -234,14 +227,16 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
         if now - cache_time < CACHE_TTL:
             return df_dict, [f"Loaded {file_label} from ultra-fast cache."]
     try:
-        resp = requests.get(url, timeout=30)
-        if resp.status_code != 200: return None, logs
+        # INCREASED TIMEOUT TO 150 SECONDS to prevent silent failing on huge sheets
+        resp = requests.get(url, timeout=150)
+        if resp.status_code != 200: 
+            raise Exception(f"HTTP {resp.status_code}")
         content = io.BytesIO(resp.content)
         df_dict = pd.read_excel(content, sheet_name=None, header=None)
         EXCEL_CACHE[url] = (now, df_dict)
         return df_dict, logs
     except Exception as e:
-        return None, [f"[{file_label}] ERR: {str(e)}"]
+        raise Exception(f"Failed to load {file_label} Excel sheet: {str(e)}")
 
 def get_rate_for_part(display_name, p_code, rates):
     variants = get_lookup_variants(display_name, p_code)
@@ -263,17 +258,7 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs=None,
         if var in box_matrix and p_code in box_matrix[var]: 
             qty = box_matrix[var][p_code]['qty']
             source = box_matrix[var][p_code]['source']
-            if debug_logs is not None and logged_set is not None:
-                if (display_name, p_code) not in logged_set:
-                    debug_logs.append(f"Bearing : {display_name} {p_code}\nVariants Checked :\n" + "\n".join(variants) + f"\nMatched :\n{var}\nSource :\n{source}\nRings/Box :\n{qty}")
-                    logged_set.add((display_name, p_code))
             return qty, source, var
-            
-    if debug_logs is not None and logged_set is not None:
-        if (display_name, p_code) not in logged_set:
-            debug_logs.append(f"Bearing : {display_name} {p_code}\nVariants Checked :\n" + "\n".join(variants) + f"\nResult :\nNo Rings Per Box Found\nDisplaying:\nXXXX Rings (Q)")
-            logged_set.add((display_name, p_code))
-            
     return 0.0, "NONE", variants[0] if variants else display_name
 
 def get_box_for_part(display_name, p_code, box_matrix, debug_logs=None, logged_set=None):
@@ -294,7 +279,6 @@ def format_time(rel_hrs):
     h = (base_hour + (total_minutes // 60)) % 24
     m = total_minutes % 60
     days_added = (base_hour + (total_minutes // 60)) // 24
-    
     day_plus = f" (+{days_added})" if days_added > 0 else ""
     return f"{h:02d}:{m:02d}{day_plus}"
 
@@ -322,14 +306,38 @@ class Resource:
         self.capacity_info = capacity_info 
         self.rows = []
 
+# --- NEW: EXTRACT ALL MACHINES FASTER ---
+@router.get("/api/machines")
+def get_machines_list():
+    try:
+        sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
+        machines_list = []
+        if sheets_prod:
+            for sheet_name, df_m in sheets_prod.items():
+                if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
+                str_matrix = df_m.fillna('').astype(str).values
+                for r in range(str_matrix.shape[0]):
+                    row_text = " ".join(str_matrix[r]).upper()
+                    if 'MACHINE' in row_text or 'M/C' in row_text:
+                        cells = [c.strip() for c in str_matrix[r] if c.strip()]
+                        m_cand = cells[1] if len(cells) > 1 else None
+                        if m_cand and m_cand != "MACHINE" and m_cand != "M/C" and m_cand not in machines_list:
+                            machines_list.append(m_cand)
+                            
+        for f in FURNACE_SPECS.keys():
+            if f not in machines_list:
+                machines_list.append(f)
+                
+        return {"status": "success", "data": machines_list}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @router.post("/api/summary")
 def generate_summary(payload: ScheduleRequest):
-    """ Fast endpoint to only read zeroset and return the initial summary. """
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date + timedelta(days=1)
         month_str = req_date.strftime("%Y-%m")
-        
         monthly_data = load_monthly_tracking()
         if month_str not in monthly_data:
             monthly_data[month_str] = {}
@@ -350,7 +358,6 @@ def generate_summary(payload: ScheduleRequest):
                 for i in range(min(25, len(df_zero))):
                     row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
                     row_joined = " ".join(row_strs)
-                    
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
                             if val == "TYPE" or "TYPE " in val or " TYPE" in val:
@@ -426,7 +433,6 @@ def generate_summary(payload: ScheduleRequest):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
-
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
@@ -467,19 +473,16 @@ def generate_schedule(payload: ScheduleRequest):
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
                             if val == "TYPE" or "TYPE " in val or " TYPE" in val:
-                                type_col_idx = j
-                                break
+                                type_col_idx = j; break
                         if type_col_idx is None:
                             for j, val in enumerate(row_strs):
                                 if val in ["MF", "PART NO", "BRG NO"]:
-                                    type_col_idx = j
-                                    break
+                                    type_col_idx = j; break
                                     
                     if mv_col_idx is None:
                         for j, val in enumerate(row_strs):
                             if val in ["MV", "FV", "VAR", "VARIANT"]:
-                                mv_col_idx = j
-                                break
+                                mv_col_idx = j; break
                                 
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
@@ -499,16 +502,11 @@ def generate_schedule(payload: ScheduleRequest):
                     for idx in range(r_idx + 1, len(df_zero)):
                         mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
                         if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
-                        
-                        if is_trb_hub:
-                            mv_val = str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else ""
-                            raw_t = mv_val if mv_val and mv_val not in ["NAN", "NONE"] else last_mf
-                        else:
-                            raw_t = last_mf
-                        
+                        raw_t = (str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else "") if is_trb_hub else last_mf
+                        if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
                         if is_invalid_part(raw_t): continue
+                        
                         display_name = get_display_name(raw_t)
-
                         if display_name not in monthly_data[month_str]:
                             monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
                         
@@ -518,7 +516,6 @@ def generate_schedule(payload: ScheduleRequest):
                         
                         val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
                         val2 = safe_float(df_zero.iloc[idx, c2_col]) if c2_col is not None else 0.0
-                        
                         r1 = val1 * 1000 if val1 > 0 else 0.0
                         r2 = val2 * 1000 if val2 > 0 else 0.0
                         
@@ -552,7 +549,6 @@ def generate_schedule(payload: ScheduleRequest):
                         for i in range(0, len(row_vals) - 2, 3):
                             fam_raw = str(row_vals[i]).strip()
                             if not fam_raw or is_invalid_part(fam_raw): continue
-                            
                             fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
                             for f_raw in fams_to_process:
                                 for p_c in ['IR', 'OR']:
@@ -580,7 +576,6 @@ def generate_schedule(payload: ScheduleRequest):
                             row_vals = list(df_fb.iloc[idx])
                             raw_t = str(row_vals[type_col]).strip()
                             if not raw_t or is_invalid_part(raw_t): continue
-                            
                             for p_c in ['IR', 'OR']:
                                 clean_keys = get_lookup_variants(raw_t, p_c)
                                 for ck in clean_keys:
@@ -619,8 +614,7 @@ def generate_schedule(payload: ScheduleRequest):
                 for i in range(min(10, len(df_flex))):
                     row_strs = [str(x).upper().strip() for x in df_flex.iloc[i].values]
                     if any("CH" in x or "CHANNEL" in x for x in row_strs) and any("FACE" in x for x in row_strs):
-                        header_idx = i
-                        break
+                        header_idx = i; break
                 if header_idx != -1:
                     headers = [str(x).upper().strip() for x in df_flex.iloc[header_idx].values]
                     ch_col = next((j for j, h in enumerate(headers) if 'CH' in h or 'CHANNEL' in h), -1)
@@ -636,14 +630,11 @@ def generate_schedule(payload: ScheduleRequest):
                             r_raw = str(df_flex.iloc[idx, ring_col]).strip().upper()
                             p_code = 'OR' if 'OR' in r_raw or '100' in r_raw else ('IR' if 'IR' in r_raw or '010' in r_raw or '120' in r_raw else None)
                             
-                            face_req = True
-                            od_req = True
+                            face_req = True; od_req = True
                             if face_col != -1:
-                                face_val = str(df_flex.iloc[idx, face_col]).strip().upper()
-                                if face_val == "NO": face_req = False
+                                if str(df_flex.iloc[idx, face_col]).strip().upper() == "NO": face_req = False
                             if od_col != -1:
-                                od_val = str(df_flex.iloc[idx, od_col]).strip().upper()
-                                if od_val == "NO": od_req = False
+                                if str(df_flex.iloc[idx, od_col]).strip().upper() == "NO": od_req = False
                                 
                             if p_code:
                                 if c_norm not in channel_flex_map: channel_flex_map[c_norm] = {}
@@ -655,8 +646,7 @@ def generate_schedule(payload: ScheduleRequest):
                 for r_idx in range(min(10, len(df_w))):
                     h_row = [str(x).strip().upper() for x in df_w.iloc[r_idx].values]
                     if any('TYPE' in h for h in h_row) and any('IR/OR' in h or 'WEIGHT' in h or 'IR' in h for h in h_row):
-                        header_idx = r_idx
-                        break
+                        header_idx = r_idx; break
                 
                 if header_idx != -1:
                     norm_w_headers = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
@@ -669,7 +659,6 @@ def generate_schedule(payload: ScheduleRequest):
                             row_vals = df_w.iloc[header_idx + offset].values
                             raw_fam = str(row_vals[type_idx]).strip()
                             if is_invalid_part(raw_fam): continue
-                            
                             ir_or_val = str(row_vals[ir_or_idx]).strip() if ir_or_idx != -1 else ""
                             part_code = 'OR' if '100' in ir_or_val else ('IR' if ('120' in ir_or_val or '010' in ir_or_val) else None)
                             if part_code and wt_idx != -1:
@@ -686,7 +675,6 @@ def generate_schedule(payload: ScheduleRequest):
                 for idx, r in df_f.iloc[1:].iterrows():
                     comp_level = str(r.get('COMP LEVEL 1', r.iloc[0] if len(r) > 0 else '')).strip()
                     if is_invalid_part(comp_level): continue
-                    
                     p_code = 'IR' if comp_level.startswith('IM') else ('OR' if comp_level.startswith('OM') else None)
                     if p_code:
                         clean_keys = get_lookup_variants(comp_level, p_code)
@@ -694,31 +682,21 @@ def generate_schedule(payload: ScheduleRequest):
                         for fn_key in ['PRIMARY FURNA', 'PRIMARY FURNACE', 'ALTERNATIVE 1', 'ALTERNATIVE 2']:
                             fn = str(r.get(fn_key, '')).strip().upper()
                             if not fn or fn == 'NAN': continue
-                            
                             matched_fn = None
-                            if fn == "AU" or "UNITHERM" in fn:
-                                matched_fn = "AICHELIN UNITHERM ( 2033 )"
-                            elif "AICHELIN" in fn:
-                                matched_fn = "AICHELIN.(896)"
-                            else:
-                                matched_fn = next((k for k in FURNACE_SPECS.keys() if fn[:4] in k.upper()), None)
-                                
-                            if matched_fn and matched_fn not in valid_furnaces: 
-                                valid_furnaces.append(matched_fn)
+                            if fn == "AU" or "UNITHERM" in fn: matched_fn = "AICHELIN UNITHERM ( 2033 )"
+                            elif "AICHELIN" in fn: matched_fn = "AICHELIN.(896)"
+                            else: matched_fn = next((k for k in FURNACE_SPECS.keys() if fn[:4] in k.upper()), None)
+                            if matched_fn and matched_fn not in valid_furnaces: valid_furnaces.append(matched_fn)
                         if valid_furnaces: 
-                            for ck in clean_keys:
-                                furnace_map[f"{ck}_{p_code}"] = valid_furnaces
+                            for ck in clean_keys: furnace_map[f"{ck}_{p_code}"] = valid_furnaces
             
             for sheet_name, df_m in sheets_prod.items():
                 if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
                 str_matrix = df_m.fillna('').astype(str).values
-                
                 current_m_num = None
                 current_m_type = "UNKNOWN"
-                
                 for r in range(str_matrix.shape[0]):
                     row_text = " ".join(str_matrix[r]).upper()
-                    
                     if 'MACHINE' in row_text or 'M/C' in row_text:
                         cells = [c.strip() for c in str_matrix[r] if c.strip()]
                         m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
@@ -747,35 +725,25 @@ def generate_schedule(payload: ScheduleRequest):
                                 row_vals = str_matrix[r + offset2]
                                 inner_row_text = " ".join(row_vals).upper()
                                 if "MACHINE" in inner_row_text or "M/C" in inner_row_text: break 
-                                
                                 raw_t = str(row_vals[type_idx]).strip() if type_idx != -1 else ""
                                 if is_invalid_part(raw_t): continue
-                                
                                 part_val = str(row_vals[part_idx]).strip().upper() if part_idx != -1 else ""
                                 p_codes = []
                                 if '100' in part_val or 'OR' in part_val: p_codes.append('OR')
                                 if '120' in part_val or 'IR' in part_val or '010' in part_val: p_codes.append('IR')
                                 if not p_codes: p_codes = ['IR', 'OR']
-                                
                                 for pc in p_codes:
                                     clean_keys = get_lookup_variants(raw_t, pc)
                                     comb_val = str(row_vals[comb_idx]).strip() if comb_idx != -1 else ""
-                                    if comb_val and not is_invalid_part(comb_val):
-                                        clean_keys.extend(get_lookup_variants(comb_val, pc))
-                                        
+                                    if comb_val and not is_invalid_part(comb_val): clean_keys.extend(get_lookup_variants(comb_val, pc))
                                     if not clean_keys: continue
                                         
                                     rate_rings = 0.0
                                     rpb = get_box_for_part(raw_t, pc, box_matrix, None, None)
-                                    if rpb_idx != -1 and safe_float(row_vals[rpb_idx]) > 0:
-                                        rpb = safe_float(row_vals[rpb_idx])
-                                    
-                                    if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0:
-                                        rate_rings = safe_float(row_vals[ring_hr_idx])
-                                    elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0:
-                                        rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
-                                    elif std_hr_idx != -1 and safe_float(row_vals[std_hr_idx]) > 0 and rpb > 0:
-                                        rate_rings = safe_float(row_vals[std_hr_idx]) * rpb
+                                    if rpb_idx != -1 and safe_float(row_vals[rpb_idx]) > 0: rpb = safe_float(row_vals[rpb_idx])
+                                    if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0: rate_rings = safe_float(row_vals[ring_hr_idx])
+                                    elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
+                                    elif std_hr_idx != -1 and safe_float(row_vals[std_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[std_hr_idx]) * rpb
                                         
                                     if rate_rings > 0:
                                         for ck in set(clean_keys):
@@ -798,15 +766,11 @@ def generate_schedule(payload: ScheduleRequest):
                     parts = key.split('_')
                     if len(parts) < 3: continue
                     col_channel, sub_ring_type = parts[-2], parts[-1]
-                    
                     display_name = get_display_name(val)
                     if is_invalid_part(display_name): continue
-                    
                     buf_val = safe_float(payload.entries.get(f"{buf_prefix}_{col_channel}_{sub_ring_type}", 0))
                     if buf_val <= 0: continue
-                    
-                    if display_name not in buffers_by_fam:
-                        buffers_by_fam[display_name] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
+                    if display_name not in buffers_by_fam: buffers_by_fam[display_name] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
                     buffers_by_fam[display_name][stage][sub_ring_type] += buf_val
 
         ch_stats = {}
@@ -821,11 +785,9 @@ def generate_schedule(payload: ScheduleRequest):
         for fam, stg_data in buffers_by_fam.items():
             ch = fam_to_ch.get(fam, "UNKNOWN")
             if ch not in ch_stats: ch_stats[ch] = {'demand': 0.0, 'buffer': 0.0}
-            for stg, side_data in stg_data.items():
-                ch_stats[ch]['buffer'] += side_data.get('IR', 0) + side_data.get('OR', 0)
+            for stg, side_data in stg_data.items(): ch_stats[ch]['buffer'] += side_data.get('IR', 0) + side_data.get('OR', 0)
                 
-        for ch, stats in ch_stats.items():
-            stats['score'] = (stats['demand'] + 1.0) / (stats['buffer'] + 1.0)
+        for ch, stats in ch_stats.items(): stats['score'] = (stats['demand'] + 1.0) / (stats['buffer'] + 1.0)
 
         def process_requirements_for_day(demands, in_out_buffers):
             f_req, o_req, h_req = {}, {}, {}
@@ -834,9 +796,7 @@ def generate_schedule(payload: ScheduleRequest):
                 for side in ['IR', 'OR']:
                     req_rings = data[side]
                     if req_rings <= 0: continue
-                    
                     rpb = get_box_for_part(display_name, side, box_matrix)
-                    
                     flex = get_process_flexibility(ch_norm, side, channel_flex_map)
                     req_face = flex['FACE']
                     req_od = flex['OD']
@@ -846,12 +806,8 @@ def generate_schedule(payload: ScheduleRequest):
                         if payload.unit_mode == 'Days': avail_buf_rings = raw_buf * base_rings
                         elif payload.unit_mode == 'Boxes': avail_buf_rings = raw_buf * (rpb_rate if rpb_rate > 0 else 100)
                         else: avail_buf_rings = raw_buf 
-                        
-                        if avail_buf_rings >= base_rings:
-                            used_rings, rem_rings = base_rings, avail_buf_rings - base_rings
-                        else:
-                            used_rings, rem_rings = avail_buf_rings, 0.0
-                            
+                        if avail_buf_rings >= base_rings: used_rings, rem_rings = base_rings, avail_buf_rings - base_rings
+                        else: used_rings, rem_rings = avail_buf_rings, 0.0
                         if display_name in in_out_buffers:
                             if payload.unit_mode == 'Days': new_raw = (rem_rings / base_rings) if base_rings > 0 else 0
                             elif payload.unit_mode == 'Boxes': new_raw = rem_rings / (rpb_rate if rpb_rate > 0 else 100)
@@ -860,80 +816,54 @@ def generate_schedule(payload: ScheduleRequest):
                         return used_rings
 
                     current_req = req_rings
-                    
                     used_ch_buf = apply_buf('CH', current_req, rpb)
                     current_req = max(0.0, current_req - used_ch_buf)
-                    
                     if req_od:
                         if current_req > 0:
                             if display_name not in o_req: o_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                             o_req[display_name][side] += current_req
                         used_od_buf = apply_buf('OD', current_req, rpb)
                         current_req = max(0.0, current_req - used_od_buf)
-                    
                     if req_face:
                         if current_req > 0:
                             if display_name not in f_req: f_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                             f_req[display_name][side] += current_req
                         used_face_buf = apply_buf('FACE', current_req, rpb)
                         current_req = max(0.0, current_req - used_face_buf)
-                    
                     if current_req > 0:
                         if display_name not in h_req: h_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                         h_req[display_name][side] += current_req
-
             return f_req, o_req, h_req
 
         face_req_d1, od_req_d1, ht_req_d1 = process_requirements_for_day(channel_demands_day1, buffers_by_fam)
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
-        # ==========================================
-        # 5. GLOBAL OPTIMIZATION SCHEDULING (HYBRID PIPELINE)
-        # ==========================================
-
         work_items = []
-        for day_idx, demands, f_req, o_req, h_req in [
-            (0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1),
-            (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)
-        ]:
+        for day_idx, demands, f_req, o_req, h_req in [(0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1), (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
                 for p_code in ['IR', 'OR']:
                     flex = get_process_flexibility(ch_norm, p_code, channel_flex_map)
-                    
                     req_o = o_req.get(display_name, {}).get(p_code, 0.0) if display_name in o_req else 0.0
                     req_f = f_req.get(display_name, {}).get(p_code, 0.0) if display_name in f_req else 0.0
                     req_h = h_req.get(display_name, {}).get(p_code, 0.0) if display_name in h_req else 0.0
-                    
                     if flex['FACE']: init_f = req_f - req_h
                     else: init_f = 0.0
-                        
                     if flex['OD']:
                         if flex['FACE']: init_o = req_o - req_f
                         else: init_o = req_o - req_h
                     else: init_o = 0.0
-                        
                     init_h = req_h
                     ch_score = ch_stats.get(ch_norm, {}).get('score', 0.0)
-                    
-                    if init_h > 0:
-                        work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, ch_score, flex))
-                    if init_f > 0:
-                        work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, ch_score, flex))
-                    if init_o > 0:
-                        work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, ch_score, flex))
+                    if init_h > 0: work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, ch_score, flex))
+                    if init_f > 0: work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, ch_score, flex))
+                    if init_o > 0: work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, ch_score, flex))
 
         resources = []
-        for f_name, cap in FURNACE_SPECS.items():
-            resources.append(Resource(f_name, 'HT', cap))
-        for m_num, m_info in machines_data.get('FACE', {}).items():
-            res = Resource(m_num, 'FACE', m_info.get('rates', {}))
-            resources.append(res)
-        for m_num, m_info in machines_data.get('OD', {}).items():
-            res = Resource(m_num, 'OD', m_info.get('rates', {}))
-            resources.append(res)
+        for f_name, cap in FURNACE_SPECS.items(): resources.append(Resource(f_name, 'HT', cap))
+        for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
+        for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # Apply carried-over time from saved plan
         saved_plan = load_saved_plan()
         if saved_plan and saved_plan.get("date"):
             try:
@@ -958,39 +888,31 @@ def generate_schedule(payload: ScheduleRequest):
                                             if len(parts_split) >= 2:
                                                 r.last_fam = parts_split[0]
                                                 r.last_pc = parts_split[1].replace("(D1+D2)", "").replace("(D2)", "").replace("(D1)", "").strip()
-            except:
-                pass
+            except: pass
 
-        # Apply Machine Availability from UI
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
         for res in resources:
             conf = avail_dict.get(res.id, {})
             if conf:
-                if not conf.get('enabled', True) or conf.get('off_whole_day', False):
-                    res.blocked = True
+                if not conf.get('enabled', True) or conf.get('off_whole_day', False): res.blocked = True
                 else:
                     st_str = conf.get('start_time', '')
                     et_str = conf.get('end_time', '')
                     if st_str:
                         st_flt = time_str_to_float(st_str)
                         if st_flt > res.ready_time: res.ready_time = st_flt
-                    if et_str:
-                        res.max_time = time_str_to_float(et_str)
+                    if et_str: res.max_time = time_str_to_float(et_str)
 
-        # Day-1 Scheduling only, then Day-2
         for target_day in [0, 1]:
             while True:
                 active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < 24.0 and i.day_idx == target_day]
                 if not active_items: break
-                
                 best_pair = None
                 best_key = (float('inf'), float('inf'), float('-inf'))
-                
                 for item in active_items:
                     for res in resources:
                         if res.blocked or res.ready_time >= getattr(res, 'max_time', 24.0): continue
                         if res.type != item.stage: continue
-                        
                         rate_or_cap = 0.0
                         if res.type == 'HT':
                             valid_furnaces = get_furnaces_for_part(item.disp, item.pc, furnace_map)
@@ -1001,28 +923,17 @@ def generate_schedule(payload: ScheduleRequest):
                         else:
                             rate_or_cap = get_rate_for_part(item.disp, item.pc, res.capacity_info)
                             if rate_or_cap <= 0: continue
-                            
                         setup = 0.5 if res.type == 'HT' else 2.0
-                        if res.last_fam == item.disp:
-                            if res.last_pc == item.pc:
-                                setup = 0.0 
-                            else:
-                                setup = 2.0 
-                            
+                        if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                         start_time = max(res.ready_time + setup, item.ready_time)
                         if start_time >= getattr(res, 'max_time', 24.0): continue
-                        
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         effective_day = item.day_idx
-                        
                         key = (effective_day, start_time, -item.priority)
                         if key < best_key:
                             best_key = key
                             best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
-                            
-                if not best_pair:
-                    break
-                    
+                if not best_pair: break
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
                 if res.type == 'HT':
@@ -1030,203 +941,101 @@ def generate_schedule(payload: ScheduleRequest):
                     kg_per_hr = rate_or_cap
                     total_weight = item.qty * weight
                     time_needed = total_weight / kg_per_hr
-                    
                     actual_time = time_needed
                     actual_weight = total_weight
                     chunk_qty = item.qty
-                        
                     res_ready_time = start_time + actual_time + 0.5
                     out_time = start_time + actual_time + 3.5
                     display_rate = f"{round(actual_weight, 1)} kg"
-                    
-                    if item.disp in monthly_data.get(month_str, {}):
-                        monthly_data[month_str][item.disp]["produced"] += chunk_qty
+                    if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
                 else:
                     chunk_qty = item.qty
-                    if chunk_qty <= 0.01:
-                        res.blocked = True
-                        continue
-                        
+                    if chunk_qty <= 0.01: res.blocked = True; continue
                     actual_time = chunk_qty / rate_or_cap
                     res_ready_time = start_time + actual_time
                     out_time = res_ready_time
                     display_rate = rate_or_cap
                     
                 is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
-
                 res.ready_time = res_ready_time
                 res.last_fam = item.disp
                 res.last_pc = item.pc
-                
-                if res.ready_time >= getattr(res, 'max_time', 24.0):
-                    res.blocked = True
-                    
+                if res.ready_time >= getattr(res, 'max_time', 24.0): res.blocked = True
                 item.qty -= chunk_qty
-                    
                 next_stage = None
-                if res.type == 'HT':
-                    if item.flex['FACE']: next_stage = 'FACE'
-                    elif item.flex['OD']: next_stage = 'OD'
-                elif res.type == 'FACE':
-                    if item.flex['OD']: next_stage = 'OD'
-                    
-                if next_stage:
-                    work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.flex))
-                    
-                rpb, source, lookup_key = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
+                if res.type == 'HT': next_stage = 'FACE' if item.flex['FACE'] else ('OD' if item.flex['OD'] else None)
+                elif res.type == 'FACE': next_stage = 'OD' if item.flex['OD'] else None
+                if next_stage: work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.flex))
                 
-                can_merge = False
-                if res.type != 'HT' and res.rows and is_same_item and is_continuation:
-                    can_merge = True
-
+                rpb, source, lookup_key = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
+                can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
                 if can_merge:
                     last_row = res.rows[-1]
                     old_qty = int(float(last_row["qty"]))
                     new_qty = old_qty + int(chunk_qty)
                     last_row["qty"] = str(new_qty)
-
-                    if "(D1+D2)" not in last_row["part"]:
-                        last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").strip() + " (D1+D2)"
-                    
+                    if "(D1+D2)" not in last_row["part"]: last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").strip() + " (D1+D2)"
                     old_start = last_row["timing"].split('-')[0]
                     new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
                     last_row["timing"] = f"{old_start}-{new_end}"
-
-                    if rpb > 0:
-                        calculated_boxes = math.ceil(new_qty / rpb)
-                        display_val = f"{calculated_boxes} Boxes"
-                    else:
-                        display_val = f"{int(new_qty)} Rings (Q)"
-                    
-                    if res.type != 'HT':
-                        last_row["std_box"] = display_val
-
+                    display_val = f"{math.ceil(new_qty / rpb)} Boxes" if rpb > 0 else f"{int(new_qty)} Rings (Q)"
+                    if res.type != 'HT': last_row["std_box"] = display_val
                 else:
-                    if rpb > 0:
-                        calculated_boxes = math.ceil(chunk_qty / rpb)
-                        display_val = f"{calculated_boxes} Boxes"
-                    else:
-                        display_val = f"{int(chunk_qty)} Rings (Q)"
-                        
+                    display_val = f"{math.ceil(chunk_qty / rpb)} Boxes" if rpb > 0 else f"{int(chunk_qty)} Rings (Q)"
                     timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
                     day_label = " (D2)" if item.day_idx == 1 else " (D1)"
-                    
                     if res.type == 'HT':
-                        res.rows.append({
-                            "part": f"{item.disp}-{item.pc}{day_label}",
-                            "qty": str(int(chunk_qty)),
-                            "cha": item.channel,
-                            "rate": display_rate,
-                            "timing": timing_display,
-                            "alert": False
-                        })
+                        res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False})
                     else:
-                        res.rows.append({
-                            "part": f"{item.disp} {item.pc}{day_label}",
-                            "qty": str(int(chunk_qty)),
-                            "std_box": display_val,
-                            "timing": timing_display,
-                            "p_2nd": "1" if len(res.rows) == 0 else "",
-                            "p_3rd": "1" if len(res.rows) == 1 else "",
-                            "alert": False,
-                            "p_label": f"P{len(res.rows) + 1}"
-                        })
+                        res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}"})
 
         for item in work_items:
             if item.qty <= 0.01: continue
-            
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
             day_label = "Day 2" if item.day_idx == 1 else "Day 1"
-            
             reason = "Capacity Exceeded"
             if item.stage == 'HT':
-                weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
-                if not weight:
-                    reason = "Missing Weight"
+                if not get_weight_for_part(item.disp, item.pc, weight_matrix): reason = "Missing Weight"
                 else:
                     valid_f = get_furnaces_for_part(item.disp, item.pc, furnace_map)
                     if not valid_f: reason = "Missing Machine Rate"
                     elif all(r.blocked for r in resources if r.id in valid_f): reason = "Exceeds Planning Window"
             else:
-                rates_found = False
-                for r in resources:
-                    if r.type == item.stage:
-                        rate = get_rate_for_part(item.disp, item.pc, r.capacity_info)
-                        if rate > 0:
-                            rates_found = True
-                            break
-                if not rates_found:
-                    reason = "Missing Machine Rate"
-                elif all(r.blocked for r in resources if r.type == item.stage and get_rate_for_part(item.disp, item.pc, r.capacity_info) > 0):
-                    reason = "Exceeds Planning Window"
-                    
-            unscheduled.append({
-                "stage": item.stage,
-                "part": f"{item.disp} {item.pc} ({day_label})",
-                "missed_boxes": f"{missed_val} - {reason}"
-            })
+                rates_found = any(get_rate_for_part(item.disp, item.pc, r.capacity_info) > 0 for r in resources if r.type == item.stage)
+                if not rates_found: reason = "Missing Machine Rate"
+                elif all(r.blocked for r in resources if r.type == item.stage and get_rate_for_part(item.disp, item.pc, r.capacity_info) > 0): reason = "Exceeds Planning Window"
+            unscheduled.append({"stage": item.stage, "part": f"{item.disp} {item.pc} ({day_label})", "missed_boxes": f"{missed_val} - {reason}"})
 
-        final_face = []
-        final_od = []
-        furnaces_formatted = []
+        final_face, final_od, furnaces_formatted = [], [], []
         today_prod_map = {}
-        
         for r in resources:
-            if r.type == 'FACE':
-                final_face.append({"machine": r.id, "rows": r.rows})
-            elif r.type == 'OD':
-                final_od.append({"machine": r.id, "rows": r.rows})
-            elif r.type == 'HT':
-                furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})
-
+            if r.type == 'FACE': final_face.append({"machine": r.id, "rows": r.rows})
+            elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
+            elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})
             for row in r.rows:
                 part_str = row.get("part", "")
-                try:
-                    qty = float(row.get("qty", 0))
-                except:
-                    qty = 0
+                qty = float(row.get("qty", 0)) if str(row.get("qty", 0)).replace('.','',1).isdigit() else 0
                 disp = part_str.split("-")[0] if "-" in part_str else part_str.split(" ")[0]
-                if disp not in today_prod_map:
-                    today_prod_map[disp] = 0
-                today_prod_map[disp] += qty
+                today_prod_map[disp] = today_prod_map.get(disp, 0) + qty
 
         summary_list = []
         for disp_name, data in monthly_data.get(month_str, {}).items():
             ch = data.get("channel", "Unknown")
             mo_req = data.get("total_req", 0)
             mtd_prod = data.get("produced", 0)
-            
             d1_data = channel_demands_day1.get(disp_name, {})
             d1_req = max(d1_data.get("IR", 0), d1_data.get("OR", 0))
-            
             t_prod = today_prod_map.get(disp_name, 0)
-            
             summary_list.append({
-                "type": disp_name,
-                "channel": ch,
-                "monthly_req": int(mo_req),
-                "today_req": int(d1_req),
-                "today_prod": int(t_prod),
-                "mtd_prod": int(mtd_prod),
-                "balance": int(mo_req - mtd_prod),
+                "type": disp_name, "channel": ch, "monthly_req": int(mo_req), "today_req": int(d1_req), "today_prod": int(t_prod),
+                "mtd_prod": int(mtd_prod), "balance": int(mo_req - mtd_prod),
                 "remaining_pct": round(((mo_req - mtd_prod) / mo_req * 100), 1) if mo_req > 0 else 0,
                 "difference": int(t_prod - d1_req)
             })
 
         save_monthly_tracking(monthly_data)
-
-        return {
-            "status": "success",
-            "debug_logs": debug_logs,
-            "data": {
-                "face_grinding": final_face,
-                "od_grinding": final_od,
-                "heat_treatment": furnaces_formatted,
-                "unscheduled": unscheduled,
-                "summary": summary_list
-            }
-        }
+        return {"status": "success", "debug_logs": debug_logs, "data": {"face_grinding": final_face, "od_grinding": final_od, "heat_treatment": furnaces_formatted, "unscheduled": unscheduled, "summary": summary_list}}
     except Exception as e:
         import traceback
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}

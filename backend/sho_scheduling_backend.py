@@ -4,6 +4,7 @@ import math
 import pandas as pd
 import requests
 import io
+import gc
 import json
 import time
 from datetime import datetime, timedelta
@@ -17,30 +18,56 @@ ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
-# --- Caching to guarantee high speed ---
 EXCEL_CACHE = {}
 CACHE_TTL = 3600  
 
-RATE_CACHE = {}
-WEIGHT_CACHE = {}
-FURNACE_CACHE = {}
-
-MACHINES_CACHE = {'timestamp': 0, 'data': []}
-SUMMARY_CACHE = {}
-
-PARSED_MASTER_DATA = {"box_matrix": ({}, 0), "production": ({}, {}, {}, {}, 0)}
+PARSED_MASTER_DATA = {
+    "box_matrix": ({}, 0),  
+    "production": ({}, {}, {}, {}, 0) 
+}
 
 MONTHLY_FILE = "monthly_tracking.json"
 SAVED_PLAN_FILE = "saved_plan.json"
 
 HARDCODED_PROCESS_FLEXIBILITY = {
-    "T4": {"IR": {"FACE": True, "OD": False}, "OR": {"FACE": True, "OD": True}}
+    "T4": {
+        "IR": {"FACE": True, "OD": False},
+        "OR": {"FACE": True, "OD": True}
+    }
 }
 
+# --- GLOBAL MEMOIZATION FOR SPEED ---
+RATE_CACHE = {}
+WEIGHT_CACHE = {}
+FURNACE_CACHE = {}
+
+def load_monthly_tracking():
+    if os.path.exists(MONTHLY_FILE):
+        try:
+            with open(MONTHLY_FILE, 'r') as f: return json.load(f)
+        except: return {}
+    return {}
+
+def save_monthly_tracking(data):
+    try:
+        with open(MONTHLY_FILE, 'w') as f: json.dump(data, f)
+    except Exception as e:
+        print(f"Error saving monthly tracking: {e}")
+
+def load_saved_plan():
+    if os.path.exists(SAVED_PLAN_FILE):
+        try:
+            with open(SAVED_PLAN_FILE, 'r') as f: return json.load(f)
+        except: return {}
+    return {}
+
 FURNACE_SPECS = {
-    "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
-    "ROLLER FURNACE ( 148 )": 250.0, "SIMPLICITY FURNACE(1238)": 180.0,
-    "BIRLEC FURNACE   ( 1158 )": 170.0, "SHOEI FURNACE    ( 1062 )": 350.0,
+    "AICHELIN.(896)": 350.0,
+    "CASTLINK FURNACE( 1018 )": 250.0,
+    "ROLLER FURNACE ( 148 )": 250.0,
+    "SIMPLICITY FURNACE(1238)": 180.0,
+    "BIRLEC FURNACE   ( 1158 )": 170.0,
+    "SHOEI FURNACE    ( 1062 )": 350.0,
     "AICHELIN UNITHERM ( 2033 )": 250.0
 }
 
@@ -56,39 +83,40 @@ class SavePlanRequest(BaseModel):
     date: str
     plan: Dict[str, Any]
 
-def load_monthly_tracking():
-    if os.path.exists(MONTHLY_FILE):
-        try:
-            with open(MONTHLY_FILE, 'r') as f: return json.load(f)
-        except: pass
-    return {}
+@router.get("/api/health")
+def health_check():
+    return {"status": "ok"}
 
-def save_monthly_tracking(data):
+@router.get("/api/monthly_tracking")
+def get_monthly_tracking():
+    return load_monthly_tracking()
+
+@router.post("/api/save_plan")
+def save_plan(payload: SavePlanRequest):
     try:
-        with open(MONTHLY_FILE, 'w') as f: json.dump(data, f)
-    except Exception as e: print(e)
-
-def load_saved_plan():
-    if os.path.exists(SAVED_PLAN_FILE):
-        try:
-            with open(SAVED_PLAN_FILE, 'r') as f: return json.load(f)
-        except: pass
-    return {}
+        with open(SAVED_PLAN_FILE, "w") as f:
+            json.dump(payload.dict(), f)
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
-    return ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
+    ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
+    return ch
 
 def get_process_flexibility(channel_norm, p_code, flex_map):
     for hard_ch, flex_data in HARDCODED_PROCESS_FLEXIBILITY.items():
         if hard_ch.replace(" ", "") in channel_norm or channel_norm in hard_ch.replace(" ", ""):
-            if p_code in flex_data: return flex_data[p_code]
+            if p_code in flex_data:
+                return flex_data[p_code]
     return flex_map.get(channel_norm, {}).get(p_code, {'FACE': True, 'OD': True})
 
 def is_invalid_part(raw_text):
     if pd.isna(raw_text) or not raw_text: return True
     t = str(raw_text).upper()
-    for k in ["PROJECTED", "PLAN", "QTY", "HRS", "DAY", "NAN", "NONE", "UNKNOWN", "TYPE", "WIP", "MTD", "ASKING", "TOTAL"]:
+    invalid_keywords = ["PROJECTED", "PLAN", "QTY", "HRS", "DAY", "NAN", "NONE", "UNKNOWN", "TYPE", "WIP", "MTD", "ASKING", "TOTAL"]
+    for k in invalid_keywords:
         if k in t: return True
     return False
 
@@ -97,38 +125,47 @@ def get_lookup_variants(raw_text, p_code=None):
     t = str(raw_text).upper().strip()
     if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
     if t.startswith("MF"): t = t[2:].strip()
-    
     parts = [p.strip() for p in t.split('/') if p.strip()]
     numeric_parts = [p for p in parts if any(c.isdigit() for c in p) and len(re.sub(r'\D', '', p)) >= 3]
+    
     if len(numeric_parts) >= 2 and p_code:
         if p_code == 'IR': t = parts[0]
         elif p_code == 'OR': t = numeric_parts[1]
     elif '/' in t:
         if not any(x in parts[1] for x in ['Q', 'X']): t = parts[0].strip()
 
+    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q', 'LM', 'M']
     t_nosuff = t
-    suffixes = ['VK210', 'XQ', 'Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'LM', 'M']
-    for suff in suffixes: t_nosuff = re.sub(r'[\s\-_/]*' + suff + r'$', '', t_nosuff)
-        
-    t_clean = re.sub(r'[^A-Z0-9]', '', t_nosuff)
-    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM', 'T']
+    changed = True
+    while changed:
+        changed = False
+        for suff in suffixes:
+            pattern = r'[\s\-_/]*' + re.escape(suff) + r'$'
+            new_t = re.sub(pattern, '', t_nosuff)
+            if new_t != t_nosuff:
+                t_nosuff = new_t
+                changed = True
+                
+    t_nosuff = t_nosuff.strip()
+    t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
+    
+    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM']
     t_nopfx = t_clean
+    found_prefix = ""
     for pfx in prefixes_to_strip:
         if t_clean.startswith(pfx):
             t_nopfx = t_clean[len(pfx):]
+            found_prefix = pfx
             break
 
     variants = []
-    if t: variants.append(t)
-    if t_clean: variants.append(t_clean)
-    if t_nopfx: variants.append(t_nopfx)
-    
-    # Ultra-aggressive numeric extraction fallback (Solves 99% of check part number bugs)
-    nums = re.sub(r'\D', '', t)
-    if len(nums) >= 3: variants.append(nums)
-    
-    seen = set()
-    return [x for x in variants if x and not (x in seen or seen.add(x))]
+    if t and t not in variants: variants.append(t)
+    if t_clean and t_clean not in variants: variants.append(t_clean)
+    if found_prefix and t_nopfx:
+        pf_val = f"{found_prefix}{t_nopfx}"
+        if pf_val not in variants: variants.append(pf_val)
+    if t_nopfx and t_nopfx not in variants: variants.append(t_nopfx)
+    return variants
 
 def get_display_name(raw_text):
     if pd.isna(raw_text): return ""
@@ -142,7 +179,8 @@ def safe_float(val):
         s_val = str(val).replace(',', '').strip().lower()
         if s_val in ['nan', 'none', '', 'null']: return 0.0
         return float(s_val)
-    except: return 0.0
+    except Exception:
+        return 0.0
 
 def time_str_to_float(t_str):
     if not t_str: return 0.0
@@ -154,20 +192,23 @@ def time_str_to_float(t_str):
             if rel_h < 0: rel_h += 24.0
             return float(rel_h)
         return float(t_str)
-    except: return 0.0
+    except:
+        return 0.0
 
 def is_target_date(val, target_date):
     if val is None or pd.isna(val): return False
     if isinstance(val, (datetime, pd.Timestamp)):
         return val.day == target_date.day and val.month == target_date.month
     v_str = str(val).strip().upper()
-    for symbol in ['-', '/', '.', '_', ':', ' ']: v_str = v_str.replace(symbol, ' ')
+    for symbol in ['-', '/', '.', '_', ':', ' ']: 
+        v_str = v_str.replace(symbol, ' ')
     tokens = v_str.split()
     day_str = str(target_date.day)
     day_padded = f"{target_date.day:02d}"
     if day_str in tokens or day_padded in tokens:
         month_str = target_date.strftime("%b").upper()
-        if any(m in v_str for m in ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]): return month_str in v_str
+        if any(m in v_str for m in ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"]):
+            return month_str in v_str
         return True
     return False
 
@@ -177,52 +218,68 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
     now = time.time()
     if url in EXCEL_CACHE:
         cache_time, df_dict = EXCEL_CACHE[url]
-        if now - cache_time < CACHE_TTL: return df_dict, logs
+        if now - cache_time < CACHE_TTL:
+            return df_dict, [f"Loaded {file_label} from ultra-fast cache."]
     try:
-        resp = requests.get(url, timeout=150)
-        if resp.status_code != 200: raise Exception(f"HTTP {resp.status_code}")
-        df_dict = pd.read_excel(io.BytesIO(resp.content), sheet_name=None, header=None)
+        # INCREASED TIMEOUT FOR MASSIVE GOOGLE SHEETS
+        resp = requests.get(url, timeout=180)
+        if resp.status_code != 200: 
+            raise Exception(f"HTTP {resp.status_code}")
+        content = io.BytesIO(resp.content)
+        df_dict = pd.read_excel(content, sheet_name=None, header=None)
         EXCEL_CACHE[url] = (now, df_dict)
         return df_dict, logs
     except Exception as e:
-        raise Exception(f"Failed to load {file_label}: {str(e)}")
+        raise Exception(f"Failed to load {file_label} Excel sheet: {str(e)}")
 
+# --- CACHED LOOKUP FUNCTIONS TO SPEED UP SCHEDULING TO MILLISECONDS ---
 def get_rate_for_part(display_name, p_code, rates, res_id=""):
     key = (display_name, p_code, res_id)
     if key in RATE_CACHE: return RATE_CACHE[key]
-    for var in get_lookup_variants(display_name, p_code):
+    
+    variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
         if f"{var}_{p_code}" in rates:
             RATE_CACHE[key] = rates[f"{var}_{p_code}"]
             return RATE_CACHE[key]
+            
     RATE_CACHE[key] = 0.0
     return 0.0
 
 def get_weight_for_part(display_name, p_code, weights):
     key = (display_name, p_code)
     if key in WEIGHT_CACHE: return WEIGHT_CACHE[key]
-    for var in get_lookup_variants(display_name, p_code):
+    
+    variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
         if f"{var}_{p_code}" in weights: 
             WEIGHT_CACHE[key] = weights[f"{var}_{p_code}"]
             return WEIGHT_CACHE[key]
+            
     WEIGHT_CACHE[key] = None
     return None
 
 def get_furnaces_for_part(display_name, p_code, furnace_map):
     key = (display_name, p_code)
     if key in FURNACE_CACHE: return FURNACE_CACHE[key]
-    for var in get_lookup_variants(display_name, p_code):
+    
+    variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
         if f"{var}_{p_code}" in furnace_map: 
             FURNACE_CACHE[key] = furnace_map[f"{var}_{p_code}"]
             return FURNACE_CACHE[key]
+            
     default_f = list(FURNACE_SPECS.keys())
     FURNACE_CACHE[key] = default_f
     return default_f
 
 def get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs=None, logged_set=None):
-    for var in get_lookup_variants(display_name, p_code):
-        if var in box_matrix and p_code in box_matrix[var]: 
-            return box_matrix[var][p_code]['qty'], box_matrix[var][p_code]['source'], var
     variants = get_lookup_variants(display_name, p_code)
+    for var in variants:
+        if var in box_matrix and p_code in box_matrix[var]: 
+            qty = box_matrix[var][p_code]['qty']
+            source = box_matrix[var][p_code]['source']
+            return qty, source, var
     return 0.0, "NONE", variants[0] if variants else display_name
 
 def get_box_for_part(display_name, p_code, box_matrix, debug_logs=None, logged_set=None):
@@ -241,15 +298,27 @@ def format_time(rel_hrs):
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, flex):
-        self.stage = stage; self.disp = disp; self.pc = pc; self.day_idx = day_idx
-        self.channel = channel; self.qty = qty; self.ready_time = ready_time
-        self.priority = priority; self.flex = flex
+        self.stage = stage
+        self.disp = disp
+        self.pc = pc
+        self.day_idx = day_idx
+        self.channel = channel
+        self.qty = qty
+        self.ready_time = ready_time
+        self.priority = priority
+        self.flex = flex
 
 class Resource:
     def __init__(self, r_id, r_type, capacity_info):
-        self.id = r_id; self.type = r_type; self.ready_time = 0.0; self.max_time = 24.0
-        self.last_fam = None; self.last_pc = None; self.blocked = False
-        self.capacity_info = capacity_info; self.rows = []
+        self.id = r_id
+        self.type = r_type
+        self.ready_time = 0.0
+        self.max_time = 24.0
+        self.last_fam = None
+        self.last_pc = None  
+        self.blocked = False
+        self.capacity_info = capacity_info 
+        self.rows = []
 
 def parse_master_production_data():
     sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
@@ -273,30 +342,12 @@ def parse_master_production_data():
 @router.get("/api/machines")
 def get_machines_list():
     try:
-        now = time.time()
-        if MACHINES_CACHE['data'] and now - MACHINES_CACHE['timestamp'] < CACHE_TTL:
-            return {"status": "success", "data": MACHINES_CACHE['data']}
-            
-        sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
-        machines_list = []
-        if sheets_prod:
-            for sheet_name, df_m in sheets_prod.items():
-                if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
-                str_matrix = df_m.fillna('').astype(str).values
-                for r in range(str_matrix.shape[0]):
-                    row_text = " ".join(str_matrix[r]).upper()
-                    if 'MACHINE' in row_text or 'M/C' in row_text:
-                        cells = [c.strip() for c in str_matrix[r] if c.strip()]
-                        m_cand = cells[1] if len(cells) > 1 else None
-                        if m_cand and m_cand not in ["MACHINE", "M/C"] and m_cand not in machines_list:
-                            machines_list.append(m_cand)
-                            
-        for f in FURNACE_SPECS.keys():
-            if f not in machines_list: machines_list.append(f)
-                
-        MACHINES_CACHE['data'] = machines_list
-        MACHINES_CACHE['timestamp'] = now
-        return {"status": "success", "data": machines_list}
+        data = parse_master_production_data()
+        all_machines = list(data['FACE'].keys()) + list(data['OD'].keys()) + list(FURNACE_SPECS.keys())
+        # Deduplicate while preserving order
+        seen = set()
+        unique_machines = [x for x in all_machines if not (x in seen or seen.add(x))]
+        return {"status": "success", "data": unique_machines}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -306,13 +357,9 @@ def generate_summary(payload: ScheduleRequest):
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date + timedelta(days=1)
         month_str = req_date.strftime("%Y-%m")
-        
-        cache_key = f"{payload.date}_{payload.sector}"
-        if cache_key in SUMMARY_CACHE and time.time() - SUMMARY_CACHE[cache_key]['time'] < CACHE_TTL:
-            return {"status": "success", "data": SUMMARY_CACHE[cache_key]['data']}
-            
         monthly_data = load_monthly_tracking()
-        if month_str not in monthly_data: monthly_data[month_str] = {}
+        if month_str not in monthly_data:
+            monthly_data[month_str] = {}
             
         sheets_zero, _ = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
         summary_list = []
@@ -322,7 +369,7 @@ def generate_summary(payload: ScheduleRequest):
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
                 ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
-                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10"])
+                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
                 
                 r_idx, type_col_idx, mv_col_idx, c1_col = None, None, None, None
                 monthly_cols = []
@@ -332,21 +379,30 @@ def generate_summary(payload: ScheduleRequest):
                     row_joined = " ".join(row_strs)
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
-                            if val in ["TYPE", "TYPE ", " TYPE", "MF", "PART NO", "BRG NO"]: type_col_idx = j; break
+                            if val == "TYPE" or "TYPE " in val or " TYPE" in val:
+                                type_col_idx = j; break
+                        if type_col_idx is None:
+                            for j, val in enumerate(row_strs):
+                                if val in ["MF", "PART NO", "BRG NO"]:
+                                    type_col_idx = j; break
+                                    
                     if mv_col_idx is None:
                         for j, val in enumerate(row_strs):
-                            if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
+                            if val in ["MV", "FV", "VAR", "VARIANT"]:
+                                mv_col_idx = j; break
                                 
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
+                        # FIX 1: Strict extraction for monthly cols. Find '1' then take 31 cols.
                         first_day_col = -1
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
                             s_val = str(val).strip()
-                            if s_val in ['1', '01'] or is_target_date(val, req_date.replace(day=1)):
+                            if s_val == '1' or s_val == '01' or is_target_date(val, req_date.replace(day=1)):
                                 if first_day_col == -1: first_day_col = j
                         if first_day_col != -1:
                             monthly_cols = list(range(first_day_col, min(first_day_col + 31, len(df_zero.columns))))
+                    
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None:
@@ -359,14 +415,19 @@ def generate_summary(payload: ScheduleRequest):
                         if is_invalid_part(raw_t): continue
                         
                         display_name = get_display_name(raw_t)
-                        if display_name not in monthly_data[month_str]: monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
+                        if display_name not in monthly_data[month_str]:
+                            monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
+                        
                         row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
-                        if row_monthly_sum > 0: monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
+                        if row_monthly_sum > 0:
+                            monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
                         
                         val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
                         r1 = val1 * 1000 if val1 > 0 else 0.0
+                        
                         if r1 > 0:
-                            if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
+                            if display_name not in channel_demands_day1: 
+                                channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
                             channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
                             channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
 
@@ -384,45 +445,59 @@ def generate_summary(payload: ScheduleRequest):
                 "difference": int(0 - d1_req)
             })
             
-        SUMMARY_CACHE[cache_key] = {'time': time.time(), 'data': summary_list}
         return {"status": "success", "data": summary_list}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
-    debug_logs, unscheduled = [], []
+    debug_logs = []
+    unscheduled = []
+    logged_rpb = set()
     
+    # Reset Memoization Caches per run to ensure clean memory
     global RATE_CACHE, WEIGHT_CACHE, FURNACE_CACHE
-    RATE_CACHE, WEIGHT_CACHE, FURNACE_CACHE = {}, {}, {}
-    today_prod_map = {}
+    RATE_CACHE = {}
+    WEIGHT_CACHE = {}
+    FURNACE_CACHE = {}
     
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date + timedelta(days=1)
         day_2 = req_date + timedelta(days=2)
         month_str = req_date.strftime("%Y-%m")
+        
         monthly_data = load_monthly_tracking()
-        if month_str not in monthly_data: monthly_data[month_str] = {}
+        if month_str not in monthly_data:
+            monthly_data[month_str] = {}
 
-        channel_demands_day1, channel_demands_day2 = {}, {}
-        sheets_zero, _ = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
+        channel_demands_day1 = {} 
+        channel_demands_day2 = {}
+        
+        sheets_zero, logs1 = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
+        debug_logs.extend(logs1)
         
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
                 ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
-                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10"])
+                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
                 
-                r_idx, type_col_idx, mv_col_idx, c1_col, c2_col = None, None, None, None, None
+                r_idx, type_col_idx, mv_col_idx = None, None, None
+                c1_col, c2_col = None, None
                 monthly_cols = []
                 
                 for i in range(min(25, len(df_zero))):
                     row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
                     row_joined = " ".join(row_strs)
+                    
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
-                            if val in ["TYPE", "TYPE ", " TYPE", "MF", "PART NO", "BRG NO"]: type_col_idx = j; break
+                            if val == "TYPE" or "TYPE " in val or " TYPE" in val: type_col_idx = j; break
+                        if type_col_idx is None:
+                            for j, val in enumerate(row_strs):
+                                if val in ["MF", "PART NO", "BRG NO"]: type_col_idx = j; break
+                                    
                     if mv_col_idx is None:
                         for j, val in enumerate(row_strs):
                             if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
@@ -434,9 +509,10 @@ def generate_schedule(payload: ScheduleRequest):
                             if is_target_date(val, day_1): c1_col = j
                             if is_target_date(val, day_2): c2_col = j
                             s_val = str(val).strip()
-                            if s_val in ['1', '01'] or is_target_date(val, req_date.replace(day=1)):
+                            if s_val == '1' or s_val == '01' or is_target_date(val, req_date.replace(day=1)):
                                 if first_day_col == -1: first_day_col = j
-                        if first_day_col != -1: monthly_cols = list(range(first_day_col, min(first_day_col + 31, len(df_zero.columns))))
+                        if first_day_col != -1:
+                            monthly_cols = list(range(first_day_col, min(first_day_col + 31, len(df_zero.columns))))
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None:
@@ -468,6 +544,7 @@ def generate_schedule(payload: ScheduleRequest):
                             channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
         del sheets_zero
 
+        # 2. BOX MATRIX
         box_matrix = {}
         sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
         box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
@@ -527,13 +604,18 @@ def generate_schedule(payload: ScheduleRequest):
             PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
         del sheets_box
 
-        sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
+        # 4. PRODUCTION RATES & FLEXIBILITY 
+        sheets_prod, logs3 = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
+        debug_logs.extend(logs3)
         prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
 
         if PARSED_MASTER_DATA["production"][4] == prod_cache_ts:
             weight_matrix, furnace_map, machines_data, channel_flex_map, _ = PARSED_MASTER_DATA["production"]
         elif sheets_prod:
-            weight_matrix, furnace_map, machines_data, channel_flex_map = {}, {}, {'FACE': {}, 'OD': {}}, {}
+            weight_matrix = {}
+            furnace_map = {}
+            machines_data = {'FACE': {}, 'OD': {}}
+            channel_flex_map = {} 
 
             flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
             if flex_sheet_key:
@@ -676,6 +758,7 @@ def generate_schedule(payload: ScheduleRequest):
             PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, channel_flex_map, prod_cache_ts)
         del sheets_prod
 
+        # 3. BUFFERS & REQUIREMENTS PERCOLATION
         buffers_by_fam = {}
         BUFFER_MAP = {
             'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
@@ -858,15 +941,6 @@ def generate_schedule(payload: ScheduleRequest):
                 if not best_pair: break
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
-                # --- FINAL STAGE SUMMARY LOGIC ---
-                final_stage = 'HT'
-                if item.flex['OD']: final_stage = 'OD'
-                elif item.flex['FACE']: final_stage = 'FACE'
-                
-                if res.type == final_stage:
-                    today_prod_map[item.disp] = today_prod_map.get(item.disp, 0) + item.qty
-                # -----------------------------------
-                
                 if res.type == 'HT':
                     weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
                     actual_time = (item.qty * weight) / rate_or_cap
@@ -919,7 +993,7 @@ def generate_schedule(payload: ScheduleRequest):
 
         for item in work_items:
             if item.qty <= 0.01: continue
-            rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
+            rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
             day_label = "Day 2" if item.day_idx == 1 else "Day 1"
             reason = "Capacity Exceeded"
@@ -936,10 +1010,16 @@ def generate_schedule(payload: ScheduleRequest):
             unscheduled.append({"stage": item.stage, "part": f"{item.disp} {item.pc} ({day_label})", "missed_boxes": f"{missed_val} - {reason}"})
 
         final_face, final_od, furnaces_formatted = [], [], []
+        today_prod_map = {}
         for r in resources:
             if r.type == 'FACE': final_face.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})
+            for row in r.rows:
+                part_str = row.get("part", "")
+                qty = float(row.get("qty", 0)) if str(row.get("qty", 0)).replace('.','',1).isdigit() else 0
+                disp = part_str.split("-")[0] if "-" in part_str else part_str.split(" ")[0]
+                today_prod_map[disp] = today_prod_map.get(disp, 0) + qty
 
         summary_list = []
         for disp_name, data in monthly_data.get(month_str, {}).items():

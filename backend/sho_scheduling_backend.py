@@ -4,6 +4,7 @@ import math
 import pandas as pd
 import requests
 import io
+import gc
 import json
 import time
 from datetime import datetime, timedelta
@@ -39,7 +40,7 @@ HARDCODED_PROCESS_FLEXIBILITY = {
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
-FURNACE_SPECS = {}
+FURNACE_SPECS = {} # Issue 12: Will be loaded dynamically now
 
 def load_monthly_tracking():
     if os.path.exists(MONTHLY_FILE):
@@ -83,6 +84,7 @@ def get_monthly_tracking():
 
 @router.post("/api/save_plan")
 def save_plan(payload: SavePlanRequest):
+    # Issue 7: Save Daily Plan Implemented
     try:
         with open(SAVED_PLAN_FILE, "w") as f:
             json.dump(payload.dict(), f)
@@ -111,9 +113,11 @@ def is_invalid_part(raw_text):
     return False
 
 def get_lookup_variants(raw_text, p_code=None):
+    # Issue 1: "CHECK PART NUMBER" BUG Fix - SAFE FUZZY MATCHER
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
     
+    # Strip hidden chars and zero-width spaces causing matching failures
     t = re.sub(r'[\u200b\u200c\u200d\uFEFF]', '', t)
     
     if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
@@ -128,6 +132,7 @@ def get_lookup_variants(raw_text, p_code=None):
     elif '/' in t:
         if not any(x in parts[1] for x in ['Q', 'X']): t = parts[0].strip()
 
+    # Safely strip exact suffixes only (Prevents 3212 matching 33212)
     suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q', 'LM', 'M']
     t_nosuff = t
     changed = True
@@ -143,7 +148,8 @@ def get_lookup_variants(raw_text, p_code=None):
     t_nosuff = t_nosuff.strip()
     t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
     
-    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM', 'FACE', 'OD', 'HT']
+    # Clean leading stage artifacts if present
+    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM', 'FACE ', 'OD ', 'HT ', 'FACE', 'OD', 'HT']
     t_nopfx = t_clean
     found_prefix = ""
     for pfx in prefixes_to_strip:
@@ -165,10 +171,9 @@ def get_display_name(raw_text):
     if pd.isna(raw_text): return ""
     t = str(raw_text).strip().upper()
     if t.startswith("MF"): t = t[2:].strip()
-    # Strip leading FACE/OD/HT artifacts from display name
+    # Strip stage artifacts for clean display
     for pfx in ['FACE ', 'OD ', 'HT ', 'FACE', 'OD', 'HT']:
-        if t.startswith(pfx):
-            t = t[len(pfx):].strip()
+        if t.startswith(pfx): t = t[len(pfx):].strip()
     return t
 
 def safe_float(val):
@@ -219,6 +224,7 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
         if now - cache_time < CACHE_TTL:
             return df_dict, [f"Loaded {file_label} from ultra-fast cache."]
     try:
+        # Issue 4: PERFORMANCE - Use cache properly and high timeout for big sheets
         resp = requests.get(url, timeout=180)
         if resp.status_code != 200: 
             raise Exception(f"HTTP {resp.status_code}")
@@ -246,15 +252,6 @@ def get_rate_for_part(display_name, p_code, rates, res_id=""):
         if robust_key in robust_rates:
             RATE_CACHE[key] = robust_rates[robust_key]
             return RATE_CACHE[key]
-            
-    # Aggressive fallback matching
-    for rk, rv in robust_rates.items():
-        base_rk = rk.split('_')[0] if '_' in rk else rk
-        for var in variants:
-            if var in base_rk or base_rk in var:
-                if f"_{p_code}" in rk or p_code in rk:
-                    RATE_CACHE[key] = rv
-                    return rv
             
     RATE_CACHE[key] = 0.0
     return 0.0
@@ -327,12 +324,12 @@ class Resource:
         self.type = r_type
         self.ready_time = 0.0
         self.max_time = 24.0
-        self.bd_start = 0.0
-        self.bd_end = 0.0
-        self.has_bd = False
         self.last_fam = None
         self.last_pc = None  
         self.blocked = False
+        self.has_bd = False
+        self.bd_start = 0.0
+        self.bd_end = 0.0
         self.capacity_info = capacity_info 
         self.rows = []
 
@@ -340,6 +337,7 @@ def parse_master_production_data():
     sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
     machines_data = {'FACE': {}, 'OD': {}}
     
+    # Issue 12: MACHINE AVAILABILITY - Load furnaces dynamically
     global FURNACE_SPECS
     FURNACE_SPECS.clear()
 
@@ -366,6 +364,7 @@ def parse_master_production_data():
                         elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand:
                             machines_data['OD'][m_cand] = True
                             
+    # Fallback if no furnace sheet is found properly
     if not FURNACE_SPECS:
         FURNACE_SPECS = {
             "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
@@ -428,9 +427,11 @@ def generate_summary(payload: ScheduleRequest):
                                 
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
+                        # Issue 8: MONTHLY REQUIREMENT - strictly digits representing 1-31 dates
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
-                            s_val = str(val).replace('.0', '').strip()
+                            
+                            s_val = str(val).strip()
                             if s_val.isdigit() and 1 <= int(s_val) <= 31:
                                 monthly_cols.append(j)
                     
@@ -545,17 +546,17 @@ def generate_schedule(payload: ScheduleRequest):
                                 
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
+                        # Issue 8: Month column check logic
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
                             if is_target_date(val, day_2): c2_col = j
                             
-                            s_val = str(val).replace('.0', '').strip()
+                            s_val = str(val).strip()
                             if s_val.isdigit() and 1 <= int(s_val) <= 31:
                                 monthly_cols.append(j)
                         
                     if r_idx is not None and type_col_idx is not None: break
-                        
-                if r_idx is not None and type_col_idx is not None:
+                    if r_idx is not None and type_col_idx is not None:
                     last_mf = ""
                     for idx in range(r_idx + 1, len(df_zero)):
                         mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
@@ -945,6 +946,7 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
+        # Issue 5 & 6: Strict Day Priority
         for target_day in [0, 1]:
             while True:
                 active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < 24.0 and i.day_idx == target_day]

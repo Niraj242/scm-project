@@ -358,7 +358,7 @@ def parse_master_production_data():
             elif col_val == "WEIGHT(KG)": weight_col = c
             elif col_val == "HEAT TREATMENT FURNACE": furn_col = c
             elif col_val == "HR/RINGS": hr_col = c
-            elif "MACHINE" in sn_upper and col_val not in ["NAN", "NONE", ""]:
+            elif "MACHINE" in col_val and col_val not in ["NAN", "NONE", ""]:
                 mach_cols[c] = col_val
 
         if furn_col != -1 and "HT" in sn_upper:

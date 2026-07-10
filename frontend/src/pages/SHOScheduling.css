@@ -174,7 +174,6 @@
   font-size: 20px;
 }
 
-/* ISSUE 5: Minimized width to reduce horizontal scrolling, made responsive */
 .schedule-grid-wrapper {
   display: flex;
   width: 100%;
@@ -190,7 +189,6 @@
   flex: 1.6;
 }
 
-/* ISSUE 11: STICKY HEADER SETTINGS FOR FACE AND OD GRINDING */
 .sticky-header-table thead th {
   position: sticky;
   z-index: 10;

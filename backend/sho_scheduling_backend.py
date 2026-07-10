@@ -437,7 +437,9 @@ def generate_summary(payload: ScheduleRequest):
         return {"status": "success", "data": summary_list}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-        @router.post("/api/schedule")
+        
+        
+@router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []

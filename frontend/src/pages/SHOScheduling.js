@@ -1,33 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
-// Ensure this matches your deployment URL
-const API_BASE = 'https://scm-backend-pshv.onrender.com';
-
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
-  
-  // Tab 1: Buffer State
   const [sector, setSector] = useState('DGBB');
+  
   const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Days');
+  
   const [tableData, setTableData] = useState({});
   const [isSaving, setIsSaving] = useState(false);
   
-  // Tab 3: Schedule State
   const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().split('T')[0]);
   const [scheduleData, setScheduleData] = useState(null);
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
-  const [isSavingPlan, setIsSavingPlan] = useState(false);
-
-  // Tab 4: Summary State
-  const [summaryDate, setSummaryDate] = useState(new Date().toISOString().split('T')[0]);
-  const [summaryData, setSummaryData] = useState([]);
-  const [isLoadingSummary, setIsLoadingSummary] = useState(false);
-
-  // Tab 2: Machine Availability State
-  const [machineAvailability, setMachineAvailability] = useState([]);
-  const [isLoadingMachines, setIsLoadingMachines] = useState(false);
 
   // -- CONSTANTS --
   const SECTOR_COLUMNS = {
@@ -36,6 +22,7 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
+  // Hardcoded permanent blocks based strictly on the uploaded image matrix
   const DEFAULT_BLOCKED = {
     DGBB: { 
         OD: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH05: ['IR'], CH08: ['IR'], CH11: ['IR'] }, 
@@ -71,39 +58,16 @@ const SHOScheduling = () => {
     { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
   ];
 
-  // Load Initial Buffer State
   useEffect(() => {
     const storageKey = `sho_db_${sector}_${bufferDate}`;
     const savedData = localStorage.getItem(storageKey);
     if (savedData) {
-      setTableData(JSON.parse(savedData).entries || {});
+      const parsed = JSON.parse(savedData);
+      setTableData(parsed.entries || {});
     } else {
       setTableData({});
     }
   }, [sector, bufferDate]);
-
-  // Dynamically Fetch ALL Face, OD & HT Machines from Production Sheet
-  useEffect(() => {
-    const fetchMachines = async () => {
-      setIsLoadingMachines(true);
-      try {
-        const response = await fetch(`${API_BASE}/api/machines`);
-        const result = await response.json();
-        if (response.ok && result.status === 'success') {
-          const loadedMachines = result.data.map(m => ({
-            id: m, machine: m, enabled: true, bd_date: '', start_time: '', end_time: ''
-          }));
-          setMachineAvailability(loadedMachines);
-        } else {
-          console.warn("Failed to load machine list: " + result.detail);
-        }
-      } catch (err) {
-        console.warn("Could not connect to backend to fetch machines.");
-      }
-      setIsLoadingMachines(false);
-    };
-    fetchMachines();
-  }, []);
 
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
@@ -113,101 +77,32 @@ const SHOScheduling = () => {
     setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
   };
 
-  const updateMachineConstraint = (id, field, value) => {
-    setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, [field]: value } : c)));
-  };
-
-  const resetMachineConstraint = (id) => {
-    setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, enabled: true, bd_date: '', start_time: '', end_time: '' } : c)));
-  };
-
-  const fetchSummaryOnly = async () => {
-    setIsLoadingSummary(true);
-    try {
-      const response = await fetch(`${API_BASE}/api/summary`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sector, date: summaryDate, unit_mode: 'Days', entries: {}, unlocked_blocks: [] })
-      });
-      const result = await response.json();
-      if (response.ok && result.status === 'success') {
-        setSummaryData(result.data || []);
-      } else {
-        alert("Error loading summary: " + result.detail);
-      }
-    } catch (e) {
-      alert("Failed to connect to backend. Verify your backend is running.");
-    }
-    setIsLoadingSummary(false);
-  };
-
-  const handleSavePlan = async () => {
-    if (!scheduleData) return;
-    setIsSavingPlan(true);
-    
-    // Keys matched to backend processing
-    const planToSave = {
-      face_grinding: scheduleData.face_grinding || [],
-      od_grinding: scheduleData.od_grinding || [],
-      heat_treatment: scheduleData.heat_treatment || []
-    };
-
-    try {
-      const response = await fetch(`${API_BASE}/api/save_plan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: scheduleDate, plan: planToSave })
-      });
-      const result = await response.json();
-      if (result.status === 'success') alert('Production Plan saved successfully.');
-      else alert('Error saving plan: ' + result.detail);
-    } catch (error) {
-      alert('Error connecting to server.');
-    }
-    setIsSavingPlan(false);
-  };
-
   const fetchSchedule = async () => {
     setIsLoadingPlan(true);
-    const availabilityMap = {};
-    
-    machineAvailability.forEach(c => {
-      if (c.machine.trim()) {
-        availabilityMap[c.machine.trim()] = {
-          enabled: c.enabled,
-          bd_date: c.bd_date,
-          start_time: c.start_time,
-          end_time: c.end_time
-        };
-      }
-    });
-
+    const API = 'https://scm-backend-pshv.onrender.com';
     try {
-      const response = await fetch(`${API_BASE}/api/schedule`, {
+      const response = await fetch(`${API}/api/schedule`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          sector, 
-          date: scheduleDate, 
-          unit_mode: unitMode, 
-          entries: tableData, 
-          unlocked_blocks: [],
-          machine_availability: availabilityMap 
-        })
+        body: JSON.stringify({ sector, date: scheduleDate, unit_mode: unitMode, entries: tableData, unlocked_blocks: [] })
       });
       const result = await response.json();
+      
+      console.log("=== BACKEND DIAGNOSTICS ===");
+      if (result.debug_logs) {
+          result.debug_logs.forEach(log => console.log(log));
+      }
+
       if (response.ok && result.status === 'success') { 
         setScheduleData(result.data); 
-        if (result.data.summary) {
-          setSummaryData(result.data.summary);
-        }
       } else { 
-        alert("Server failed to generate schedule: " + (result.detail || result.message)); 
+        alert("Error: " + (result.detail || result.message)); 
       }
     } catch (e) { 
-      alert(`Network error: Failed to connect to backend at ${API_BASE}. Server may be offline.`); 
+      alert("Failed to connect to backend. Check your network or API URL."); 
+    } finally { 
+      setIsLoadingPlan(false); 
     }
-    setIsLoadingPlan(false);
   };
 
   const columns = SECTOR_COLUMNS[sector];
@@ -221,17 +116,13 @@ const SHOScheduling = () => {
 
   return (
     <div className="sho-container">
-      {/* 4 NAVIGATION TABS */}
-      <div className="tab-buttons" style={{ marginBottom: '15px' }}>
+      <div className="tab-buttons">
         <button className={activeTab === 'buffer' ? 'active' : ''} onClick={() => setActiveTab('buffer')}>1. Buffer Entry</button>
-        <button className={activeTab === 'availability' ? 'active' : ''} onClick={() => setActiveTab('availability')}>2. Breakdown Entry</button>
-        <button className={activeTab === 'schedule' ? 'active' : ''} onClick={() => setActiveTab('schedule')}>3. Production Schedule</button>
-        <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')}>4. Production Summary</button>
+        <button className={activeTab === 'schedule' ? 'active' : ''} onClick={() => setActiveTab('schedule')}>2. Production Schedule</button>
       </div>
 
-      {/* TAB 1: BUFFER ENTRY */}
       {activeTab === 'buffer' && (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        <>
           <div className="controls-panel">
             <div className="control-group">
               <label>Sector:</label>
@@ -294,7 +185,7 @@ const SHOScheduling = () => {
                             row.sectionIndex === 0 ? <td rowSpan={4} className="solid-blocked-cell" style={{backgroundColor: '#b3b3b3'}}></td> : null
                           ) : (
                             <td className="input-cell"><input type="text" value={tableData[`${row.key}_${col}_IR`] || ''} onChange={(e) => handleInputChange(row.key, col, 'IR', e.target.value)}/></td>
-                          ) }
+                          )}
                           {orBlocked ? (
                             row.sectionIndex === 0 ? <td rowSpan={4} className="solid-blocked-cell border-thick-right" style={{backgroundColor: '#b3b3b3'}}></td> : null
                           ) : (
@@ -313,103 +204,47 @@ const SHOScheduling = () => {
               </tbody>
             </table>
           </div>
-        </div>
+        </>
       )}
 
-      {/* TAB 2: BREAKDOWN ENTRY */}
-      {activeTab === 'availability' && (
-        <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
-          <h2 style={{ color: '#0056b3', marginTop: 0 }}>Breakdown Entry Log</h2>
-          <p style={{ color: '#555', marginBottom: '20px' }}>Enter machine breakdown times to halt scheduling during that period. Leave blank for 100% availability.</p>
-          
-          {isLoadingMachines ? (
-             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines...</div>
-          ) : (
-            <table className="img-table" style={{ width: '100%', maxWidth: '950px' }}>
-              <thead>
-                <tr style={{ backgroundColor: '#eef8ff' }}>
-                  <th style={{ textAlign: 'left', padding: '10px' }}>Machine / Furnace Name</th>
-                  <th>Status</th>
-                  <th>Breakdown Date</th>
-                  <th>Breakdown Start</th>
-                  <th>Breakdown End</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {machineAvailability.map((c) => (
-                  <tr key={c.id}>
-                    <td style={{ fontWeight: 'bold', padding: '10px' }}>{c.machine}</td>
-                    <td style={{ textAlign: 'center' }}>
-                      <select value={c.enabled ? "true" : "false"} onChange={(e) => updateMachineConstraint(c.id, 'enabled', e.target.value === "true")} style={{ padding: '4px' }}>
-                        <option value="true">Available</option>
-                        <option value="false">Off / Total Breakdown</option>
-                      </select>
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <input type="date" value={c.bd_date || ''} onChange={(e) => updateMachineConstraint(c.id, 'bd_date', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <input type="time" value={c.start_time || ''} onChange={(e) => updateMachineConstraint(c.id, 'start_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <input type="time" value={c.end_time || ''} onChange={(e) => updateMachineConstraint(c.id, 'end_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <button onClick={() => resetMachineConstraint(c.id)} style={{ padding: '4px 8px', cursor: 'pointer', backgroundColor: '#e9ecef', border: '1px solid #ccc' }}>Reset</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
-
-      {/* TAB 3: PRODUCTION SCHEDULE */}
       {activeTab === 'schedule' && (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+        <>
           <div className="controls-panel" style={{ backgroundColor: '#eef8ff' }}>
             <div className="control-group">
-              <label>Select Target Date:</label>
+              <label>Select Date to Schedule:</label>
               <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
             </div>
             <button className="btn-save" style={{backgroundColor: '#28a745', borderColor: '#1e7e34'}} onClick={fetchSchedule} disabled={isLoadingPlan}>
-              {isLoadingPlan ? "Running Rapid Scheduler (Downloading Sheets)..." : "Generate Production Schedule"}
+              {isLoadingPlan ? "Fetching Excel Files & Calculating..." : "Generate Production Schedule"}
             </button>
-            {scheduleData && (
-              <button className="btn-save" style={{backgroundColor: '#17a2b8', borderColor: '#117a8b'}} onClick={handleSavePlan} disabled={isSavingPlan}>
-                {isSavingPlan ? 'Saving Plan...' : 'Save Production Plan'}
-              </button>
-            )}
           </div>
           
-          {scheduleData ? (
-            <div className="image-layout-container" style={{ flex: 1, overflowY: 'auto' }}>
+          {scheduleData && (
+            <div className="image-layout-container">
               <div className="schedule-master-header">
                 <div className="header-title">Face & OD Grinding Schedule</div>
                 <div className="header-date">Date :- {scheduleDate.split('-').reverse().join('/')}</div>
               </div>
 
-              <div className="schedule-grid-wrapper" style={{ display: 'flex', minWidth: '1300px' }}>
+              <div className="schedule-grid-wrapper">
                 
-                {/* 1. FACE GRINDING (WITH STICKY HEADERS) */}
-                <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
-                  <table className="img-table sticky-header-table">
+                {/* 1. FACE GRINDING */}
+                <div className="schedule-column">
+                  <table className="img-table">
                     <thead>
-                      <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">Face Grinding</th></tr>
-                      <tr className="sub-header sticky-row-2">
+                      <tr><th colSpan="6" className="col-main-title">Face Grinding</th></tr>
+                      <tr className="sub-header">
                         <th rowSpan="2" className="empty-corner">PART</th>
                         <th rowSpan="2">QTY (Rings)</th>
                         <th rowSpan="2">BOX/Q</th>
                         <th rowSpan="2">TIMING (Hrs)</th>
                         <th colSpan="2">Shift Priority</th>
                       </tr>
-                      <tr className="sub-header sticky-row-3"><th>2nd</th><th>3rd</th></tr>
+                      <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
                       {(!scheduleData.face_grinding || scheduleData.face_grinding.length === 0) && (
-                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled.</td></tr>
+                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
                       )}
                       {scheduleData.face_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
@@ -430,23 +265,23 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                {/* 2. OD GRINDING (WITH STICKY HEADERS) */}
-                <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
-                  <table className="img-table sticky-header-table">
+                {/* 2. OD GRINDING */}
+                <div className="schedule-column">
+                  <table className="img-table">
                     <thead>
-                      <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">OD Grinding</th></tr>
-                      <tr className="sub-header sticky-row-2">
+                      <tr><th colSpan="6" className="col-main-title">OD Grinding</th></tr>
+                      <tr className="sub-header">
                         <th rowSpan="2" className="empty-corner">PART</th>
                         <th rowSpan="2">QTY (Rings)</th>
                         <th rowSpan="2">BOX/Q</th>
                         <th rowSpan="2">TIMING (Hrs)</th>
                         <th colSpan="2">Shift Priority</th>
                       </tr>
-                      <tr className="sub-header sticky-row-3"><th>2nd</th><th>3rd</th></tr>
+                      <tr className="sub-header"><th>2nd</th><th>3rd</th></tr>
                     </thead>
                     <tbody>
                       {(!scheduleData.od_grinding || scheduleData.od_grinding.length === 0) && (
-                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled.</td></tr>
+                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled. Check Backend.</td></tr>
                       )}
                       {scheduleData.od_grinding?.map((m, idx) => (
                         <React.Fragment key={idx}>
@@ -468,10 +303,10 @@ const SHOScheduling = () => {
                 </div>
 
                 {/* 3. HEAT TREATMENT */}
-                <div className="schedule-column ht-column" style={{ flex: 1.6, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
-                  <table className="img-table sticky-header-table">
+                <div className="schedule-column ht-column">
+                  <table className="img-table">
                     <thead>
-                      <tr className="sticky-row-1">
+                      <tr>
                         <th colSpan="5" className="col-main-title ht-title">HEAT TREATMENT</th>
                         <th colSpan="5" className="col-main-title ht-title">DATE - {scheduleDate.split('-').reverse().join('/')}</th>
                       </tr>
@@ -526,12 +361,13 @@ const SHOScheduling = () => {
                     </tbody>
                   </table>
                 </div>
+
               </div>
 
               {/* UNSCHEDULED ALERTS */}
               {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
                 <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff5f5', border: '1px solid #ffcccc', borderRadius: '5px' }}>
-                    <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data Limit)</h3>
+                    <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data)</h3>
                     <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
                         <thead>
                             <tr style={{ backgroundColor: '#ffe5e5' }}>
@@ -553,70 +389,12 @@ const SHOScheduling = () => {
                 </div>
               )}
             </div>
-          ) : (
-            <div style={{ padding: '30px', textAlign: 'center', color: '#666', backgroundColor: 'white', flex: 1 }}>
-              <p>No schedule generated yet. Click "Generate Production Schedule".</p>
-            </div>
           )}
-        </div>
-      )}
-
-      {/* TAB 4: PRODUCTION SUMMARY */}
-      {activeTab === 'summary' && (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-          <div className="controls-panel">
-            <div className="control-group">
-              <label>Requirement Date:</label>
-              <input type="date" value={summaryDate} onChange={(e) => setSummaryDate(e.target.value)} />
-            </div>
-            <button className="btn-save" onClick={fetchSummaryOnly} disabled={isLoadingSummary}>
-              {isLoadingSummary ? "Downloading Zeroset Plan..." : "Load Requirement Summary"}
-            </button>
-          </div>
-
-          <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
-            <h2 style={{ color: '#0056b3', marginTop: 0 }}>Requirement & Production Matrix</h2>
-            <table className="img-table" style={{ width: '100%' }}>
-              <thead>
-                <tr style={{ backgroundColor: '#eef8ff' }}>
-                  <th style={{ padding: '10px', textAlign: 'left' }}>Bearing Type</th>
-                  <th>Channel</th>
-                  <th>Monthly Requirement</th>
-                  <th>Today's Requirement</th>
-                  <th>Today's Scheduled Prod</th>
-                  <th>Difference</th>
-                  <th>MTD Produced</th>
-                  <th>Balance Left</th>
-                  <th>Remaining %</th>
-                </tr>
-              </thead>
-              <tbody>
-                {summaryData.length === 0 ? (
-                  <tr><td colSpan="9" style={{ textAlign: 'center', padding: '20px', color: '#666' }}>Click "Load Requirement Summary" to fetch the Master ZEROSET plan for the selected date.</td></tr>
-                ) : (
-                  summaryData.map((s, i) => (
-                    <tr key={i}>
-                      <td style={{ fontWeight: 'bold', padding: '8px' }}>{s.type}</td>
-                      <td style={{ textAlign: 'center' }}>{s.channel}</td>
-                      <td style={{ textAlign: 'center' }}>{s.monthly_req}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 'bold', color: '#0056b3' }}>{s.today_req}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 'bold', color: s.today_prod > 0 ? 'green' : 'gray' }}>{s.today_prod || 0}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 'bold', color: (s.difference ?? 0) < 0 ? '#dc3545' : '#28a745' }}>
-                        {s.difference !== undefined ? (s.difference > 0 ? `+${s.difference}` : s.difference) : '0'}
-                      </td>
-                      <td style={{ textAlign: 'center' }}>{s.mtd_prod}</td>
-                      <td style={{ textAlign: 'center' }}>{s.balance}</td>
-                      <td style={{ textAlign: 'center', color: '#555', fontSize: '0.9em' }}>{s.remaining_pct != null ? `${s.remaining_pct}%` : '0%'}</td>
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        </>
       )}
     </div>
   );
 };
 
 export default SHOScheduling;
+

@@ -94,13 +94,13 @@ const SHOScheduling = () => {
       }
     } catch (error) {
       console.error('Error fetching summary:', error);
-      alert('Error fetching summary. Check console.');
     }
     setIsLoadingSummary(false);
   };
 
   const generatePlan = async () => {
     setIsLoadingPlan(true);
+    setScheduleData(null); // Clear old data to show proper loading
     try {
       const payload = {
         sector,
@@ -125,7 +125,6 @@ const SHOScheduling = () => {
       }
     } catch (error) {
       console.error('Error generating plan:', error);
-      alert('Error connecting to backend.');
     }
     setIsLoadingPlan(false);
   };
@@ -148,13 +147,12 @@ const SHOScheduling = () => {
       const result = await response.json();
       if (result.status === 'success') {
         alert('Daily plan saved successfully!');
-        if (activeTab === 'summary') fetchSummary();
+        if (activeTab === 'summary') fetchSummary(); 
       } else {
         alert('Failed to save plan: ' + result.detail);
       }
     } catch (error) {
       console.error('Error saving plan:', error);
-      alert('Error saving plan. Check console.');
     }
     setIsSavingPlan(false);
   };
@@ -197,30 +195,6 @@ const SHOScheduling = () => {
         prev.includes(blockKey) ? prev.filter(k => k !== blockKey) : [...prev, blockKey]
       );
     }
-  };
-
-  // Safe fallback to resolve dictionary data keys returned from different backends
-  const getScheduleSectionData = (key) => {
-    if (!scheduleData) return [];
-    if (scheduleData[key]) return scheduleData[key];
-    
-    const lowerKey = key.toLowerCase();
-    for (const k of Object.keys(scheduleData)) {
-      const lk = k.toLowerCase();
-      if (lk === lowerKey || lk.includes(lowerKey) || lowerKey.includes(lk)) {
-        return scheduleData[k];
-      }
-    }
-    if (key === 'heat_treatment') {
-      return scheduleData.ht || scheduleData.HT || scheduleData.furnace || [];
-    }
-    if (key === 'face_grinding') {
-      return scheduleData.face || scheduleData.FACE || [];
-    }
-    if (key === 'od_grinding') {
-      return scheduleData.od || scheduleData.OD || [];
-    }
-    return [];
   };
 
   // -- RENDERERS --
@@ -283,90 +257,57 @@ const SHOScheduling = () => {
   };
 
   const renderScheduleGrid = (title, dataKey, machineKey) => {
-    const sectionData = getScheduleSectionData(dataKey);
-    const isFurnace = machineKey === 'furnace';
+    if (!scheduleData || !scheduleData[dataKey]) return null;
+    
+    // Filter out machines that have NO scheduled rows so they don't appear as empty blocks
+    const validMachines = scheduleData[dataKey].filter(m => m.rows && m.rows.length > 0);
+    
+    if (validMachines.length === 0) return null;
 
     return (
       <div className="schedule-column">
+        <div className="col-main-title border-thick-bottom border-thick-right font-bold">{title}</div>
         <table className="img-table sticky-header-table">
           <thead>
             <tr className="sticky-row-1">
-              <th colSpan={isFurnace ? 4 : 5} className="col-main-title font-bold">
-                {title}
-              </th>
-            </tr>
-            <tr className="sticky-row-2">
-              {isFurnace ? (
+              {machineKey === 'furnace' ? (
                 <>
                   <th style={{ width: '40%' }}>Furnace</th>
-                  <th style={{ width: '25%' }}>Part/Fam</th>
+                  <th style={{ width: '20%' }}>Part/Fam</th>
                   <th style={{ width: '15%' }}>Qty</th>
-                  <th style={{ width: '20%' }}>Timing</th>
+                  <th style={{ width: '25%' }}>Timing</th>
                 </>
               ) : (
                 <>
                   <th style={{ width: '25%' }}>Machine</th>
-                  <th style={{ width: '25%' }}>Part/Fam</th>
-                  <th style={{ width: '15%' }}>Channel</th>
+                  <th style={{ width: '20%' }}>Part/Fam</th>
+                  <th style={{ width: '20%' }}>Channel</th>
                   <th style={{ width: '15%' }}>Qty</th>
                   <th style={{ width: '20%' }}>Timing</th>
-                </>
-              )}
-            </tr>
-            <tr className="sticky-row-3 sub-header">
-              {isFurnace ? (
-                <>
-                  <th>ID</th>
-                  <th>Family Group</th>
-                  <th>Total Pcs</th>
-                  <th>Cycle Hrs</th>
-                </>
-              ) : (
-                <>
-                  <th>Code</th>
-                  <th>Specification</th>
-                  <th>Line No</th>
-                  <th>Output</th>
-                  <th>Shift Time</th>
                 </>
               )}
             </tr>
           </thead>
           <tbody>
-            {sectionData.length === 0 ? (
-              <tr>
-                <td colSpan={isFurnace ? 4 : 5} style={{ padding: '15px', color: '#888', fontStyle: 'italic' }}>
-                  No active production scheduled.
-                </td>
-              </tr>
-            ) : (
-              sectionData.map((m_data, m_idx) => {
-                const rows = m_data.rows || m_data.items || (Array.isArray(m_data) ? m_data : []);
-                const machineName = m_data[machineKey] || m_data.machine || m_data.furnace || m_data.name || `Machine ${m_idx + 1}`;
-                
-                return (
-                  <React.Fragment key={m_idx}>
-                    {/* Aligns directly with `.machine-name-row td` CSS mapping */}
-                    <tr className="machine-name-row">
-                      <td colSpan={isFurnace ? 4 : 5}>
-                        {machineName} {m_data.capacity ? `(${m_data.capacity})` : ''}
-                      </td>
-                    </tr>
-                    {rows.map((row, r_idx) => (
-                      <tr key={r_idx}>
-                        <td className="part-name">{row.part || row.part_name || '-'}</td>
-                        {!isFurnace && <td className="center-text">{row.channel || row.line || '-'}</td>}
-                        <td className="center-text text-blue">
-                          {row.qty || row.quantity || 0}
-                          {row.rate && <div style={{ fontSize: '10px', color: '#666', fontWeight: 'normal' }}>{row.rate}</div>}
-                        </td>
-                        <td className="center-text">{row.timing || row.time || '-'}</td>
-                      </tr>
-                    ))}
-                  </React.Fragment>
-                );
-              })
-            )}
+            {validMachines.map((m_data, m_idx) => (
+              m_data.rows.map((row, r_idx) => (
+                <tr key={`${m_idx}-${r_idx}`}>
+                  {r_idx === 0 && (
+                    <td rowSpan={m_data.rows.length} className="machine-name-row font-bold text-blue">
+                      {m_data[machineKey]}
+                      {m_data.capacity && <div style={{ fontSize: '10px', color: '#666', marginTop: '4px' }}>{m_data.capacity}</div>}
+                    </td>
+                  )}
+                  <td className="part-name">{row.part}</td>
+                  {machineKey !== 'furnace' && <td className="center-text">{row.channel}</td>}
+                  <td className="center-text text-blue">
+                    {row.qty}
+                    <div style={{ fontSize: '10px', color: '#666' }}>{row.rate}</div>
+                  </td>
+                  <td className="center-text">{row.timing}</td>
+                </tr>
+              ))
+            ))}
           </tbody>
         </table>
       </div>
@@ -414,7 +355,7 @@ const SHOScheduling = () => {
       {activeTab === 'availability' && (
         <div style={{ background: 'white', padding: '20px', borderRadius: '4px', border: '1px solid #aaa', flexGrow: 1, overflow: 'auto' }}>
           <h2 style={{ color: '#004085', marginTop: 0 }}>Log Machine Unavailability (Hours)</h2>
-          <p style={{ color: '#555', fontSize: '14px', marginBottom: '20px' }}>Enter the number of hours a machine is NOT available today. Leave blank if fully available.</p>
+          <p style={{ color: '#555', fontSize: '14px', marginBottom: '20px' }}>Enter the number of hours a machine is NOT available today (e.g., maintenance, breakdowns). Leave blank if fully available.</p>
           
           {isLoadingMachines ? (
             <div style={{ padding: '20px', fontWeight: 'bold' }}>Loading Master Machines...</div>
@@ -500,7 +441,7 @@ const SHOScheduling = () => {
                 <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
               </div>
               <button className="btn-save" style={{ marginLeft: '0' }} onClick={generatePlan} disabled={isLoadingPlan}>
-                {isLoadingPlan ? 'Generating Plan...' : 'Generate Master Plan'}
+                {isLoadingPlan ? 'Generating...' : 'Generate Master Plan'}
               </button>
             </div>
             
@@ -516,10 +457,10 @@ const SHOScheduling = () => {
             </div>
 
             {isLoadingPlan ? (
-              <div style={{ padding: '40px', textAlign: 'center', fontWeight: 'bold', fontSize: '16px', color: '#004085' }}>
-                Calculating optimization variables and processing sequences... Please wait.
+              <div style={{ padding: '40px', textAlign: 'center', color: '#004085', fontWeight: 'bold', fontSize: '18px' }}>
+                Fetching Master Production Data and Generating the schedule... Please wait.
               </div>
-            ) : (
+            ) : scheduleData ? (
               <>
                 <div className="schedule-grid-wrapper">
                   {renderScheduleGrid('FACE GRINDING', 'face_grinding', 'machine')}
@@ -527,7 +468,7 @@ const SHOScheduling = () => {
                   {renderScheduleGrid('HEAT TREATMENT', 'heat_treatment', 'furnace')}
                 </div>
 
-                {scheduleData?.unscheduled && scheduleData.unscheduled.length > 0 && (
+                {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
                   <div style={{ padding: '15px', borderTop: '3px solid #0056b3' }}>
                       <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data)</h3>
                       <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
@@ -551,6 +492,8 @@ const SHOScheduling = () => {
                   </div>
                 )}
               </>
+            ) : (
+               <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>Click "Generate Master Plan" to create the schedule.</div>
             )}
           </div>
         </>

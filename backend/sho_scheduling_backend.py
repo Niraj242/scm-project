@@ -4,7 +4,6 @@ import math
 import pandas as pd
 import requests
 import io
-import gc
 import json
 import time
 from datetime import datetime, timedelta
@@ -40,7 +39,7 @@ HARDCODED_PROCESS_FLEXIBILITY = {
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
-FURNACE_SPECS = {} # Issue 12: Will be loaded dynamically now
+FURNACE_SPECS = {}
 
 def load_monthly_tracking():
     if os.path.exists(MONTHLY_FILE):
@@ -84,7 +83,6 @@ def get_monthly_tracking():
 
 @router.post("/api/save_plan")
 def save_plan(payload: SavePlanRequest):
-    # Issue 7: Save Daily Plan Implemented
     try:
         with open(SAVED_PLAN_FILE, "w") as f:
             json.dump(payload.dict(), f)
@@ -113,11 +111,9 @@ def is_invalid_part(raw_text):
     return False
 
 def get_lookup_variants(raw_text, p_code=None):
-    # Issue 1: "CHECK PART NUMBER" BUG Fix
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
     
-    # Strip hidden chars and zero-width spaces causing matching failures
     t = re.sub(r'[\u200b\u200c\u200d\uFEFF]', '', t)
     
     if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
@@ -147,7 +143,7 @@ def get_lookup_variants(raw_text, p_code=None):
     t_nosuff = t_nosuff.strip()
     t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
     
-    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM']
+    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM', 'FACE', 'OD', 'HT']
     t_nopfx = t_clean
     found_prefix = ""
     for pfx in prefixes_to_strip:
@@ -169,6 +165,10 @@ def get_display_name(raw_text):
     if pd.isna(raw_text): return ""
     t = str(raw_text).strip().upper()
     if t.startswith("MF"): t = t[2:].strip()
+    # Strip leading FACE/OD/HT artifacts from display name
+    for pfx in ['FACE ', 'OD ', 'HT ', 'FACE', 'OD', 'HT']:
+        if t.startswith(pfx):
+            t = t[len(pfx):].strip()
     return t
 
 def safe_float(val):
@@ -219,7 +219,6 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
         if now - cache_time < CACHE_TTL:
             return df_dict, [f"Loaded {file_label} from ultra-fast cache."]
     try:
-        # Issue 4: PERFORMANCE - Use cache properly and high timeout for big sheets
         resp = requests.get(url, timeout=180)
         if resp.status_code != 200: 
             raise Exception(f"HTTP {resp.status_code}")
@@ -231,7 +230,6 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
         raise Exception(f"Failed to load {file_label} Excel sheet: {str(e)}")
 
 def get_rate_for_part(display_name, p_code, rates, res_id=""):
-    # Issue 2: MACHINE RATE NOT FOUND - More robust dictionary lookup
     key = (display_name, p_code, res_id)
     if key in RATE_CACHE: return RATE_CACHE[key]
     
@@ -248,6 +246,15 @@ def get_rate_for_part(display_name, p_code, rates, res_id=""):
         if robust_key in robust_rates:
             RATE_CACHE[key] = robust_rates[robust_key]
             return RATE_CACHE[key]
+            
+    # Aggressive fallback matching
+    for rk, rv in robust_rates.items():
+        base_rk = rk.split('_')[0] if '_' in rk else rk
+        for var in variants:
+            if var in base_rk or base_rk in var:
+                if f"_{p_code}" in rk or p_code in rk:
+                    RATE_CACHE[key] = rv
+                    return rv
             
     RATE_CACHE[key] = 0.0
     return 0.0
@@ -320,6 +327,9 @@ class Resource:
         self.type = r_type
         self.ready_time = 0.0
         self.max_time = 24.0
+        self.bd_start = 0.0
+        self.bd_end = 0.0
+        self.has_bd = False
         self.last_fam = None
         self.last_pc = None  
         self.blocked = False
@@ -330,7 +340,6 @@ def parse_master_production_data():
     sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
     machines_data = {'FACE': {}, 'OD': {}}
     
-    # Issue 12: MACHINE AVAILABILITY - Load furnaces dynamically
     global FURNACE_SPECS
     FURNACE_SPECS.clear()
 
@@ -357,7 +366,6 @@ def parse_master_production_data():
                         elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand:
                             machines_data['OD'][m_cand] = True
                             
-    # Fallback if no furnace sheet is found properly
     if not FURNACE_SPECS:
         FURNACE_SPECS = {
             "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
@@ -420,11 +428,9 @@ def generate_summary(payload: ScheduleRequest):
                                 
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
-                        # Issue 8: MONTHLY REQUIREMENT - strictly digits representing 1-31 dates
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
-                            
-                            s_val = str(val).strip()
+                            s_val = str(val).replace('.0', '').strip()
                             if s_val.isdigit() and 1 <= int(s_val) <= 31:
                                 monthly_cols.append(j)
                     
@@ -456,18 +462,29 @@ def generate_summary(payload: ScheduleRequest):
                             channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
                             channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
 
+        saved_plan = load_saved_plan()
+        t_prod_map = {}
+        if saved_plan.get("date") == payload.date:
+            for s_key in ["od_grinding", "face_grinding", "heat_treatment"]:
+                for m in saved_plan.get("plan", {}).get(s_key, []):
+                    for r in m.get("rows", []):
+                        if r.get("is_terminal"):
+                            p = r.get("part", "").split("-")[0].split(" ")[0]
+                            t_prod_map[p] = t_prod_map.get(p, 0) + safe_float(r.get("qty", 0))
+
         for disp_name, data in monthly_data.get(month_str, {}).items():
             ch = data.get("channel", "Unknown")
             mo_req = data.get("total_req", 0)
             mtd_prod = data.get("produced", 0)
             d1_data = channel_demands_day1.get(disp_name, {})
             d1_req = max(d1_data.get("IR", 0), d1_data.get("OR", 0))
+            t_prod = t_prod_map.get(disp_name, 0)
             
             summary_list.append({
-                "type": disp_name, "channel": ch, "monthly_req": int(mo_req), "today_req": int(d1_req), "today_prod": 0,
+                "type": disp_name, "channel": ch, "monthly_req": int(mo_req), "today_req": int(d1_req), "today_prod": int(t_prod),
                 "mtd_prod": int(mtd_prod), "balance": int(mo_req - mtd_prod),
                 "remaining_pct": round(((mo_req - mtd_prod) / mo_req * 100), 1) if mo_req > 0 else 0,
-                "difference": int(0 - d1_req)
+                "difference": int(t_prod - d1_req)
             })
             
         return {"status": "success", "data": summary_list}
@@ -528,12 +545,11 @@ def generate_schedule(payload: ScheduleRequest):
                                 
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
-                        # Issue 8: Month column check logic
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
                             if is_target_date(val, day_2): c2_col = j
                             
-                            s_val = str(val).strip()
+                            s_val = str(val).replace('.0', '').strip()
                             if s_val.isdigit() and 1 <= int(s_val) <= 31:
                                 monthly_cols.append(j)
                         
@@ -919,30 +935,21 @@ def generate_schedule(payload: ScheduleRequest):
         for res in resources:
             conf = avail_dict.get(res.id, {})
             if conf:
-                if not conf.get('enabled', True) or conf.get('off_whole_day', False): res.blocked = True
+                if not conf.get('enabled', True) or conf.get('off_whole_day', False): 
+                    res.blocked = True
                 else:
                     st_str = conf.get('start_time', '')
                     et_str = conf.get('end_time', '')
-                    if st_str:
-                        st_flt = time_str_to_float(st_str)
-                        if st_flt > res.ready_time: res.ready_time = st_flt
-                    if et_str: res.max_time = time_str_to_float(et_str)
+                    if st_str and et_str:
+                        res.has_bd = True
+                        res.bd_start = time_str_to_float(st_str)
+                        res.bd_end = time_str_to_float(et_str)
 
-        # Issue 6 & 9: Strict loop logic enforcing Day-1 finishes before Day-2 except for identical part batches
         for target_day in [0, 1]:
             while True:
-                # Include Day-2 items IF they match current machine state to avoid setup, otherwise strictly stick to Day-1
-                active_items = []
-                for i in work_items:
-                    if i.qty > 0.01 and i.ready_time < 24.0:
-                        if i.day_idx == target_day:
-                            active_items.append(i)
-                        elif target_day == 0 and i.day_idx == 1:
-                            # Batch logic for Day 2 items if setup=0 (Same disp and same pc)
-                            active_items.append(i)
-
-                if not any(i.day_idx == target_day for i in active_items): 
-                    break # Only Day-2 left or empty
+                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < 24.0 and i.day_idx == target_day]
+                if not active_items: 
+                    break 
                     
                 best_pair = None
                 best_key = (float('inf'), float('inf'), float('-inf'))
@@ -964,26 +971,29 @@ def generate_schedule(payload: ScheduleRequest):
                         setup = 0.5 if res.type == 'HT' else 2.0
                         if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                         
-                        # Prevent Day-2 skipping the queue unless setup is exactly 0
-                        if target_day == 0 and item.day_idx == 1 and setup > 0:
-                            continue
-                            
                         start_time = max(res.ready_time + setup, item.ready_time)
                         if start_time >= getattr(res, 'max_time', 24.0): continue
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         
-                        # Priority: Earliest start, Highest priority score
                         key = (start_time, -item.priority)
                         if key < best_key:
                             best_key = key
                             best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
-                if not best_pair: break
+                            
+                if not best_pair: 
+                    for i in active_items: i.qty = 0
+                    break
+                    
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
                 if res.type == 'HT':
                     weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
                     actual_time = (item.qty * weight) / rate_or_cap
                     chunk_qty = item.qty
+                    
+                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
+                        actual_time += (res.bd_end - max(start_time, res.bd_start))
+                        
                     res_ready_time = start_time + actual_time + 0.5
                     out_time = start_time + actual_time + 3.5
                     display_rate = f"{round((item.qty * weight), 1)} kg"
@@ -992,6 +1002,10 @@ def generate_schedule(payload: ScheduleRequest):
                     chunk_qty = item.qty
                     if chunk_qty <= 0.01: res.blocked = True; continue
                     actual_time = chunk_qty / rate_or_cap
+                    
+                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
+                        actual_time += (res.bd_end - max(start_time, res.bd_start))
+                        
                     res_ready_time = start_time + actual_time
                     out_time = res_ready_time
                     display_rate = rate_or_cap
@@ -1026,7 +1040,6 @@ def generate_schedule(payload: ScheduleRequest):
                     timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
                     day_label = " (D2)" if item.day_idx == 1 else " (D1)"
                     
-                    # Log terminal step data cleanly
                     is_terminal = False
                     if res.type == 'OD': is_terminal = True
                     elif res.type == 'FACE' and not item.flex['OD']: is_terminal = True
@@ -1062,7 +1075,6 @@ def generate_schedule(payload: ScheduleRequest):
             elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})
             for row in r.rows:
-                # Issue 3: Final output logic (Only add if it's the actual terminal point for the part)
                 if row.get("is_terminal"):
                     part_str = row.get("part", "")
                     qty = float(row.get("qty", 0)) if str(row.get("qty", 0)).replace('.','',1).isdigit() else 0

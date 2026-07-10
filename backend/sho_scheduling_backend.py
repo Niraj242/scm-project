@@ -556,7 +556,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 monthly_cols.append(j)
                         
                     if r_idx is not None and type_col_idx is not None: break
-                    if r_idx is not None and type_col_idx is not None:
+                if r_idx is not None and type_col_idx is not None:
                     last_mf = ""
                     for idx in range(r_idx + 1, len(df_zero)):
                         mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""

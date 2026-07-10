@@ -1,36 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
-// Ensure this matches your deployment URL
 const API_BASE = 'https://scm-backend-pshv.onrender.com';
 
 const SHOScheduling = () => {
   const [activeTab, setActiveTab] = useState('buffer'); 
   
-  // Tab 1: Buffer State
   const [sector, setSector] = useState('DGBB');
   const [bufferDate, setBufferDate] = useState(new Date().toISOString().split('T')[0]);
   const [unitMode, setUnitMode] = useState('Days');
   const [tableData, setTableData] = useState({});
   const [unlockedBlocks, setUnlockedBlocks] = useState([]);
   
-  // Tab 3: Schedule State
   const [scheduleDate, setScheduleDate] = useState(new Date().toISOString().split('T')[0]);
   const [scheduleData, setScheduleData] = useState(null);
   const [isLoadingPlan, setIsLoadingPlan] = useState(false);
   const [isSavingPlan, setIsSavingPlan] = useState(false);
 
-  // Tab 4: Summary State
   const [summaryDate, setSummaryDate] = useState(new Date().toISOString().split('T')[0]);
   const [summaryData, setSummaryData] = useState([]);
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
 
-  // Tab 2: Machine Availability State
   const [machineAvailability, setMachineAvailability] = useState({});
   const [machinesList, setMachinesList] = useState([]);
   const [isLoadingMachines, setIsLoadingMachines] = useState(false);
 
-  // -- CONSTANTS --
   const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
     TRB: ['T 1', 'T 2', 'T 3', 'T 4', 'T 5', 'T 6', 'T 7', 'T 8', 'T 9', 'T10'],
@@ -43,17 +37,12 @@ const SHOScheduling = () => {
     'T 6': { 'IR': ['FACE', 'OD'], 'OR': ['FACE', 'OD'] }
   };
 
-  // -- EFFECTS --
   useEffect(() => {
     if (activeTab === 'availability' && machinesList.length === 0) {
       fetchMachines();
     }
-    if (activeTab === 'summary' && summaryData.length === 0) {
-      fetchSummary();
-    }
   }, [activeTab]);
 
-  // -- API CALLS --
   const fetchMachines = async () => {
     setIsLoadingMachines(true);
     try {
@@ -89,8 +78,6 @@ const SHOScheduling = () => {
       const result = await response.json();
       if (result.status === 'success') {
         setSummaryData(result.data || []);
-      } else {
-        alert('Failed to generate summary: ' + result.detail);
       }
     } catch (error) {
       console.error('Error fetching summary:', error);
@@ -100,7 +87,6 @@ const SHOScheduling = () => {
 
   const generatePlan = async () => {
     setIsLoadingPlan(true);
-    setScheduleData(null); // Clear old data to show proper loading
     try {
       const payload = {
         sector,
@@ -120,8 +106,6 @@ const SHOScheduling = () => {
       const result = await response.json();
       if (result.status === 'success') {
         setScheduleData(result.data);
-      } else {
-        alert('Failed to generate plan: ' + result.detail);
       }
     } catch (error) {
       console.error('Error generating plan:', error);
@@ -147,9 +131,6 @@ const SHOScheduling = () => {
       const result = await response.json();
       if (result.status === 'success') {
         alert('Daily plan saved successfully!');
-        if (activeTab === 'summary') fetchSummary(); 
-      } else {
-        alert('Failed to save plan: ' + result.detail);
       }
     } catch (error) {
       console.error('Error saving plan:', error);
@@ -157,7 +138,6 @@ const SHOScheduling = () => {
     setIsSavingPlan(false);
   };
 
-  // -- HANDLERS --
   const handleBufferChange = (col, stage, side, val) => {
     const key = `${col}_${stage}_${side}`;
     setTableData(prev => ({
@@ -197,7 +177,7 @@ const SHOScheduling = () => {
     }
   };
 
-  // -- RENDERERS --
+  // --- YOUR EXACT ORIGINAL RENDER GRIDS ---
   const renderBufferGrid = () => {
     const cols = SECTOR_COLUMNS[sector] || [];
     return (
@@ -257,13 +237,7 @@ const SHOScheduling = () => {
   };
 
   const renderScheduleGrid = (title, dataKey, machineKey) => {
-    if (!scheduleData || !scheduleData[dataKey]) return null;
-    
-    // Filter out machines that have NO scheduled rows so they don't appear as empty blocks
-    const validMachines = scheduleData[dataKey].filter(m => m.rows && m.rows.length > 0);
-    
-    if (validMachines.length === 0) return null;
-
+    if (!scheduleData || !scheduleData[dataKey] || scheduleData[dataKey].length === 0) return null;
     return (
       <div className="schedule-column">
         <div className="col-main-title border-thick-bottom border-thick-right font-bold">{title}</div>
@@ -289,8 +263,9 @@ const SHOScheduling = () => {
             </tr>
           </thead>
           <tbody>
-            {validMachines.map((m_data, m_idx) => (
-              m_data.rows.map((row, r_idx) => (
+            {scheduleData[dataKey].map((m_data, m_idx) => {
+              if (!m_data.rows || m_data.rows.length === 0) return null;
+              return m_data.rows.map((row, r_idx) => (
                 <tr key={`${m_idx}-${r_idx}`}>
                   {r_idx === 0 && (
                     <td rowSpan={m_data.rows.length} className="machine-name-row font-bold text-blue">
@@ -306,8 +281,8 @@ const SHOScheduling = () => {
                   </td>
                   <td className="center-text">{row.timing}</td>
                 </tr>
-              ))
-            ))}
+              ));
+            })}
           </tbody>
         </table>
       </div>
@@ -355,7 +330,7 @@ const SHOScheduling = () => {
       {activeTab === 'availability' && (
         <div style={{ background: 'white', padding: '20px', borderRadius: '4px', border: '1px solid #aaa', flexGrow: 1, overflow: 'auto' }}>
           <h2 style={{ color: '#004085', marginTop: 0 }}>Log Machine Unavailability (Hours)</h2>
-          <p style={{ color: '#555', fontSize: '14px', marginBottom: '20px' }}>Enter the number of hours a machine is NOT available today (e.g., maintenance, breakdowns). Leave blank if fully available.</p>
+          <p style={{ color: '#555', fontSize: '14px', marginBottom: '20px' }}>Enter the number of hours a machine is NOT available today. Leave blank if fully available.</p>
           
           {isLoadingMachines ? (
             <div style={{ padding: '20px', fontWeight: 'bold' }}>Loading Master Machines...</div>
@@ -450,52 +425,44 @@ const SHOScheduling = () => {
             </button>
           </div>
 
-          <div className="table-scroll-container image-layout-container">
-            <div className="schedule-master-header">
-              <div>SHO DAILY MASTER PRODUCTION PLAN</div>
-              <div>DATE: {scheduleDate.split('-').reverse().join('-')}</div>
-            </div>
-
-            {isLoadingPlan ? (
-              <div style={{ padding: '40px', textAlign: 'center', color: '#004085', fontWeight: 'bold', fontSize: '18px' }}>
-                Fetching Master Production Data and Generating the schedule... Please wait.
+          {scheduleData && (
+            <div className="table-scroll-container image-layout-container">
+              <div className="schedule-master-header">
+                <div>SHO DAILY MASTER PRODUCTION PLAN</div>
+                <div>DATE: {scheduleDate.split('-').reverse().join('-')}</div>
               </div>
-            ) : scheduleData ? (
-              <>
-                <div className="schedule-grid-wrapper">
-                  {renderScheduleGrid('FACE GRINDING', 'face_grinding', 'machine')}
-                  {renderScheduleGrid('OD GRINDING', 'od_grinding', 'machine')}
-                  {renderScheduleGrid('HEAT TREATMENT', 'heat_treatment', 'furnace')}
-                </div>
 
-                {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
-                  <div style={{ padding: '15px', borderTop: '3px solid #0056b3' }}>
-                      <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data)</h3>
-                      <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
-                          <thead>
-                              <tr style={{ backgroundColor: '#ffe5e5' }}>
-                                  <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Stage</th>
-                                  <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Part</th>
-                                  <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Missed Boxes / Status</th>
-                              </tr>
-                          </thead>
-                          <tbody>
-                              {scheduleData.unscheduled.map((item, idx) => (
-                                  <tr key={idx}>
-                                      <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
-                                      <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
-                                      <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>{item.missed_boxes}</td>
-                                  </tr>
-                              ))}
-                          </tbody>
-                      </table>
-                  </div>
-                )}
-              </>
-            ) : (
-               <div style={{ padding: '40px', textAlign: 'center', color: '#666' }}>Click "Generate Master Plan" to create the schedule.</div>
-            )}
-          </div>
+              <div className="schedule-grid-wrapper">
+                {renderScheduleGrid('FACE GRINDING', 'face_grinding', 'machine')}
+                {renderScheduleGrid('OD GRINDING', 'od_grinding', 'machine')}
+                {renderScheduleGrid('HEAT TREATMENT', 'heat_treatment', 'furnace')}
+              </div>
+
+              {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
+                <div style={{ padding: '15px', borderTop: '3px solid #0056b3' }}>
+                    <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data)</h3>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
+                        <thead>
+                            <tr style={{ backgroundColor: '#ffe5e5' }}>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Stage</th>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Part</th>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Missed Boxes / Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {scheduleData.unscheduled.map((item, idx) => (
+                                <tr key={idx}>
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>{item.missed_boxes}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

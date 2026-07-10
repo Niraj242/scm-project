@@ -23,7 +23,7 @@ CACHE_TTL = 3600
 
 PARSED_MASTER_DATA = {
     "box_matrix": ({}, 0),  
-    "production": ({}, {}, {}, {}, 0) 
+    "production": ({}, {}, {}, {}, {}, {}, 0) 
 }
 
 MONTHLY_FILE = "monthly_tracking.json"
@@ -36,11 +36,10 @@ HARDCODED_PROCESS_FLEXIBILITY = {
     }
 }
 
-# --- GLOBAL MEMOIZATION FOR SPEED ---
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
-FURNACE_SPECS = {} # Issue 12: Will be loaded dynamically now
+FURNACE_SPECS = {} 
 
 def load_monthly_tracking():
     if os.path.exists(MONTHLY_FILE):
@@ -53,7 +52,7 @@ def save_monthly_tracking(data):
     try:
         with open(MONTHLY_FILE, 'w') as f: json.dump(data, f)
     except Exception as e:
-        print(f"Error saving monthly tracking: {e}")
+        pass
 
 def load_saved_plan():
     if os.path.exists(SAVED_PLAN_FILE):
@@ -78,13 +77,8 @@ class SavePlanRequest(BaseModel):
 def health_check():
     return {"status": "ok"}
 
-@router.get("/api/monthly_tracking")
-def get_monthly_tracking():
-    return load_monthly_tracking()
-
 @router.post("/api/save_plan")
 def save_plan(payload: SavePlanRequest):
-    # Issue 7: Save Daily Plan Implemented
     try:
         with open(SAVED_PLAN_FILE, "w") as f:
             json.dump(payload.dict(), f)
@@ -113,11 +107,8 @@ def is_invalid_part(raw_text):
     return False
 
 def get_lookup_variants(raw_text, p_code=None):
-    # Issue 1: "CHECK PART NUMBER" BUG Fix - SAFE FUZZY MATCHER
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
-    
-    # Strip hidden chars and zero-width spaces causing matching failures
     t = re.sub(r'[\u200b\u200c\u200d\uFEFF]', '', t)
     
     if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
@@ -132,7 +123,6 @@ def get_lookup_variants(raw_text, p_code=None):
     elif '/' in t:
         if not any(x in parts[1] for x in ['Q', 'X']): t = parts[0].strip()
 
-    # Safely strip exact suffixes only (Prevents 3212 matching 33212)
     suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q', 'LM', 'M']
     t_nosuff = t
     changed = True
@@ -148,7 +138,6 @@ def get_lookup_variants(raw_text, p_code=None):
     t_nosuff = t_nosuff.strip()
     t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
     
-    # Clean leading stage artifacts if present
     prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM', 'FACE ', 'OD ', 'HT ', 'FACE', 'OD', 'HT']
     t_nopfx = t_clean
     found_prefix = ""
@@ -171,7 +160,6 @@ def get_display_name(raw_text):
     if pd.isna(raw_text): return ""
     t = str(raw_text).strip().upper()
     if t.startswith("MF"): t = t[2:].strip()
-    # Strip stage artifacts for clean display
     for pfx in ['FACE ', 'OD ', 'HT ', 'FACE', 'OD', 'HT']:
         if t.startswith(pfx): t = t[len(pfx):].strip()
     return t
@@ -222,9 +210,8 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
     if url in EXCEL_CACHE:
         cache_time, df_dict = EXCEL_CACHE[url]
         if now - cache_time < CACHE_TTL:
-            return df_dict, [f"Loaded {file_label} from ultra-fast cache."]
+            return df_dict, logs
     try:
-        # Issue 4: PERFORMANCE - Use cache properly and high timeout for big sheets
         resp = requests.get(url, timeout=180)
         if resp.status_code != 200: 
             raise Exception(f"HTTP {resp.status_code}")
@@ -259,26 +246,22 @@ def get_rate_for_part(display_name, p_code, rates, res_id=""):
 def get_weight_for_part(display_name, p_code, weights):
     key = (display_name, p_code)
     if key in WEIGHT_CACHE: return WEIGHT_CACHE[key]
-    
     variants = get_lookup_variants(display_name, p_code)
     for var in variants:
         if f"{var}_{p_code}" in weights: 
             WEIGHT_CACHE[key] = weights[f"{var}_{p_code}"]
             return WEIGHT_CACHE[key]
-            
     WEIGHT_CACHE[key] = None
     return None
 
 def get_furnaces_for_part(display_name, p_code, furnace_map):
     key = (display_name, p_code)
     if key in FURNACE_CACHE: return FURNACE_CACHE[key]
-    
     variants = get_lookup_variants(display_name, p_code)
     for var in variants:
         if f"{var}_{p_code}" in furnace_map: 
             FURNACE_CACHE[key] = furnace_map[f"{var}_{p_code}"]
             return FURNACE_CACHE[key]
-            
     default_f = list(FURNACE_SPECS.keys())
     FURNACE_CACHE[key] = default_f
     return default_f
@@ -329,18 +312,21 @@ class Resource:
         self.has_bd = False
         self.bd_start = 0.0
         self.bd_end = 0.0
+        self.blocked = False
 
 def parse_master_production_data():
     global FURNACE_SPECS
     now = time.time()
     cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
-    if PARSED_MASTER_DATA["production"][4] == cache_ts and cache_ts > 0:
+    if PARSED_MASTER_DATA["production"][-1] == cache_ts and cache_ts > 0:
         return PARSED_MASTER_DATA["production"]
 
     sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "MASTER")
-    if not sheets_prod: return {'FACE': {}, 'OD': {}, 'FURNACE': {}, 'WEIGHTS': {}, 'PROCESS_FLEX': {}}
+    if not sheets_prod: return {'FACE': {}, 'OD': {}, 'FURNACE': {}, 'WEIGHTS': {}, 'PROCESS_FLEX': {}, 'FACE_MACHINES': [], 'OD_MACHINES': []}
     
     face_rates, od_rates, furnace_map, weights_map, flex_map = {}, {}, {}, {}, {}
+    face_mach_names = set()
+    od_mach_names = set()
     
     for sheet_name, df_p in sheets_prod.items():
         sn_upper = str(sheet_name).strip().upper()
@@ -358,19 +344,20 @@ def parse_master_production_data():
             elif col_val == "WEIGHT(KG)": weight_col = c
             elif col_val == "HEAT TREATMENT FURNACE": furn_col = c
             elif col_val == "HR/RINGS": hr_col = c
-            elif "MACHINE" in col_val and col_val not in ["NAN", "NONE", ""]:
-                mach_cols[c] = col_val
+            elif "MACHINE" in col_val or "CH" in col_val or " T " in col_val or "HUB" in col_val:
+                if col_val not in ["NAN", "NONE", "", "PART NO", "IR / OR", "P/C", "WEIGHT(KG)", "HR/RINGS"]:
+                    mach_cols[c] = col_val
+                    if "FACE" in sn_upper: face_mach_names.add(col_val)
+                    if "OD" in sn_upper: od_mach_names.add(col_val)
 
         if furn_col != -1 and "HT" in sn_upper:
-            # Issue 12: Dynamic Furnace Discovery
             for r_idx in range(1, len(df_p)):
                 val = str(df_p.iloc[r_idx, furn_col]).strip().upper()
                 if val and val not in ["NAN", "NONE"]:
-                    # Split comma separated furnaces to build the spec map
                     furnaces = [f.strip() for f in val.replace('/', ',').split(',')]
                     for f in furnaces:
                         if f and f not in FURNACE_SPECS:
-                            FURNACE_SPECS[f] = 250.0  # Default fallback capacity
+                            FURNACE_SPECS[f] = 250.0  
 
         for r_idx in range(1, len(df_p)):
             try:
@@ -407,14 +394,22 @@ def parse_master_production_data():
             except Exception as e:
                 continue
 
-    result = {'FACE': face_rates, 'OD': od_rates, 'FURNACE': furnace_map, 'WEIGHTS': weights_map, 'PROCESS_FLEX': flex_map, 4: cache_ts}
+    result = {
+        'FACE': face_rates, 
+        'OD': od_rates, 
+        'FURNACE': furnace_map, 
+        'WEIGHTS': weights_map, 
+        'PROCESS_FLEX': flex_map, 
+        'FACE_MACHINES': list(face_mach_names), 
+        'OD_MACHINES': list(od_mach_names),
+        7: cache_ts
+    }
     PARSED_MASTER_DATA["production"] = result
     return result
 
 @router.get("/api/furnaces")
 def get_furnaces():
     parse_master_production_data()
-    # Issue 12: Safely return dynamically captured furnaces from the master plan
     if not FURNACE_SPECS:
         return {
             "AICHELIN.(896)": 350.0,
@@ -428,7 +423,6 @@ def get_furnaces():
     machines_data = {}
     for f in FURNACE_SPECS.keys():
         machines_data[f] = 250.0
-    # Overwrite known specifically typed furnaces
     known = {
         "AICHELIN.(896)": 350.0,
         "CASTLINK FURNACE( 1018 )": 250.0,
@@ -446,13 +440,12 @@ def get_furnaces():
 def get_machines_list():
     try:
         data = parse_master_production_data()
-        all_machines = list(data['FACE'].keys()) + list(data['OD'].keys()) + list(FURNACE_SPECS.keys())
+        all_machines = data['FACE_MACHINES'] + data['OD_MACHINES'] + list(FURNACE_SPECS.keys())
         seen = set()
         unique_machines = [x for x in all_machines if not (x in seen or seen.add(x))]
         return {"status": "success", "data": unique_machines}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
 
 @router.post("/api/summary")
 def generate_summary(payload: ScheduleRequest):
@@ -549,15 +542,9 @@ def generate_summary(payload: ScheduleRequest):
         save_monthly_tracking(monthly_data)
         summary_list.sort(key=lambda x: x["channel"])
 
-        return {
-            "status": "success",
-            "date": req_date.strftime("%Y-%m-%d"),
-            "data": summary_list
-        }
+        return {"status": "success", "date": req_date.strftime("%Y-%m-%d"), "data": summary_list}
     except Exception as e:
-        import traceback
-        return {"status": "error", "detail": str(e), "trace": traceback.format_exc()}
-
+        return {"status": "error", "detail": str(e)}
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -575,12 +562,10 @@ def generate_schedule(payload: ScheduleRequest):
         if month_str not in monthly_data:
             monthly_data[month_str] = {}
 
-        # 1. PARSE ZEROSET
         channel_demands_day1 = {} 
         channel_demands_day2 = {}
         
         sheets_zero, logs1 = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
-        debug_logs.extend(logs1)
         
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
@@ -644,10 +629,8 @@ def generate_schedule(payload: ScheduleRequest):
                                 channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
                             channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2)
                             channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
-
         del sheets_zero 
         
-        # 2. PARSE BOX MATRIX 
         box_matrix = {}
         sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
         box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
@@ -682,7 +665,6 @@ def generate_schedule(payload: ScheduleRequest):
             PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
         del sheets_box
 
-        # 3. PARSE MASTER DATA 
         m_data = parse_master_production_data()
         face_rates = m_data['FACE']
         od_rates = m_data['OD']
@@ -690,10 +672,6 @@ def generate_schedule(payload: ScheduleRequest):
         weights_map = m_data['WEIGHTS']
         flex_map = m_data['PROCESS_FLEX']
 
-        def get_rate(disp, pc, mach_dict):
-            return get_rate_for_part(disp, pc, mach_dict)
-
-        # 4. PREPARE BUFFER LOGIC 
         in_out_buffers = {}
         for row_key, row_data in payload.entries.items():
             disp = row_data.get('disp')
@@ -743,23 +721,18 @@ def generate_schedule(payload: ScheduleRequest):
             rpb_ir = get_box_for_part(disp, 'IR', box_matrix, debug_logs, logged_rpb)
             used_ch_buf = apply_buf('CH', current_req, rpb_ir)
             current_req = max(0.0, current_req - used_ch_buf)
-            
-            if req_ir:
-                if current_req > 0:
-                    if disp not in o_req: o_req[disp] = {'IR': 0.0, 'OR': 0.0, 'channel': chan}
-                    o_req[disp]['IR'] = current_req
+            if req_ir and current_req > 0:
+                if disp not in o_req: o_req[disp] = {'IR': 0.0, 'OR': 0.0, 'channel': chan}
+                o_req[disp]['IR'] = current_req
                     
             current_req = req_od
             rpb_od = get_box_for_part(disp, 'OR', box_matrix, debug_logs, logged_rpb)
             used_ch_buf = apply_buf('CH', current_req, rpb_od)
             current_req = max(0.0, current_req - used_ch_buf)
-            
-            if req_od:
-                if current_req > 0:
-                    if disp not in o_req: o_req[disp] = {'IR': 0.0, 'OR': 0.0, 'channel': chan}
-                    o_req[disp]['OR'] = current_req
+            if req_od and current_req > 0:
+                if disp not in o_req: o_req[disp] = {'IR': 0.0, 'OR': 0.0, 'channel': chan}
+                o_req[disp]['OR'] = current_req
 
-        # 5. CREATE WORK ITEMS 
         work_items = []
         for disp, reqs in o_req.items():
             chan = reqs['channel']
@@ -779,19 +752,25 @@ def generate_schedule(payload: ScheduleRequest):
 
         work_items.sort(key=lambda x: (x.day_idx, x.priority))
 
-        # 6. INITIALIZE RESOURCES 
+        # IMPORTANT: Initialize resources properly using correct machine names
         resources = []
-        for f, cap in FURNACE_SPECS.items(): resources.append(Resource(f, 'HT', cap))
+        for f, cap in FURNACE_SPECS.items(): 
+            resources.append(Resource(f, 'HT', cap))
         
-        mach_list = set()
-        for k in face_rates.keys(): mach_list.add(k.split("_")[0])
-        for k in od_rates.keys(): mach_list.add(k.split("_")[0])
+        face_machs = m_data.get('FACE_MACHINES', [])
+        od_machs = m_data.get('OD_MACHINES', [])
         
-        for m in list(mach_list)[:15]:
+        # Fallback if machines weren't parsed clearly from headers
+        if not face_machs:
+            face_machs = ["CH01", "CH02", "CH03", "CH04", "CH05", "CH07", "CH08", "CH11", "SABB", "T1", "T2", "T3", "T4", "T5", "HUB1", "HUB2"]
+        if not od_machs:
+            od_machs = face_machs
+            
+        for m in face_machs:
             resources.append(Resource(f"{m} (F)", 'FACE', face_rates))
+        for m in od_machs:
             resources.append(Resource(f"{m} (O)", 'OD', od_rates))
 
-        # 7. APPLY PREVIOUS PLAN DATA 
         saved_plan = load_saved_plan()
         if saved_plan and saved_plan.get("date") == req_date.strftime("%Y-%m-%d"):
             plan_data = saved_plan.get("plan", {})
@@ -814,14 +793,12 @@ def generate_schedule(payload: ScheduleRequest):
                                         r.last_fam = parts_split[0]
                                     break
 
-        # 8. APPLY MACHINE UNAVAILABILITY 
         for m_id, m_hours in payload.machine_availability.items():
             for r in resources:
                 if r.id == m_id:
                     if m_hours >= 24: r.blocked = True
                     else: r.ready_time = max(r.ready_time, float(m_hours))
 
-        # 9. SCHEDULING LOGIC 
         for item in work_items:
             weight = get_weight_for_part(item.disp, item.pc, weights_map)
             rpb = get_box_for_part(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
@@ -856,7 +833,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 cap_kg = r.capacity_info
                                 r_rate = cap_kg / weight
                         else:
-                            r_rate = get_rate(item.disp, item.pc, r.capacity_info)
+                            r_rate = get_rate_for_part(item.disp, item.pc, r.capacity_info)
 
                         if r_rate > 0:
                             setup_time = 0.0 if r.last_fam == item.disp else 1.5
@@ -892,16 +869,11 @@ def generate_schedule(payload: ScheduleRequest):
                                 
                             actual_time += 3.5
                             display_rate = f"{round((item.qty * weight), 1)} kg"
-                            
-                            if item.disp in monthly_data.get(month_str, {}):
-                                monthly_data[month_str][item.disp]["produced"] += chunk_qty
                         else:
                             if chunk_qty <= 0.01:
                                 best_res.blocked = True
                                 continue
                             actual_time = chunk_qty / rate_or_cap
-                            if best_res.has_bd and start_time < best_res.bd_end and (start_time + actual_time) > best_res.bd_start:
-                                actual_time += (best_res.bd_end - max(start_time, best_res.bd_start))
                                 
                         res_ready_time = start_time + actual_time
                         best_res.ready_time = res_ready_time
@@ -932,13 +904,13 @@ def generate_schedule(payload: ScheduleRequest):
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
             day_label = "Day 2" if item.day_idx == 1 else "Day 1"
             
-            reason = "Capacity Exceeded"
+            reason = "Capacity Exceeded / No Machine Matched"
             if item.stage == 'HT' and get_weight_for_part(item.disp, item.pc, weights_map) is None:
                 reason = "Missing Weight Data"
             elif item.stage != 'HT':
-                if not any(get_rate(item.disp, item.pc, r.capacity_info) > 0 for r in resources if r.type == item.stage):
+                if not any(get_rate_for_part(item.disp, item.pc, r.capacity_info) > 0 for r in resources if r.type == item.stage):
                     reason = "Missing Machine Rate"
-                elif all(r.blocked for r in resources if r.type == item.stage and get_rate(item.disp, item.pc, r.capacity_info) > 0):
+                elif all(r.blocked for r in resources if r.type == item.stage and get_rate_for_part(item.disp, item.pc, r.capacity_info) > 0):
                     reason = "Exceeds Planning Window"
                     
             unscheduled.append({
@@ -952,6 +924,9 @@ def generate_schedule(payload: ScheduleRequest):
         furnaces_formatted = []
         
         for r in resources:
+            # ONLY add machines that actually had parts scheduled on them to avoid blank table blocks
+            if not r.rows: continue
+            
             if r.type == 'FACE': final_face.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})

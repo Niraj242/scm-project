@@ -82,7 +82,7 @@ const SHOScheduling = () => {
     }
   }, [sector, bufferDate]);
 
-  // Dynamically Fetch ALL Face & OD Machines from Production Sheet
+  // Dynamically Fetch ALL Face, OD & HT Machines from Production Sheet
   useEffect(() => {
     const fetchMachines = async () => {
       setIsLoadingMachines(true);
@@ -91,7 +91,7 @@ const SHOScheduling = () => {
         const result = await response.json();
         if (response.ok && result.status === 'success') {
           const loadedMachines = result.data.map(m => ({
-            id: m, machine: m, enabled: true, off_whole_day: false, start_time: '10:00', end_time: ''
+            id: m, machine: m, enabled: true, bd_date: '', start_time: '', end_time: ''
           }));
           setMachineAvailability(loadedMachines);
         } else {
@@ -115,6 +115,10 @@ const SHOScheduling = () => {
 
   const updateMachineConstraint = (id, field, value) => {
     setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, [field]: value } : c)));
+  };
+
+  const resetMachineConstraint = (id) => {
+    setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, enabled: true, bd_date: '', start_time: '', end_time: '' } : c)));
   };
 
   const fetchSummaryOnly = async () => {
@@ -141,7 +145,7 @@ const SHOScheduling = () => {
     if (!scheduleData) return;
     setIsSavingPlan(true);
     
-    // Updated keys to perfectly match backend expected model variables
+    // Keys matched to backend processing
     const planToSave = {
       face_grinding: scheduleData.face_grinding || [],
       od_grinding: scheduleData.od_grinding || [],
@@ -166,11 +170,12 @@ const SHOScheduling = () => {
   const fetchSchedule = async () => {
     setIsLoadingPlan(true);
     const availabilityMap = {};
+    
     machineAvailability.forEach(c => {
       if (c.machine.trim()) {
         availabilityMap[c.machine.trim()] = {
           enabled: c.enabled,
-          off_whole_day: c.off_whole_day,
+          bd_date: c.bd_date,
           start_time: c.start_time,
           end_time: c.end_time
         };
@@ -219,7 +224,7 @@ const SHOScheduling = () => {
       {/* 4 NAVIGATION TABS */}
       <div className="tab-buttons" style={{ marginBottom: '15px' }}>
         <button className={activeTab === 'buffer' ? 'active' : ''} onClick={() => setActiveTab('buffer')}>1. Buffer Entry</button>
-        <button className={activeTab === 'availability' ? 'active' : ''} onClick={() => setActiveTab('availability')}>2. Machine Availability</button>
+        <button className={activeTab === 'availability' ? 'active' : ''} onClick={() => setActiveTab('availability')}>2. Breakdown Entry</button>
         <button className={activeTab === 'schedule' ? 'active' : ''} onClick={() => setActiveTab('schedule')}>3. Production Schedule</button>
         <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')}>4. Production Summary</button>
       </div>
@@ -311,23 +316,24 @@ const SHOScheduling = () => {
         </div>
       )}
 
-      {/* TAB 2: MACHINE AVAILABILITY */}
+      {/* TAB 2: BREAKDOWN ENTRY */}
       {activeTab === 'availability' && (
         <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
-          <h2 style={{ color: '#0056b3', marginTop: 0 }}>Machine Availability Settings</h2>
-          <p style={{ color: '#555', marginBottom: '20px' }}>Adjust machine status before running the schedule. Changes here will be applied when you click "Generate".</p>
+          <h2 style={{ color: '#0056b3', marginTop: 0 }}>Breakdown Entry Log</h2>
+          <p style={{ color: '#555', marginBottom: '20px' }}>Enter machine breakdown times to halt scheduling during that period. Leave blank for 100% availability.</p>
           
           {isLoadingMachines ? (
-             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines from Master Sheet (this ensures 100% accuracy)...</div>
+             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines...</div>
           ) : (
-            <table className="img-table" style={{ width: '100%', maxWidth: '900px' }}>
+            <table className="img-table" style={{ width: '100%', maxWidth: '950px' }}>
               <thead>
                 <tr style={{ backgroundColor: '#eef8ff' }}>
                   <th style={{ textAlign: 'left', padding: '10px' }}>Machine / Furnace Name</th>
-                  <th>Enabled</th>
-                  <th>Off Whole Day</th>
-                  <th>Start Time</th>
-                  <th>End Time</th>
+                  <th>Status</th>
+                  <th>Breakdown Date</th>
+                  <th>Breakdown Start</th>
+                  <th>Breakdown End</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -337,17 +343,20 @@ const SHOScheduling = () => {
                     <td style={{ textAlign: 'center' }}>
                       <select value={c.enabled ? "true" : "false"} onChange={(e) => updateMachineConstraint(c.id, 'enabled', e.target.value === "true")} style={{ padding: '4px' }}>
                         <option value="true">Available</option>
-                        <option value="false">Breakdown / Unavailable</option>
+                        <option value="false">Off / Total Breakdown</option>
                       </select>
                     </td>
                     <td style={{ textAlign: 'center' }}>
-                      <input type="checkbox" checked={c.off_whole_day} onChange={(e) => updateMachineConstraint(c.id, 'off_whole_day', e.target.checked)} />
+                      <input type="date" value={c.bd_date || ''} onChange={(e) => updateMachineConstraint(c.id, 'bd_date', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
                     </td>
                     <td style={{ textAlign: 'center' }}>
-                      <input type="time" value={c.start_time} onChange={(e) => updateMachineConstraint(c.id, 'start_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled || c.off_whole_day} />
+                      <input type="time" value={c.start_time || ''} onChange={(e) => updateMachineConstraint(c.id, 'start_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
                     </td>
                     <td style={{ textAlign: 'center' }}>
-                      <input type="time" value={c.end_time} onChange={(e) => updateMachineConstraint(c.id, 'end_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled || c.off_whole_day} />
+                      <input type="time" value={c.end_time || ''} onChange={(e) => updateMachineConstraint(c.id, 'end_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
+                      <button onClick={() => resetMachineConstraint(c.id)} style={{ padding: '4px 8px', cursor: 'pointer', backgroundColor: '#e9ecef', border: '1px solid #ccc' }}>Reset</button>
                     </td>
                   </tr>
                 ))}

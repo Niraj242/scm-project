@@ -40,7 +40,7 @@ HARDCODED_PROCESS_FLEXIBILITY = {
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
-FURNACE_SPECS = {} # Issue 12: Will be loaded dynamically now
+FURNACE_SPECS = {}
 
 def load_monthly_tracking():
     if os.path.exists(MONTHLY_FILE):
@@ -111,7 +111,6 @@ def is_invalid_part(raw_text):
         if k in t: return True
     return False
 
-# Restored from (19).py for accurate variants without aggressive regex replacing 3212 to 33212
 def get_lookup_variants(raw_text, p_code=None):
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
@@ -359,7 +358,7 @@ def generate_summary(payload: ScheduleRequest):
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
                 ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
-                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
+                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10"])
                 
                 r_idx, type_col_idx, mv_col_idx, c1_col = None, None, None, None
                 monthly_cols = []
@@ -382,8 +381,8 @@ def generate_summary(payload: ScheduleRequest):
                         r_idx = i
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
-                            s_val = str(val).replace('.0', '').strip()
-                            if s_val.isdigit() and 1 <= int(s_val) <= 31: monthly_cols.append(j)
+                            header_str = str(val).replace('.0', '').strip()
+                            if header_str.isdigit() and 1 <= int(header_str) <= 31: monthly_cols.append(j)
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None:
@@ -396,16 +395,19 @@ def generate_summary(payload: ScheduleRequest):
                         if is_invalid_part(raw_t): continue
                         
                         display_name = get_display_name(raw_t)
-                        if display_name not in monthly_data[month_str]: monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
+                        if display_name not in monthly_data[month_str]:
+                            monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": str(sheet_name).strip()}
                         
                         row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
-                        if row_monthly_sum > 0: monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
+                        if row_monthly_sum > 0:
+                            monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
                         
                         val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
                         r1 = val1 * 1000 if val1 > 0 else 0.0
                         
                         if r1 > 0:
-                            if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
+                            if display_name not in channel_demands_day1: 
+                                channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': str(sheet_name).strip()}
                             channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
                             channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
 
@@ -437,12 +439,13 @@ def generate_summary(payload: ScheduleRequest):
         return {"status": "success", "data": summary_list}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-        
-        
+
+
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []
+    logged_rpb = set()
     
     global RATE_CACHE, WEIGHT_CACHE, FURNACE_CACHE
     RATE_CACHE = {}
@@ -470,7 +473,7 @@ def generate_schedule(payload: ScheduleRequest):
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
                 ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
-                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9"])
+                is_trb_hub = any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB", "TRB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10"])
                 
                 r_idx, type_col_idx, mv_col_idx = None, None, None
                 c1_col, c2_col = None, None
@@ -496,9 +499,10 @@ def generate_schedule(payload: ScheduleRequest):
                         for j, val in enumerate(df_zero.iloc[i].values):
                             if is_target_date(val, day_1): c1_col = j
                             if is_target_date(val, day_2): c2_col = j
-                            s_val = str(val).replace('.0', '').strip()
-                            if s_val.isdigit() and 1 <= int(s_val) <= 31:
-                                monthly_cols.append(j)
+                            if pd.notna(val):
+                                header_str = str(val).replace('.0', '').strip()
+                                if header_str.isdigit() and 1 <= int(header_str) <= 31:
+                                    monthly_cols.append(j)
                     if r_idx is not None and type_col_idx is not None: break
                         
                 if r_idx is not None and type_col_idx is not None:
@@ -506,7 +510,7 @@ def generate_schedule(payload: ScheduleRequest):
                     for idx in range(r_idx + 1, len(df_zero)):
                         mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
                         if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
-                        raw_t = (str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None else "") if is_trb_hub else last_mf
+                        raw_t = str(df_zero.iloc[idx, mv_col_idx]).strip() if mv_col_idx is not None and is_trb_hub else last_mf
                         if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
                         if is_invalid_part(raw_t): continue
                         
@@ -745,7 +749,7 @@ def generate_schedule(payload: ScheduleRequest):
             PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, channel_flex_map, prod_cache_ts)
         del sheets_prod
 
-        # --- PROCESS BUFFERS (RESTORED LOGIC) ---
+        # --- PROCESS BUFFERS ---
         buffers_by_fam = {}
         BUFFER_MAP = {
             'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
@@ -782,7 +786,6 @@ def generate_schedule(payload: ScheduleRequest):
                 
         for ch, stats in ch_stats.items(): stats['score'] = (stats['demand'] + 1.0) / (stats['buffer'] + 1.0)
 
-        # Separate Demands cleanly
         def process_requirements_for_day(demands, in_out_buffers):
             f_req, o_req, h_req = {}, {}, {}
             for display_name, data in demands.items():
@@ -792,7 +795,6 @@ def generate_schedule(payload: ScheduleRequest):
                     if req_rings <= 0: continue
                     rpb = get_box_for_part(display_name, side, box_matrix)
                     flex = get_process_flexibility(ch_norm, side, channel_flex_map)
-                    req_face = flex['FACE']; req_od = flex['OD']
                     
                     def apply_buf(stage, base_rings, rpb_rate):
                         raw_buf = in_out_buffers.get(display_name, {}).get(stage, {}).get(side, 0)
@@ -811,13 +813,13 @@ def generate_schedule(payload: ScheduleRequest):
                     current_req = req_rings
                     used_ch_buf = apply_buf('CH', current_req, rpb)
                     current_req = max(0.0, current_req - used_ch_buf)
-                    if req_od:
+                    if flex['OD']:
                         if current_req > 0:
                             if display_name not in o_req: o_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                             o_req[display_name][side] += current_req
                         used_od_buf = apply_buf('OD', current_req, rpb)
                         current_req = max(0.0, current_req - used_od_buf)
-                    if req_face:
+                    if flex['FACE']:
                         if current_req > 0:
                             if display_name not in f_req: f_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
                             f_req[display_name][side] += current_req
@@ -831,7 +833,7 @@ def generate_schedule(payload: ScheduleRequest):
         face_req_d1, od_req_d1, ht_req_d1 = process_requirements_for_day(channel_demands_day1, buffers_by_fam)
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
-        # Breakdowns parsing
+        # Breakdowns extraction
         bd_map = {}
         for m_id, cfg in payload.machine_availability.items():
             blocked = not cfg.get('enabled', True)
@@ -841,7 +843,7 @@ def generate_schedule(payload: ScheduleRequest):
                 has_bd = True
             bd_map[m_id] = {'blocked': blocked, 'has_bd': has_bd, 'bd_start': bd_start, 'bd_end': bd_end}
 
-        # --- SEQUENTIAL SCHEDULING LOGIC RESTORED (HT -> FACE -> OD) ---
+        # --- INDEPENDENT PASS LOGIC WITH BUG FIX ---
         def schedule_ht_pass(req_d1, req_d2, out_time_map):
             tasks = []
             for didx, dmds in [(0, req_d1), (1, req_d2)]:
@@ -874,8 +876,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 best = (fn, itm, start_t, w)
                                 
                     if not best:
-                        for i in active: i['qty'] = 0
-                        break
+                        break # FATAL BUG FIX: Removed qty zeroing here so parts go to unscheduled log safely
                     
                     fn, itm, st, w = best
                     f_st = f_states[fn]
@@ -950,8 +951,7 @@ def generate_schedule(payload: ScheduleRequest):
                                 best = (mn, itm, start_t, setup, rt)
 
                     if not best:
-                        for i in active: i['qty'] = 0
-                        break
+                        break # FATAL BUG FIX: Removed qty zeroing here so parts go to unscheduled log safely
                     
                     mn, itm, st, setup, rt = best
                     m_st = m_states[mn]

@@ -29,11 +29,21 @@ PARSED_MASTER_DATA = {
 MONTHLY_FILE = "monthly_tracking.json"
 SAVED_PLAN_FILE = "saved_plan.json"
 SAVED_BUFFERS_FILE = "saved_buffers.json"
+CARRYOVER_FILE = "carryover_tracking.json"
 
+# --- UPDATED CHANNEL FLEXIBILITY (Adjust CH07/CH7 based on your image) ---
 HARDCODED_PROCESS_FLEXIBILITY = {
     "T4": {
         "IR": {"FACE": True, "OD": False},
         "OR": {"FACE": True, "OD": True}
+    },
+    "CH07": {
+        "IR": {"FACE": False, "OD": False},
+        "OR": {"FACE": False, "OD": False}
+    },
+    "CH7": {
+        "IR": {"FACE": False, "OD": False},
+        "OR": {"FACE": False, "OD": False}
     }
 }
 
@@ -43,38 +53,29 @@ WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
 FURNACE_SPECS = {}
 
-def load_monthly_tracking():
-    if os.path.exists(MONTHLY_FILE):
+def load_json_file(filename):
+    if os.path.exists(filename):
         try:
-            with open(MONTHLY_FILE, 'r') as f: return json.load(f)
+            with open(filename, 'r') as f: return json.load(f)
         except: return {}
     return {}
 
-def save_monthly_tracking(data):
+def save_json_file(filename, data):
     try:
-        with open(MONTHLY_FILE, 'w') as f: json.dump(data, f)
+        with open(filename, 'w') as f: json.dump(data, f)
     except Exception as e:
-        print(f"Error saving monthly tracking: {e}")
+        print(f"Error saving {filename}: {e}")
 
-def load_saved_plan():
-    if os.path.exists(SAVED_PLAN_FILE):
-        try:
-            with open(SAVED_PLAN_FILE, 'r') as f: return json.load(f)
-        except: return {}
-    return {}
+def load_monthly_tracking(): return load_json_file(MONTHLY_FILE)
+def save_monthly_tracking(data): save_json_file(MONTHLY_FILE, data)
 
-def load_saved_buffers():
-    if os.path.exists(SAVED_BUFFERS_FILE):
-        try:
-            with open(SAVED_BUFFERS_FILE, 'r') as f: return json.load(f)
-        except: return {}
-    return {}
+def load_saved_plan(): return load_json_file(SAVED_PLAN_FILE)
+def load_saved_buffers(): return load_json_file(SAVED_BUFFERS_FILE)
+def save_buffers_to_disk(entries): save_json_file(SAVED_BUFFERS_FILE, entries)
 
-def save_buffers_to_disk(entries):
-    try:
-        with open(SAVED_BUFFERS_FILE, 'w') as f: json.dump(entries, f)
-    except Exception as e:
-        print(f"Error saving buffers: {e}")
+def load_carryover(): return load_json_file(CARRYOVER_FILE)
+def save_carryover(data): save_json_file(CARRYOVER_FILE, data)
+
 
 class ScheduleRequest(BaseModel):
     sector: str
@@ -99,8 +100,10 @@ def get_monthly_tracking():
 @router.post("/api/save_plan")
 def save_plan(payload: SavePlanRequest):
     try:
-        with open(SAVED_PLAN_FILE, "w") as f:
-            json.dump(payload.dict(), f)
+        # Load existing plans to map them by Date
+        plans = load_saved_plan()
+        plans[payload.date] = payload.plan
+        save_json_file(SAVED_PLAN_FILE, plans)
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -260,7 +263,6 @@ def get_rate_for_part(display_name, p_code, rates, res_id=""):
             RATE_CACHE[key] = robust_rates[robust_key]
             return RATE_CACHE[key]
             
-    # Fuzzy match fallback for Face and OD extraction
     for var in variants:
         for rk, rv in robust_rates.items():
             if var in rk and p_code in rk:
@@ -492,10 +494,11 @@ def generate_summary(payload: ScheduleRequest):
                             channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
 
         saved_plan = load_saved_plan()
+        day_plan = saved_plan.get(payload.date, {})
         t_prod_map = {}
-        if saved_plan.get("date") == payload.date:
+        if day_plan:
             for s_key in ["od_grinding", "face_grinding", "heat_treatment"]:
-                for m in saved_plan.get("plan", {}).get(s_key, []):
+                for m in day_plan.get(s_key, []):
                     for r in m.get("rows", []):
                         if r.get("is_terminal"):
                             p = r.get("part", "").split("-")[0].split(" ")[0]
@@ -545,6 +548,7 @@ def generate_schedule(payload: ScheduleRequest):
         day_1 = req_date + timedelta(days=1)
         day_2 = req_date + timedelta(days=2)
         month_str = req_date.strftime("%Y-%m")
+        prev_date_str = (req_date - timedelta(days=1)).strftime("%Y-%m-%d")
         
         monthly_data = load_monthly_tracking()
         if month_str not in monthly_data:
@@ -943,6 +947,21 @@ def generate_schedule(payload: ScheduleRequest):
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
         work_items = []
+        # Incorporate carryovers from yesterday (parts that couldn't schedule)
+        carryover_all = load_carryover()
+        prev_unscheduled = carryover_all.get(prev_date_str, [])
+        for carry in prev_unscheduled:
+            c_stage = carry.get("stage")
+            c_part = carry.get("part_raw")
+            c_disp = carry.get("disp")
+            c_pc = carry.get("pc")
+            c_qty = safe_float(carry.get("qty"))
+            c_chan = carry.get("channel", "UNKNOWN")
+            c_flex = get_process_flexibility(c_chan, c_pc, channel_flex_map)
+            if c_qty > 0 and c_disp and c_pc:
+                work_items.append(WorkItem(c_stage, c_disp, c_pc, 0, c_chan, c_qty, 0.0, 100.0, c_flex))
+
+        # Standard requirements
         for day_idx, demands, f_req, o_req, h_req in [(0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1), (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
@@ -968,40 +987,38 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
         saved_plan = load_saved_plan()
-        if saved_plan and saved_plan.get("date"):
+        prev_plan = saved_plan.get(prev_date_str, {})
+        if prev_plan:
             try:
-                saved_dt = datetime.strptime(saved_plan.get("date"), "%Y-%m-%d")
-                if (req_date - saved_dt).days == 1:
-                    plan_data = saved_plan.get("plan", {})
-                    for stage_key in ["od_grinding", "face_grinding", "heat_treatment"]:
-                        for m_data in plan_data.get(stage_key, []):
-                            m_id = m_data.get("machine") or m_data.get("furnace")
-                            rows = m_data.get("rows", [])
-                            if not rows: continue
-                            last_timing = rows[-1].get("timing", "")
-                            if "-" in last_timing:
-                                end_t_str = last_timing.split("-")[1].strip()
-                                rel_today = 0.0
+                for stage_key in ["od_grinding", "face_grinding", "heat_treatment"]:
+                    for m_data in prev_plan.get(stage_key, []):
+                        m_id = m_data.get("machine") or m_data.get("furnace")
+                        rows = m_data.get("rows", [])
+                        if not rows: continue
+                        last_timing = rows[-1].get("timing", "")
+                        if "-" in last_timing:
+                            end_t_str = last_timing.split("-")[1].strip()
+                            rel_today = 0.0
+                            
+                            if "(+1)" in end_t_str:
+                                h, m = end_t_str.replace('(+1)', '').strip().split(':')
+                                abs_h = int(h) + int(m) / 60.0
+                                rel_today = max(0.0, abs_h - 10.0)
+                            elif "(+2)" in end_t_str:
+                                h, m = end_t_str.replace('(+2)', '').strip().split(':')
+                                abs_h = int(h) + int(m) / 60.0
+                                rel_today = max(0.0, (abs_h + 24.0) - 10.0)
                                 
-                                if "(+1)" in end_t_str:
-                                    h, m = end_t_str.replace('(+1)', '').strip().split(':')
-                                    abs_h = int(h) + int(m) / 60.0
-                                    rel_today = max(0.0, abs_h - 10.0)
-                                elif "(+2)" in end_t_str:
-                                    h, m = end_t_str.replace('(+2)', '').strip().split(':')
-                                    abs_h = int(h) + int(m) / 60.0
-                                    rel_today = max(0.0, (abs_h + 24.0) - 10.0)
-                                    
-                                for r in resources:
-                                    if r.id == m_id:
-                                        r.ready_time = max(r.ready_time, rel_today)
-                                        part_raw = rows[-1].get("part", "")
-                                        parts_split = part_raw.split("-") if "-" in part_raw else part_raw.split(" ")
-                                        disp = parts_split[0].strip()
-                                        pc = "OR" if "OR" in part_raw else ("IR" if "IR" in part_raw else "")
-                                        if disp and pc:
-                                            r.last_fam = disp
-                                            r.last_pc = pc
+                            for r in resources:
+                                if r.id == m_id:
+                                    r.ready_time = max(r.ready_time, rel_today)
+                                    part_raw = rows[-1].get("part", "")
+                                    parts_split = part_raw.split("-") if "-" in part_raw else part_raw.split(" ")
+                                    disp = parts_split[0].strip()
+                                    pc = "OR" if "OR" in part_raw else ("IR" if "IR" in part_raw else "")
+                                    if disp and pc:
+                                        r.last_fam = disp
+                                        r.last_pc = pc
             except Exception as e: pass
 
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
@@ -1063,7 +1080,10 @@ def generate_schedule(payload: ScheduleRequest):
                         if start_time >= res.max_time + 5.0: continue
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         
-                        key = (start_time, -item.priority)
+                        # Fix for Gap Filling: Penalize large gaps in machine schedules
+                        gap = max(0.0, item.ready_time - (res.ready_time + setup))
+                        key = (start_time, gap, -item.priority)
+                        
                         if key < best_key:
                             best_key = key
                             best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
@@ -1152,6 +1172,7 @@ def generate_schedule(payload: ScheduleRequest):
                     else:
                         res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
 
+        unscheduled_to_carry = []
         for item in work_items:
             if item.qty <= 0.01: continue
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
@@ -1164,16 +1185,32 @@ def generate_schedule(payload: ScheduleRequest):
                 
             reason = "Capacity Exceeded"
             if item.stage == 'HT':
-                if not get_weight_for_part(item.disp, item.pc, weight_matrix): reason = "Missing Weight"
+                if not get_weight_for_part(item.disp, item.pc, weight_matrix): reason = "Missing Weight in Weights Master"
                 else:
                     valid_f = get_furnaces_for_part(item.disp, item.pc, furnace_map)
-                    if not valid_f: reason = "Missing Machine Rate"
+                    if not valid_f: reason = "Missing Machine Rate / No Furnace Assigned"
                     elif all(r.blocked for r in resources if r.id in valid_f): reason = "Exceeds Planning Window"
             else:
                 rates_found = any(get_rate_for_part(item.disp, item.pc, r.capacity_info, r.id) > 0 for r in resources if r.type == item.stage)
-                if not rates_found: reason = "Missing Machine Rate (Check Part Number)"
+                if not rates_found: reason = f"Missing {item.stage} Machine Rate (Check Part Number)"
                 elif all(r.blocked for r in resources if r.type == item.stage and get_rate_for_part(item.disp, item.pc, r.capacity_info, r.id) > 0): reason = "Exceeds Planning Window"
-            unscheduled.append({"stage": item.stage, "part": f"{item.disp} {item.pc} ({day_label})", "missed_boxes": f"{missed_val} - {reason}"})
+            
+            part_display = f"{item.disp} {item.pc} ({day_label})"
+            unscheduled.append({"stage": item.stage, "part": part_display, "missed_boxes": f"{missed_val} - {reason}"})
+            
+            # Save for next day carry over processing
+            unscheduled_to_carry.append({
+                "stage": item.stage,
+                "part_raw": part_display,
+                "disp": item.disp,
+                "pc": item.pc,
+                "qty": item.qty,
+                "channel": item.channel
+            })
+
+        # Save today's uncompleted work to CARRYOVER_FILE
+        carryover_all[payload.date] = unscheduled_to_carry
+        save_carryover(carryover_all)
 
         final_face, final_od, furnaces_formatted = [], [], []
         today_prod_map = {}

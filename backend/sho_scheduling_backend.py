@@ -31,23 +31,7 @@ SAVED_PLAN_FILE = "saved_plan.json"
 SAVED_BUFFERS_FILE = "saved_buffers.json"
 CARRYOVER_FILE = "carryover_tracking.json"
 
-# --- UPDATED CHANNEL FLEXIBILITY (Adjust CH07/CH7 based on your image) ---
-HARDCODED_PROCESS_FLEXIBILITY = {
-    "T4": {
-        "IR": {"FACE": True, "OD": False},
-        "OR": {"FACE": True, "OD": True}
-    },
-    "CH07": {
-        "IR": {"FACE": False, "OD": False},
-        "OR": {"FACE": False, "OD": False}
-    },
-    "CH7": {
-        "IR": {"FACE": False, "OD": False},
-        "OR": {"FACE": False, "OD": False}
-    }
-}
-
-# --- GLOBAL MEMOIZATION FOR SPEED ---
+# --- GLOBAL MEMOIZATION FOR SPEED (Not cleared on every request anymore) ---
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
@@ -76,7 +60,6 @@ def save_buffers_to_disk(entries): save_json_file(SAVED_BUFFERS_FILE, entries)
 def load_carryover(): return load_json_file(CARRYOVER_FILE)
 def save_carryover(data): save_json_file(CARRYOVER_FILE, data)
 
-
 class ScheduleRequest(BaseModel):
     sector: str
     date: str
@@ -100,7 +83,6 @@ def get_monthly_tracking():
 @router.post("/api/save_plan")
 def save_plan(payload: SavePlanRequest):
     try:
-        # Load existing plans to map them by Date
         plans = load_saved_plan()
         plans[payload.date] = payload.plan
         save_json_file(SAVED_PLAN_FILE, plans)
@@ -114,10 +96,8 @@ def normalize_channel(ch_str):
     return ch
 
 def get_process_flexibility(channel_norm, p_code, flex_map):
-    for hard_ch, flex_data in HARDCODED_PROCESS_FLEXIBILITY.items():
-        if hard_ch.replace(" ", "") in channel_norm or channel_norm in hard_ch.replace(" ", ""):
-            if p_code in flex_data:
-                return flex_data[p_code]
+    # Dynamically respects the Excel sheet for ALL channels
+    # Defaults to True (Empty Cell = Schedule). Only returns False if "NO" was explicitly found.
     return flex_map.get(channel_norm, {}).get(p_code, {'FACE': True, 'OD': True})
 
 def is_invalid_part(raw_text):
@@ -131,7 +111,6 @@ def is_invalid_part(raw_text):
 def get_lookup_variants(raw_text, p_code=None):
     if is_invalid_part(raw_text): return []
     t = str(raw_text).upper().strip()
-    
     t = re.sub(r'[\u200b\u200c\u200d\uFEFF]', '', t)
     
     if "INDUSTRILA" in t: t = t.replace("INDUSTRILA", "INDUSTRIAL")
@@ -404,7 +383,7 @@ def get_machines_list():
 def generate_summary(payload: ScheduleRequest):
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
-        day_1 = req_date + timedelta(days=1)
+        day_1 = req_date  # Use Exact Date Selected
         month_str = req_date.strftime("%Y-%m")
         monthly_data = load_monthly_tracking()
         if month_str not in monthly_data:
@@ -529,11 +508,6 @@ def generate_schedule(payload: ScheduleRequest):
     unscheduled = []
     logged_rpb = set()
     
-    global RATE_CACHE, WEIGHT_CACHE, FURNACE_CACHE
-    RATE_CACHE = {}
-    WEIGHT_CACHE = {}
-    FURNACE_CACHE = {}
-    
     # Process persistently saved buffers logic
     saved_bufs = load_saved_buffers()
     active_entries = saved_bufs.copy()
@@ -545,8 +519,8 @@ def generate_schedule(payload: ScheduleRequest):
 
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
-        day_1 = req_date + timedelta(days=1)
-        day_2 = req_date + timedelta(days=2)
+        day_1 = req_date  # FIX: Schedule exact date selected (Fixes empty schedule next day)
+        day_2 = req_date + timedelta(days=1)
         month_str = req_date.strftime("%Y-%m")
         prev_date_str = (req_date - timedelta(days=1)).strftime("%Y-%m-%d")
         
@@ -721,6 +695,7 @@ def generate_schedule(payload: ScheduleRequest):
             machines_data = {'FACE': {}, 'OD': {}}
             channel_flex_map = {} 
 
+            # FIX: Channel Process Flexibility - Reads EXACTLY what is in the sheet for ALL channels
             flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
             if flex_sheet_key:
                 df_flex = sheets_prod[flex_sheet_key].fillna('')
@@ -744,12 +719,13 @@ def generate_schedule(payload: ScheduleRequest):
                             r_raw = str(df_flex.iloc[idx, ring_col]).strip().upper()
                             p_code = 'OR' if 'OR' in r_raw or '100' in r_raw else ('IR' if 'IR' in r_raw or '010' in r_raw or '120' in r_raw else None)
                             
-                            face_req = True; od_req = True
-                            if face_col != -1 and str(df_flex.iloc[idx, face_col]).strip().upper() == "NO": face_req = False
-                            if od_col != -1 and str(df_flex.iloc[idx, od_col]).strip().upper() == "NO": od_req = False
-                                
                             if p_code:
                                 if c_norm not in channel_flex_map: channel_flex_map[c_norm] = {}
+                                # EMPTY means TRUE. Only "NO" means FALSE.
+                                face_val = str(df_flex.iloc[idx, face_col]).strip().upper() if face_col != -1 else ""
+                                od_val = str(df_flex.iloc[idx, od_col]).strip().upper() if od_col != -1 else ""
+                                face_req = False if face_val == "NO" else True
+                                od_req = False if od_val == "NO" else True
                                 channel_flex_map[c_norm][p_code] = {'FACE': face_req, 'OD': od_req}
 
             if 'WEIGHTS' in sheets_prod:
@@ -961,7 +937,6 @@ def generate_schedule(payload: ScheduleRequest):
             if c_qty > 0 and c_disp and c_pc:
                 work_items.append(WorkItem(c_stage, c_disp, c_pc, 0, c_chan, c_qty, 0.0, 100.0, c_flex))
 
-        # Standard requirements
         for day_idx, demands, f_req, o_req, h_req in [(0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1), (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
@@ -1035,7 +1010,6 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # Merge D1 and D2 logic to save Setup Time for Face and OD
         for d1_item in [i for i in work_items if i.day_idx == 0 and i.stage in ['FACE', 'OD']]:
             d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
             if d2_item:
@@ -1080,7 +1054,6 @@ def generate_schedule(payload: ScheduleRequest):
                         if start_time >= res.max_time + 5.0: continue
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         
-                        # Fix for Gap Filling: Penalize large gaps in machine schedules
                         gap = max(0.0, item.ready_time - (res.ready_time + setup))
                         key = (start_time, gap, -item.priority)
                         
@@ -1198,7 +1171,6 @@ def generate_schedule(payload: ScheduleRequest):
             part_display = f"{item.disp} {item.pc} ({day_label})"
             unscheduled.append({"stage": item.stage, "part": part_display, "missed_boxes": f"{missed_val} - {reason}"})
             
-            # Save for next day carry over processing
             unscheduled_to_carry.append({
                 "stage": item.stage,
                 "part_raw": part_display,
@@ -1208,7 +1180,6 @@ def generate_schedule(payload: ScheduleRequest):
                 "channel": item.channel
             })
 
-        # Save today's uncompleted work to CARRYOVER_FILE
         carryover_all[payload.date] = unscheduled_to_carry
         save_carryover(carryover_all)
 

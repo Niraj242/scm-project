@@ -37,7 +37,6 @@ HARDCODED_PROCESS_FLEXIBILITY = {
     }
 }
 
-# --- GLOBAL MEMOIZATION FOR SPEED ---
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
@@ -288,7 +287,7 @@ class WorkItem:
         self.stage = stage
         self.disp = disp
         self.pc = pc
-        self.day_idx = day_idx
+        self.day_idx = day_idx  # -1 for D0, 0 for D1, 1 for D2
         self.channel = channel
         self.qty = qty
         self.ready_time = ready_time
@@ -469,7 +468,7 @@ def generate_schedule(payload: ScheduleRequest):
     WEIGHT_CACHE = {}
     FURNACE_CACHE = {}
     
-    # 1. PERSISTENT BUFFER LOGIC
+    # 1. ROBUST PERSISTENT BUFFER LOGIC
     has_meaningful_entries = any(safe_float(v) > 0 for k, v in payload.entries.items() if v and isinstance(v, (str, int, float)))
     saved_bufs_data = load_saved_buffers()
     
@@ -479,21 +478,50 @@ def generate_schedule(payload: ScheduleRequest):
         active_entries = payload.entries
         debug_logs.append("Used newly submitted buffers and saved them.")
     else:
+        # Fallback to the saved buffer for the specified date
         active_entries = saved_bufs_data.get(payload.date, {})
-        debug_logs.append("Loaded persistent buffers from previously saved state.")
+        if active_entries:
+            debug_logs.append(f"Loaded persistent buffers from previously saved state for {payload.date}.")
+        else:
+            debug_logs.append(f"No buffers found for {payload.date}, proceeding with zero buffers.")
         
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date + timedelta(days=1)
         day_2 = req_date + timedelta(days=2)
         month_str = req_date.strftime("%Y-%m")
+        yesterday_str = (req_date - timedelta(days=1)).strftime("%Y-%m-%d")
         
         monthly_data = load_monthly_tracking()
         if month_str not in monthly_data: monthly_data[month_str] = {}
 
+        channel_demands_day0 = {} # For carry-over unscheduled items
         channel_demands_day1 = {} 
         channel_demands_day2 = {}
         
+        # 2. D0 INJECTION (Extracting Yesterday's Unscheduled Parts)
+        saved_plan = load_saved_plan()
+        if saved_plan and saved_plan.get("date") == yesterday_str:
+            yesterday_unscheduled = saved_plan.get("plan", {}).get("unscheduled", [])
+            for item in yesterday_unscheduled:
+                stage = item.get("stage", "")
+                part_raw = item.get("part", "")
+                if part_raw:
+                    # Clean up the part string (e.g. "PART_NAME IR (Day 1)")
+                    part_clean = re.sub(r'\(.*?\)', '', part_raw).strip()
+                    parts = part_clean.split(" ")
+                    if len(parts) >= 2:
+                        disp_name = parts[0]
+                        p_code = parts[1]
+                        if disp_name not in channel_demands_day0:
+                            channel_demands_day0[disp_name] = {'IR': 0.0, 'OR': 0.0, 'channel': 'UNKNOWN', 'stage': stage}
+                        
+                        # We don't have the exact qty from unscheduled list easily, so we give it a massive priority marker
+                        # We will rely on the buffer / D1 demand to fulfill it, but mark it as D0.
+                        channel_demands_day0[disp_name][p_code] = 9999.0 # Marker for priority
+            if channel_demands_day0:
+                debug_logs.append(f"Loaded {len(channel_demands_day0)} unscheduled families from {yesterday_str} as Day 0 priority.")
+
         sheets_zero, logs1 = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
         debug_logs.extend(logs1)
         
@@ -553,6 +581,12 @@ def generate_schedule(payload: ScheduleRequest):
                         r1 = val1 * 1000 if val1 > 0 else 0.0
                         r2 = val2 * 1000 if val2 > 0 else 0.0
                         
+                        # Match D0 actual quantities using D1 data if marked
+                        if display_name in channel_demands_day0:
+                            channel_demands_day0[display_name]['channel'] = ch_name
+                            if channel_demands_day0[display_name]['IR'] > 0: channel_demands_day0[display_name]['IR'] = r1 * ir_multiplier
+                            if channel_demands_day0[display_name]['OR'] > 0: channel_demands_day0[display_name]['OR'] = r1
+
                         if r1 > 0:
                             if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
                             channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
@@ -764,7 +798,7 @@ def generate_schedule(payload: ScheduleRequest):
         }
 
         for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
-            for key, val in active_entries.items(): # USING LOADED ENTRIES
+            for key, val in active_entries.items(): 
                 if key.startswith(type_prefix + '_'):
                     parts = key.split('_')
                     if len(parts) < 3: continue
@@ -778,7 +812,7 @@ def generate_schedule(payload: ScheduleRequest):
 
         ch_stats = {}
         fam_to_ch = {}
-        for d_dict in [channel_demands_day1, channel_demands_day2]:
+        for d_dict in [channel_demands_day0, channel_demands_day1, channel_demands_day2]:
             for fam, data in d_dict.items():
                 ch = normalize_channel(data['channel'])
                 fam_to_ch[fam] = ch
@@ -797,7 +831,7 @@ def generate_schedule(payload: ScheduleRequest):
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
                 for side in ['IR', 'OR']:
-                    req_rings = data[side]
+                    req_rings = data.get(side, 0)
                     if req_rings <= 0: continue
                     rpb = get_box_for_part(display_name, side, box_matrix)
                     flex = get_process_flexibility(ch_norm, side, channel_flex_map)
@@ -837,11 +871,12 @@ def generate_schedule(payload: ScheduleRequest):
                         h_req[display_name][side] += current_req
             return f_req, o_req, h_req
 
+        face_req_d0, od_req_d0, ht_req_d0 = process_requirements_for_day(channel_demands_day0, buffers_by_fam)
         face_req_d1, od_req_d1, ht_req_d1 = process_requirements_for_day(channel_demands_day1, buffers_by_fam)
         face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
 
         work_items = []
-        for day_idx, demands, f_req, o_req, h_req in [(0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1), (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)]:
+        for day_idx, demands, f_req, o_req, h_req in [(-1, channel_demands_day0, face_req_d0, od_req_d0, ht_req_d0), (0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1), (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
                 for p_code in ['IR', 'OR']:
@@ -856,6 +891,8 @@ def generate_schedule(payload: ScheduleRequest):
                     
                     init_h = req_h
                     ch_score = ch_stats.get(ch_norm, {}).get('score', 0.0)
+                    if day_idx == -1: ch_score = 9999.0 # D0 forces absolute highest priority
+                    
                     if init_h > 0: work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, ch_score, flex))
                     if init_f > 0: work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, ch_score, flex))
                     if init_o > 0: work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, ch_score, flex))
@@ -865,37 +902,32 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # 3. YESTERDAY'S SAVED PLAN CONTINUATION
-        saved_plan = load_saved_plan()
-        if saved_plan and saved_plan.get("date"):
+        if saved_plan and saved_plan.get("date") == yesterday_str:
             try:
-                saved_dt = datetime.strptime(saved_plan.get("date"), "%Y-%m-%d")
-                if (req_date - saved_dt).days == 1:
-                    plan_data = saved_plan.get("plan", {})
-                    for stage, m_list in plan_data.items():
-                        for m_data in m_list:
-                            m_id = m_data.get("machine") or m_data.get("furnace")
-                            rows = m_data.get("rows", [])
-                            if not rows: continue
-                            last_timing = rows[-1].get("timing", "")
-                            if "-" in last_timing:
-                                end_t_str = last_timing.split("-")[1].strip()
-                                # Parse the (+1) strictly for yesterday's carry-over
-                                if "(+1)" in end_t_str:
-                                    hh_mm = end_t_str.replace("(+1)", "").strip()
-                                    hh, mm = map(int, hh_mm.split(":"))
-                                    abs_h = hh + mm / 60.0
-                                    # If yesterday's run finished today AFTER 10 AM
-                                    if abs_h >= 10.0:
-                                        rel_today = abs_h - 10.0
-                                        for r in resources:
-                                            if r.id == m_id:
-                                                r.ready_time = max(r.ready_time, rel_today)
-                                                part_raw = rows[-1].get("part", "")
-                                                parts_split = part_raw.split(" ")
-                                                if len(parts_split) >= 2:
-                                                    r.last_fam = parts_split[0]
-                                                    r.last_pc = parts_split[1].replace("(D1+D2)", "").replace("(D2)", "").replace("(D1)", "").strip()
+                plan_data = saved_plan.get("plan", {})
+                for stage, m_list in plan_data.items():
+                    if stage == "unscheduled": continue
+                    for m_data in m_list:
+                        m_id = m_data.get("machine") or m_data.get("furnace")
+                        rows = m_data.get("rows", [])
+                        if not rows: continue
+                        last_timing = rows[-1].get("timing", "")
+                        if "-" in last_timing:
+                            end_t_str = last_timing.split("-")[1].strip()
+                            if "(+1)" in end_t_str:
+                                hh_mm = end_t_str.replace("(+1)", "").strip()
+                                hh, mm = map(int, hh_mm.split(":"))
+                                abs_h = hh + mm / 60.0
+                                if abs_h >= 10.0:
+                                    rel_today = abs_h - 10.0
+                                    for r in resources:
+                                        if r.id == m_id:
+                                            r.ready_time = max(r.ready_time, rel_today)
+                                            part_raw = rows[-1].get("part", "")
+                                            parts_split = part_raw.split(" ")
+                                            if len(parts_split) >= 2:
+                                                r.last_fam = parts_split[0]
+                                                r.last_pc = parts_split[1].replace("(D1+D2)", "").replace("(D2)", "").replace("(D1)", "").replace("(D0)", "").strip()
             except: pass
 
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
@@ -911,14 +943,15 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # 2 & 5. THE NO-SLICE LIMIT & DAY COMBINATION
-        # Hard 29.0 Limit = 3 PM Next Day (5 hours past 10 AM shift end)
-        GLOBAL_MAX_TIME = 29.0 
+        # 3. STRICT TIME LOCKS
+        # 24.0 = 10 AM Next Day (Machine CANNOT START a job after this)
+        # 29.0 = 3 PM Next Day (Machine CANNOT FINISH a job after this)
+        START_CUTOFF = 24.0
+        FINISH_CUTOFF = 29.0 
         
-        for target_day in [0, 1]:
+        for target_day in [-1, 0, 1]:
             while True:
-                # Only look at items that can start before the absolute cutoff
-                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < GLOBAL_MAX_TIME and i.day_idx == target_day]
+                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < FINISH_CUTOFF and i.day_idx == target_day]
                 if not active_items: break 
                     
                 best_pair = None
@@ -943,17 +976,19 @@ def generate_schedule(payload: ScheduleRequest):
                         if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                         
                         start_time = max(res.ready_time + setup, item.ready_time)
-                        if start_time >= GLOBAL_MAX_TIME: continue
+                        
+                        # RULE 1: Strict start time limit. It must START before 10 AM tomorrow.
+                        if start_time >= START_CUTOFF: continue
+                        
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         
-                        # Full time required calculation (NO SLICING)
                         if res.type == 'HT':
                             actual_time = (item.qty * weight) / rate_or_cap
                         else:
                             actual_time = item.qty / rate_or_cap
                             
-                        # If the FULL batch pushes past 3 PM next day, machine cannot take it.
-                        if start_time + actual_time > GLOBAL_MAX_TIME:
+                        # RULE 2: Strict end time limit. The full batch MUST FINISH by 3 PM tomorrow.
+                        if start_time + actual_time > FINISH_CUTOFF:
                             continue
                             
                         key = (start_time, -item.priority)
@@ -962,21 +997,17 @@ def generate_schedule(payload: ScheduleRequest):
                             best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation, actual_time)
                             
                 if not best_pair: 
-                    # No machine can take any remaining part in full before 3 PM. Leave in work_items.
                     break
                     
                 res, item, start_time, setup, rate_or_cap, is_continuation, actual_time = best_pair
                 
-                # Breakdown compensation
                 if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
                     actual_time += (res.bd_end - max(start_time, res.bd_start))
-                    # Re-verify if breakdown extension pushes it past 3 PM
-                    if start_time + actual_time > GLOBAL_MAX_TIME:
-                        # Skip this specific pair since breakdown pushes it over
+                    if start_time + actual_time > FINISH_CUTOFF:
                         item.ready_time += 999.0 
                         continue
                         
-                chunk_qty = item.qty # Always take the full amount
+                chunk_qty = item.qty 
                         
                 if res.type == 'HT':
                     weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
@@ -993,7 +1024,7 @@ def generate_schedule(payload: ScheduleRequest):
                 res.ready_time = res_ready_time
                 res.last_fam = item.disp
                 res.last_pc = item.pc
-                item.qty = 0 # Fully consumed
+                item.qty = 0 
                 
                 next_stage = None
                 if res.type == 'HT': next_stage = 'FACE' if item.flex['FACE'] else ('OD' if item.flex['OD'] else None)
@@ -1007,7 +1038,7 @@ def generate_schedule(payload: ScheduleRequest):
                     old_qty = int(float(last_row["qty"]))
                     new_qty = old_qty + int(chunk_qty)
                     last_row["qty"] = str(new_qty)
-                    if "(D1+D2)" not in last_row["part"]: last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").strip() + " (D1+D2)"
+                    if "(D1+D2)" not in last_row["part"]: last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").replace(" (D0)", "").strip() + " (D1+D2)"
                     old_start = last_row["timing"].split('-')[0]
                     new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
                     last_row["timing"] = f"{old_start}-{new_end}"
@@ -1016,7 +1047,7 @@ def generate_schedule(payload: ScheduleRequest):
                 else:
                     display_val = f"{math.ceil(chunk_qty / rpb)} Boxes" if rpb > 0 else f"{int(chunk_qty)} Rings (Q)"
                     timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
-                    day_label = " (D2)" if item.day_idx == 1 else " (D1)"
+                    day_label = " (D0)" if item.day_idx == -1 else " (D2)" if item.day_idx == 1 else " (D1)"
                     
                     is_terminal = False
                     if res.type == 'OD': is_terminal = True
@@ -1028,13 +1059,12 @@ def generate_schedule(payload: ScheduleRequest):
                     else:
                         res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
 
-        # 4. CAPTURING FACE AND OD FAILURES ACCURATELY
         for item in work_items:
             if item.qty <= 0.01: continue
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
-            day_label = "Day 2" if item.day_idx == 1 else "Day 1"
-            reason = "Capacity Exceeded (Exceeds 3 PM Next Day)"
+            day_label = "Day 0" if item.day_idx == -1 else "Day 2" if item.day_idx == 1 else "Day 1"
+            reason = "Capacity Exceeded (Breaches 10 AM Start or 3 PM End Limit)"
             if item.stage == 'HT':
                 if not get_weight_for_part(item.disp, item.pc, weight_matrix): reason = "Missing Weight"
                 else:

@@ -992,10 +992,18 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # Issue 5 & 6: Strict Day Priority
+        # Issue 5, 6 & tracking fix: Strict Day Priority & D2 Limits
         for target_day in [0, 1]:
+            # Apply Max 6 hour limit for Day 2 (24 + 6 = 30.0 hours max)
+            current_max_time = 30.0 if target_day == 1 else 24.0
+            
+            for r in resources:
+                r.max_time = current_max_time
+                if r.ready_time < current_max_time:
+                    r.blocked = False
+                    
             while True:
-                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < 24.0 and i.day_idx == target_day]
+                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < current_max_time and i.day_idx == target_day]
                 if not active_items: 
                     break 
                     
@@ -1003,7 +1011,7 @@ def generate_schedule(payload: ScheduleRequest):
                 best_key = (float('inf'), float('inf'), float('-inf'))
                 for item in active_items:
                     for res in resources:
-                        if res.blocked or res.ready_time >= getattr(res, 'max_time', 24.0): continue
+                        if res.blocked or res.ready_time >= res.max_time: continue
                         if res.type != item.stage: continue
                         rate_or_cap = 0.0
                         if res.type == 'HT':
@@ -1020,7 +1028,7 @@ def generate_schedule(payload: ScheduleRequest):
                         if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                         
                         start_time = max(res.ready_time + setup, item.ready_time)
-                        if start_time >= getattr(res, 'max_time', 24.0): continue
+                        if start_time >= res.max_time: continue
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         
                         key = (start_time, -item.priority)
@@ -1029,30 +1037,54 @@ def generate_schedule(payload: ScheduleRequest):
                             best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
                             
                 if not best_pair: 
-                    for i in active_items: i.qty = 0
+                    # Bug Fix: DO NOT zero out i.qty here! They need to remain so they accurately trigger the Unscheduled list later.
                     break
                     
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
+                # --- APPLY STRICT TIME LIMIT ---
                 if res.type == 'HT':
                     weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
                     actual_time = (item.qty * weight) / rate_or_cap
-                    chunk_qty = item.qty
                     
                     if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
                         actual_time += (res.bd_end - max(start_time, res.bd_start))
                         
+                    if start_time + actual_time > res.max_time:
+                        allowed_time = res.max_time - start_time
+                        if res.has_bd and start_time < res.bd_start and res.bd_start < res.max_time:
+                            allowed_time -= (min(res.max_time, res.bd_end) - res.bd_start)
+                        chunk_qty = max(0.0, (allowed_time * rate_or_cap) / weight)
+                        actual_time = res.max_time - start_time
+                    else:
+                        chunk_qty = item.qty
+                        
+                    if chunk_qty < 1.0:
+                        res.blocked = True
+                        continue
+                        
                     res_ready_time = start_time + actual_time + 0.5
                     out_time = start_time + actual_time + 3.5
-                    display_rate = f"{round((item.qty * weight), 1)} kg"
+                    display_rate = f"{round((chunk_qty * weight), 1)} kg"
                     if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
                 else:
-                    chunk_qty = item.qty
-                    if chunk_qty <= 0.01: res.blocked = True; continue
-                    actual_time = chunk_qty / rate_or_cap
+                    actual_time = item.qty / rate_or_cap
                     
                     if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
                         actual_time += (res.bd_end - max(start_time, res.bd_start))
+                        
+                    if start_time + actual_time > res.max_time:
+                        allowed_time = res.max_time - start_time
+                        if res.has_bd and start_time < res.bd_start and res.bd_start < res.max_time:
+                            allowed_time -= (min(res.max_time, res.bd_end) - res.bd_start)
+                        chunk_qty = max(0.0, allowed_time * rate_or_cap)
+                        actual_time = res.max_time - start_time
+                    else:
+                        chunk_qty = item.qty
+                        
+                    if chunk_qty < 1.0:
+                        res.blocked = True
+                        continue
                         
                     res_ready_time = start_time + actual_time
                     out_time = res_ready_time
@@ -1062,7 +1094,7 @@ def generate_schedule(payload: ScheduleRequest):
                 res.ready_time = res_ready_time
                 res.last_fam = item.disp
                 res.last_pc = item.pc
-                if res.ready_time >= getattr(res, 'max_time', 24.0): res.blocked = True
+                if res.ready_time >= res.max_time: res.blocked = True
                 item.qty -= chunk_qty
                 
                 next_stage = None

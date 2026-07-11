@@ -36,16 +36,32 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
+  // UPDATED: Mapped exactly according to the provided Channel/Process matrix image
   const DEFAULT_BLOCKED = {
     DGBB: { 
-        OD: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH05: ['IR'], CH08: ['IR'], CH11: ['IR'] }, 
-        FACE: { CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'] } 
+        HT: { CH07: ['IR', 'OR'] },
+        OD: { 
+          CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], 
+          CH05: ['IR', 'OR'], CH07: ['IR', 'OR'], CH08: ['IR', 'OR'], CH11: ['IR', 'OR'] 
+        }, 
+        FACE: { 
+          CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH07: ['IR', 'OR'] 
+        } 
     },
     TRB: { 
-        OD: { 'T 1': ['IR'], 'T 2': ['IR'], 'T 3': ['IR'], 'T 4': ['IR'], 'T 5': ['IR'], 'T 6': ['IR'], 'T 7': ['IR'], 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'], 'T10': ['IR'] }, 
+        HT: {},
+        OD: { 
+          'T 1': ['IR', 'OR'], 'T 2': ['IR', 'OR'], 'T 3': ['IR', 'OR'], 'T 4': ['IR', 'OR'], 
+          'T 5': ['IR', 'OR'], 'T 6': ['IR', 'OR'], 'T 7': ['IR', 'OR'], 'T 8': ['IR', 'OR'], 
+          'T 9': ['IR', 'OR'], 'T10': ['IR', 'OR'] 
+        }, 
         FACE: { 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'] } 
     },
-    HUB: { OD: {}, FACE: {} }
+    HUB: { 
+        HT: {},
+        OD: { 'HUB 1.2': ['IR', 'OR'], 'HUB 1.3': ['IR', 'OR'], 'HUB 1.4': ['IR', 'OR'] }, 
+        FACE: {} 
+    }
   };
 
   const ROWS = [
@@ -81,6 +97,25 @@ const SHOScheduling = () => {
       setTableData({});
     }
   }, [sector, bufferDate]);
+
+  // NEW FIX: Automatically load saved plan when Date changes, or clear if none exists
+  useEffect(() => {
+    const fetchSavedPlanForDate = async () => {
+      try {
+        // Backend must implement this GET endpoint to return {"status": "success", "data": {...}}
+        const response = await fetch(`${API_BASE}/api/get_plan?date=${scheduleDate}`);
+        const result = await response.json();
+        if (response.ok && result.status === 'success' && result.data) {
+          setScheduleData(result.data);
+        } else {
+          setScheduleData(null); // Clear previous date's data to show empty state
+        }
+      } catch (err) {
+        setScheduleData(null);
+      }
+    };
+    fetchSavedPlanForDate();
+  }, [scheduleDate]);
 
   // Dynamically Fetch ALL Face, OD & HT Machines from Production Sheet
   useEffect(() => {
@@ -145,11 +180,11 @@ const SHOScheduling = () => {
     if (!scheduleData) return;
     setIsSavingPlan(true);
     
-    // Keys matched to backend processing
     const planToSave = {
       face_grinding: scheduleData.face_grinding || [],
       od_grinding: scheduleData.od_grinding || [],
-      heat_treatment: scheduleData.heat_treatment || []
+      heat_treatment: scheduleData.heat_treatment || [],
+      unscheduled: scheduleData.unscheduled || [] // Ensuring unscheduled parts save to DB
     };
 
     try {
@@ -159,7 +194,7 @@ const SHOScheduling = () => {
         body: JSON.stringify({ date: scheduleDate, plan: planToSave })
       });
       const result = await response.json();
-      if (result.status === 'success') alert('Production Plan saved successfully.');
+      if (result.status === 'success') alert('Production Plan saved successfully for ' + scheduleDate);
       else alert('Error saving plan: ' + result.detail);
     } catch (error) {
       alert('Error connecting to server.');
@@ -393,7 +428,7 @@ const SHOScheduling = () => {
 
               <div className="schedule-grid-wrapper" style={{ display: 'flex', minWidth: '1300px' }}>
                 
-                {/* 1. FACE GRINDING (WITH STICKY HEADERS) */}
+                {/* 1. FACE GRINDING */}
                 <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
                   <table className="img-table sticky-header-table">
                     <thead>
@@ -430,7 +465,7 @@ const SHOScheduling = () => {
                   </table>
                 </div>
 
-                {/* 2. OD GRINDING (WITH STICKY HEADERS) */}
+                {/* 2. OD GRINDING */}
                 <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
                   <table className="img-table sticky-header-table">
                     <thead>
@@ -531,12 +566,12 @@ const SHOScheduling = () => {
               {/* UNSCHEDULED ALERTS */}
               {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
                 <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff5f5', border: '1px solid #ffcccc', borderRadius: '5px' }}>
-                    <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Capacity/Missing Data Limit)</h3>
+                    <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Pending / Moving to Next Day)</h3>
                     <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
                         <thead>
                             <tr style={{ backgroundColor: '#ffe5e5' }}>
                                 <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Stage</th>
-                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Part</th>
+                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Part Type</th>
                                 <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Missed Boxes / Status</th>
                             </tr>
                         </thead>
@@ -555,7 +590,7 @@ const SHOScheduling = () => {
             </div>
           ) : (
             <div style={{ padding: '30px', textAlign: 'center', color: '#666', backgroundColor: 'white', flex: 1 }}>
-              <p>No schedule generated yet. Click "Generate Production Schedule".</p>
+              <p>No schedule generated for this date yet. Click "Generate Production Schedule".</p>
             </div>
           )}
         </div>

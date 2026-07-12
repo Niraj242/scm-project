@@ -59,7 +59,7 @@ const SHOScheduling = () => {
     },
     HUB: { 
         HT: {},
-        OD: { 'HUB 1.2': ['IR', 'OR'], 'HUB 1.3': ['IR', 'OR'], 'HUB 1.4': ['IR', 'OR'] }, 
+        OD: { 'HUB 1.2': ['IR'], 'HUB 1.3': ['IR'], 'HUB 1.4': ['IR'] }, 
         FACE: {} 
     }
   };

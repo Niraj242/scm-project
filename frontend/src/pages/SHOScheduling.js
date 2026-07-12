@@ -41,21 +41,21 @@ const SHOScheduling = () => {
     DGBB: { 
         HT: { CH07: ['IR', 'OR'] },
         OD: { 
-          CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], 
-          CH05: ['IR', 'OR'], CH07: ['IR', 'OR'], CH08: ['IR', 'OR'], CH11: ['IR', 'OR'] 
+          CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], 
+          CH05: ['IR'], CH07: ['IR', 'OR'], CH08: ['IR'], CH11: ['IR'] 
         }, 
         FACE: { 
-          CH01: ['IR', 'OR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH07: ['IR', 'OR'] 
+          CH01: ['IR'], CH02: ['IR', 'OR'], CH04: ['IR', 'OR'], CH07: ['IR', 'OR'] 
         } 
     },
     TRB: { 
         HT: {},
         OD: { 
-          'T 1': ['IR', 'OR'], 'T 2': ['IR', 'OR'], 'T 3': ['IR', 'OR'], 'T 4': ['IR', 'OR'], 
-          'T 5': ['IR', 'OR'], 'T 6': ['IR', 'OR'], 'T 7': ['IR', 'OR'], 'T 8': ['IR', 'OR'], 
-          'T 9': ['IR', 'OR'], 'T10': ['IR', 'OR'] 
+          'T 1': ['IR'], 'T 2': ['IR'], 'T 3': ['IR'], 'T 4': ['IR'], 
+          'T 5': ['IR'], 'T 6': ['IR'], 'T 7': ['IR'], 'T 8': ['IR', 'OR'], 
+          'T 9': ['IR'], 'T10': ['IR'] 
         }, 
-        FACE: { 'T 8': ['IR', 'OR'], 'T 9': ['IR', 'OR'] } 
+        FACE: { 'T 8': ['IR', 'OR'], 'T 9': ['IR'] } 
     },
     HUB: { 
         HT: {},

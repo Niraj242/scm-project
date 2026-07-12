@@ -29,6 +29,7 @@ MONTHLY_FILE = "monthly_tracking.json"
 SAVED_PLAN_FILE = "saved_plan.json"
 SAVED_BUFFERS_FILE = "saved_buffers.json"
 CARRYOVER_FILE = "carryover_tracking.json"
+PLANT_STATE_FILE = "plant_state.json" # NEW: Continuous State Tracking
 
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
@@ -58,6 +59,9 @@ def save_buffers_to_disk(entries): save_json_file(SAVED_BUFFERS_FILE, entries)
 def load_carryover(): return load_json_file(CARRYOVER_FILE)
 def save_carryover(data): save_json_file(CARRYOVER_FILE, data)
 
+def load_plant_state(): return load_json_file(PLANT_STATE_FILE)
+def save_plant_state(data): save_json_file(PLANT_STATE_FILE, data)
+
 class ScheduleRequest(BaseModel):
     sector: str
     date: str
@@ -78,7 +82,6 @@ def health_check():
 def get_monthly_tracking():
     return load_monthly_tracking()
 
-# REQUIREMENT 2: Extract and persist machine states, partials, and metrics purely upon explicit user save.
 @router.post("/api/save_plan")
 def save_plan(payload: SavePlanRequest):
     try:
@@ -86,7 +89,7 @@ def save_plan(payload: SavePlanRequest):
         plans[payload.date] = payload.plan
         save_json_file(SAVED_PLAN_FILE, plans)
 
-        # Persist extracted state mapping (carryovers and metrics) for tomorrow's run
+        # Persist extracted state mapping (continuous tracking)
         if "state_snapshot" in payload.plan:
             snapshot = payload.plan["state_snapshot"]
             
@@ -101,6 +104,10 @@ def save_plan(payload: SavePlanRequest):
                 monthly_all[month_str] = snapshot["monthly_data"]
                 save_monthly_tracking(monthly_all)
 
+            # NEW: Save strict continuous machine and WIP state
+            if "plant_state" in snapshot:
+                save_plant_state(snapshot["plant_state"])
+
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -112,6 +119,20 @@ def normalize_channel(ch_str):
 
 def get_process_flexibility(channel_norm, p_code, flex_map):
     return flex_map.get(channel_norm, {}).get(p_code, {'HT': True, 'FACE': True, 'OD': True})
+
+def get_first_required_stage(flex):
+    if flex.get('HT', True): return 'HT'
+    if flex.get('FACE', True): return 'FACE'
+    if flex.get('OD', True): return 'OD'
+    return None
+
+def get_next_required_stage(current_stage, flex):
+    if current_stage == 'HT':
+        if flex.get('FACE', True): return 'FACE'
+        if flex.get('OD', True): return 'OD'
+    elif current_stage == 'FACE':
+        if flex.get('OD', True): return 'OD'
+    return None
 
 def is_invalid_part(raw_text):
     if pd.isna(raw_text) or not raw_text: return True
@@ -398,7 +419,7 @@ def generate_schedule(payload: ScheduleRequest):
     unscheduled = []
     logged_rpb = set()
     
-    # REQUIREMENT 6: Automatic Buffer Loading
+    # Load manual Buffers if inputted, but don't mix up with WIP 
     saved_bufs = load_saved_buffers()
     active_entries = saved_bufs.copy()
     if payload.entries:
@@ -425,6 +446,7 @@ def generate_schedule(payload: ScheduleRequest):
         debug_logs.extend(logs1)
         
         if sheets_zero:
+            # (Excel Demands Loading Logic Remains the Same)
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
                 if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
@@ -508,6 +530,7 @@ def generate_schedule(payload: ScheduleRequest):
         if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
             box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
         elif sheets_box:
+            # (Box Matrix Loading Remained Same)
             for s_name, df_b in sheets_box.items():
                 s_name_up = str(s_name).upper().strip()
                 if 'RING' in s_name_up and 'BOX' in s_name_up:
@@ -568,7 +591,6 @@ def generate_schedule(payload: ScheduleRequest):
             machines_data = {'FACE': {}, 'OD': {}}
             channel_flex_map = {} 
 
-            # REQUIREMENT 1: Exact Process Flexibility parsing including HT
             flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
             if flex_sheet_key:
                 df_flex = sheets_prod[flex_sheet_key].fillna('')
@@ -714,188 +736,58 @@ def generate_schedule(payload: ScheduleRequest):
             PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, channel_flex_map, prod_cache_ts)
         del sheets_prod
 
-        buffers_by_fam = {}
-        BUFFER_MAP = {
-            'ch_buffer_1': ('type_1', 'CH'), 'ch_buffer_2': ('next_type_1', 'CH'),
-            'od_buffer_1': ('type_2', 'OD'), 'od_buffer_2': ('next_type_2', 'OD'),
-            'face_buffer_1': ('type_3', 'FACE'), 'face_buffer_2': ('type_4', 'FACE')
-        }
-
-        for buf_prefix, (type_prefix, stage) in BUFFER_MAP.items():
-            for key, val in payload.entries.items():
-                if key.startswith(type_prefix + '_'):
-                    parts = key.split('_')
-                    if len(parts) < 3: continue
-                    col_channel, sub_ring_type = parts[-2], parts[-1]
-                    display_name = get_display_name(val)
-                    if is_invalid_part(display_name): continue
-                    buf_val = safe_float(payload.entries.get(f"{buf_prefix}_{col_channel}_{sub_ring_type}", 0))
-                    if buf_val <= 0: continue
-                    if display_name not in buffers_by_fam: buffers_by_fam[display_name] = {'CH': {'IR': 0.0, 'OR': 0.0}, 'OD': {'IR': 0.0, 'OR': 0.0}, 'FACE': {'IR': 0.0, 'OR': 0.0}}
-                    buffers_by_fam[display_name][stage][sub_ring_type] += buf_val
-
-        ch_stats = {}
-        fam_to_ch = {}
-        for d_dict in [channel_demands_day1, channel_demands_day2]:
-            for fam, data in d_dict.items():
-                ch = normalize_channel(data['channel'])
-                fam_to_ch[fam] = ch
-                if ch not in ch_stats: ch_stats[ch] = {'demand': 0.0, 'buffer': 0.0}
-                ch_stats[ch]['demand'] += data.get('IR', 0) + data.get('OR', 0)
-                
-        for fam, stg_data in buffers_by_fam.items():
-            ch = fam_to_ch.get(fam, "UNKNOWN")
-            if ch not in ch_stats: ch_stats[ch] = {'demand': 0.0, 'buffer': 0.0}
-            for stg, side_data in stg_data.items(): ch_stats[ch]['buffer'] += side_data.get('IR', 0) + side_data.get('OR', 0)
-                
-        for ch, stats in ch_stats.items(): stats['score'] = (stats['demand'] + 1.0) / (stats['buffer'] + 1.0)
-
-        def process_requirements_for_day(demands, in_out_buffers):
-            f_req, o_req, h_req = {}, {}, {}
-            for display_name, data in demands.items():
-                ch_norm = normalize_channel(data['channel'])
-                for side in ['IR', 'OR']:
-                    req_rings = data[side]
-                    if req_rings <= 0: continue
-                    rpb = get_box_for_part(display_name, side, box_matrix)
-                    flex = get_process_flexibility(ch_norm, side, channel_flex_map)
-                    
-                    req_ht = flex.get('HT', True)
-                    req_face = flex.get('FACE', True)
-                    req_od = flex.get('OD', True)
-                    
-                    def apply_buf(stage, base_rings, rpb_rate):
-                        raw_buf = in_out_buffers.get(display_name, {}).get(stage, {}).get(side, 0)
-                        if payload.unit_mode == 'Days': avail_buf_rings = raw_buf * base_rings
-                        elif payload.unit_mode == 'Boxes': avail_buf_rings = raw_buf * (rpb_rate if rpb_rate > 0 else 100)
-                        else: avail_buf_rings = raw_buf 
-                        if avail_buf_rings >= base_rings: used_rings, rem_rings = base_rings, avail_buf_rings - base_rings
-                        else: used_rings, rem_rings = avail_buf_rings, 0.0
-                        if display_name in in_out_buffers:
-                            if payload.unit_mode == 'Days': new_raw = (rem_rings / base_rings) if base_rings > 0 else 0
-                            elif payload.unit_mode == 'Boxes': new_raw = rem_rings / (rpb_rate if rpb_rate > 0 else 100)
-                            else: new_raw = rem_rings
-                            in_out_buffers[display_name][stage][side] = new_raw
-                        return used_rings
-
-                    current_req = req_rings
-                    used_ch_buf = apply_buf('CH', current_req, rpb)
-                    current_req = max(0.0, current_req - used_ch_buf)
-                    
-                    if req_od:
-                        if current_req > 0:
-                            if display_name not in o_req: o_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
-                            o_req[display_name][side] += current_req
-                        used_od_buf = apply_buf('OD', current_req, rpb)
-                        current_req = max(0.0, current_req - used_od_buf)
-                        
-                    if req_face:
-                        if current_req > 0:
-                            if display_name not in f_req: f_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
-                            f_req[display_name][side] += current_req
-                        used_face_buf = apply_buf('FACE', current_req, rpb)
-                        current_req = max(0.0, current_req - used_face_buf)
-                        
-                    if req_ht:
-                        if current_req > 0:
-                            if display_name not in h_req: h_req[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': data['channel']}
-                            h_req[display_name][side] += current_req
-            return f_req, o_req, h_req
-
-        face_req_d1, od_req_d1, ht_req_d1 = process_requirements_for_day(channel_demands_day1, buffers_by_fam)
-        face_req_d2, od_req_d2, ht_req_d2 = process_requirements_for_day(channel_demands_day2, buffers_by_fam)
+        # NEW CONTINUOUS STATE INITIALIZATION
+        current_state = load_plant_state()
+        if "wip" not in current_state: current_state["wip"] = {}
+        if "machines" not in current_state: current_state["machines"] = {}
+        if "inventory" not in current_state: current_state["inventory"] = {}
 
         work_items = []
-        
-        # REQUIREMENT 5 & 4: D0 Priority & Carry Forward
-        carryover_all = load_carryover()
-        prev_unscheduled = carryover_all.get(prev_date_str, [])
-        for carry in prev_unscheduled:
-            c_stage = carry.get("stage")
-            c_part = carry.get("part_raw")
-            c_disp = carry.get("disp")
-            c_pc = carry.get("pc")
-            c_qty = safe_float(carry.get("qty"))
-            c_chan = carry.get("channel", "UNKNOWN")
-            c_flex = get_process_flexibility(c_chan, c_pc, channel_flex_map)
-            if c_qty > 0 and c_disp and c_pc:
-                work_items.append(WorkItem(c_stage, c_disp, c_pc, -1, c_chan, c_qty, 0.0, 10000.0, c_flex))
-
-        # FIXED PROCESS FLEXIBILITY HIERARCHY
-        for day_idx, demands, f_req, o_req, h_req in [(0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1), (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)]:
-            for display_name, data in demands.items():
-                ch_norm = normalize_channel(data['channel'])
-                for p_code in ['IR', 'OR']:
-                    flex = get_process_flexibility(ch_norm, p_code, channel_flex_map)
-                    req_o = o_req.get(display_name, {}).get(p_code, 0.0) if display_name in o_req else 0.0
-                    req_f = f_req.get(display_name, {}).get(p_code, 0.0) if display_name in f_req else 0.0
-                    req_h = h_req.get(display_name, {}).get(p_code, 0.0) if display_name in h_req else 0.0
-                    
-                    # Prevent double counting by only subtracting from previous *active* stage
-                    if flex.get('FACE', True): init_o = req_o - req_f
-                    elif flex.get('HT', True): init_o = req_o - req_h
-                    else: init_o = req_o
-                        
-                    if flex.get('HT', True): init_f = req_f - req_h
-                    else: init_f = req_f
-                        
-                    init_h = req_h
-                    ch_score = ch_stats.get(ch_norm, {}).get('score', 0.0)
-                    
-                    # Spawn initial operations strictly respecting Flexibility Flags
-                    if flex.get('HT', True) and init_h > 0:
-                        work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, ch_score, flex))
-                    if flex.get('FACE', True) and init_f > 0:
-                        work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, ch_score, flex))
-                    if flex.get('OD', True) and init_o > 0:
-                        work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, ch_score, flex))
-
         resources = []
         for f_name, cap in FURNACE_SPECS.items(): resources.append(Resource(f_name, 'HT', cap))
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # REQUIREMENT 3: Correct Time Shift Calculation from Previous Scheduled Plan
-        saved_plan = load_saved_plan()
-        prev_plan = saved_plan.get(prev_date_str, {})
-        if prev_plan:
-            try:
-                for stage_key in ["od_grinding", "face_grinding", "heat_treatment"]:
-                    for m_data in prev_plan.get(stage_key, []):
-                        m_id = m_data.get("machine") or m_data.get("furnace")
-                        rows = m_data.get("rows", [])
-                        if not rows: continue
-                        last_timing = rows[-1].get("timing", "")
-                        if "-" in last_timing:
-                            end_t_str = last_timing.split("-")[1].strip()
-                            rel_today = 0.0
-                            days_added = 0
-                            if "(+1)" in end_t_str:
-                                days_added = 1
-                                end_t_str = end_t_str.replace('(+1)', '').strip()
-                            elif "(+2)" in end_t_str:
-                                days_added = 2
-                                end_t_str = end_t_str.replace('(+2)', '').strip()
-                                
-                            if ":" in end_t_str:
-                                h, m = end_t_str.split(':')
-                                abs_h = int(h) + int(m) / 60.0
-                                # Shift calculations relative to Today's 10:00 AM start time, pulling exact end moment
-                                rel_from_yesterday = (abs_h + (days_added * 24.0)) - 10.0
-                                rel_today = max(0.0, rel_from_yesterday - 24.0)
-                                
-                            for r in resources:
-                                if r.id == m_id:
-                                    r.ready_time = max(r.ready_time, rel_today)
-                                    part_raw = rows[-1].get("part", "")
-                                    parts_split = part_raw.split("-") if "-" in part_raw else part_raw.split(" ")
-                                    disp = parts_split[0].strip()
-                                    pc = "OR" if "OR" in part_raw else ("IR" if "IR" in part_raw else "")
-                                    if disp and pc:
-                                        r.last_fam = disp
-                                        r.last_pc = pc
-            except Exception as e: pass
+        # Load historical Machine Continuitity (Shift times backward 24h as today is new 10AM start)
+        for res in resources:
+            if res.id in current_state["machines"]:
+                sm = current_state["machines"][res.id]
+                shifted_ready = max(0.0, float(sm.get("ready_time", 0.0)) - 24.0)
+                res.ready_time = shifted_ready
+                res.last_fam = sm.get("last_fam")
+                res.last_pc = sm.get("last_pc")
 
+        # Process WIP Queues - Inject existing WIP FIRST
+        for w_key, w_data in current_state["wip"].items():
+            disp, pc = w_key.split('|')
+            ch_norm = w_data.get("channel", "UNKNOWN")
+            flex = get_process_flexibility(ch_norm, pc, channel_flex_map)
+            
+            for stage in ['HT', 'FACE', 'OD']:
+                qty = float(w_data.get(stage, 0.0))
+                if qty > 0:
+                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, 0.0, 10000.0, flex))
+                    current_state["wip"][w_key][stage] = 0.0 # Remove from WIP since it's scheduled
+
+        # Append new daily requirements at their purely FIRST REQUIRED PROCESS
+        ch_stats = {}
+        for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
+            for display_name, data in demands.items():
+                ch_norm = normalize_channel(data['channel'])
+                
+                if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
+                ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
+                
+                for p_code in ['IR', 'OR']:
+                    req = float(data.get(p_code, 0.0))
+                    if req <= 0: continue
+                    flex = get_process_flexibility(ch_norm, p_code, channel_flex_map)
+                    
+                    first_stage = get_first_required_stage(flex)
+                    if first_stage:
+                        work_items.append(WorkItem(first_stage, display_name, p_code, day_idx, data['channel'], req, 0.0, ch_stats[ch_norm]['score'], flex))
+
+        # Check UI Constraints (Machine Availability Overrides)
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
         for res in resources:
             conf = avail_dict.get(res.id, {})
@@ -910,7 +802,7 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # REQUIREMENT 8 & 9: Merge D1 and D2 small batches intelligently across ALL stages including HT
+        # Merge D1 and D2 small batches
         for d1_item in [i for i in work_items if i.day_idx == 0]:
             d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
             if d2_item and (d1_item.qty + d2_item.qty) <= 5000:
@@ -918,7 +810,7 @@ def generate_schedule(payload: ScheduleRequest):
                 d1_item.merged_d2 = True
                 d2_item.qty = 0.0 
 
-        # Target D0 first, then D1, then D2
+        # SIMULATION LOOP (With Auto WIP Cascade)
         for target_day in [-1, 0, 1]:
             current_max_time = 24.0 
             
@@ -1010,12 +902,15 @@ def generate_schedule(payload: ScheduleRequest):
                 if res.ready_time >= res.max_time: res.blocked = True
                 item.qty -= chunk_qty
                 
-                # Dynamically trigger ONLY the next required stage based on Flex flags
-                next_stage = None
-                if res.type == 'HT': next_stage = 'FACE' if item.flex.get('FACE', True) else ('OD' if item.flex.get('OD', True) else None)
-                elif res.type == 'FACE': next_stage = 'OD' if item.flex.get('OD', True) else None
-                if next_stage: work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.flex))
-                
+                # WIP SPAWNING: Send completed material to the next required stage queue immediately 
+                next_stage = get_next_required_stage(res.type, item.flex)
+                if next_stage: 
+                    work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.flex))
+                else:
+                    # Update finished inventory
+                    inv_key = f"{item.disp}|{item.pc}"
+                    current_state["inventory"][inv_key] = current_state["inventory"].get(inv_key, 0.0) + chunk_qty
+
                 rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
                 can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
                 
@@ -1038,10 +933,7 @@ def generate_schedule(payload: ScheduleRequest):
                     display_val = f"{math.ceil(chunk_qty / rpb)} Boxes" if rpb > 0 else f"{int(chunk_qty)} Rings (Q)"
                     timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
                     
-                    is_terminal = False
-                    if res.type == 'OD': is_terminal = True
-                    elif res.type == 'FACE' and not item.flex.get('OD', True): is_terminal = True
-                    elif res.type == 'HT' and not item.flex.get('FACE', True) and not item.flex.get('OD', True): is_terminal = True
+                    is_terminal = (next_stage is None)
                     
                     if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
                     else: res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
@@ -1049,43 +941,35 @@ def generate_schedule(payload: ScheduleRequest):
         unscheduled_to_carry = []
         for item in work_items:
             if item.qty <= 0.01: continue
+            
+            # Save unscheduled portions to strictly trackable WIP State queues
+            w_key = f"{item.disp}|{item.pc}"
+            if w_key not in current_state["wip"]: current_state["wip"][w_key] = {"HT": 0.0, "FACE": 0.0, "OD": 0.0, "channel": item.channel}
+            current_state["wip"][w_key][item.stage] += item.qty
+
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
             
             if getattr(item, 'merged_d2', False): day_label = "Day 1 + Day 2"
-            elif item.day_idx == -1: day_label = "D0 Priority"
+            elif item.day_idx == -1: day_label = "D0 Priority/WIP"
             else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"
                 
             reason = "Capacity Exceeded"
-            if item.stage == 'HT':
-                if not get_weight_for_part(item.disp, item.pc, weight_matrix): reason = "Missing Weight in Weights Master"
-                else:
-                    valid_f = get_furnaces_for_part(item.disp, item.pc, furnace_map)
-                    if not valid_f: reason = "Missing Machine Rate / No Furnace Assigned"
-                    elif all(r.blocked for r in resources if r.id in valid_f): reason = "Exceeds Planning Window"
-            else:
-                rates_found = any(get_rate_for_part(item.disp, item.pc, r.capacity_info, r.id) > 0 for r in resources if r.type == item.stage)
-                if not rates_found: reason = f"Missing {item.stage} Machine Rate (Check Part Number)"
-                elif all(r.blocked for r in resources if r.type == item.stage and get_rate_for_part(item.disp, item.pc, r.capacity_info, r.id) > 0): reason = "Exceeds Planning Window"
-            
             part_display = f"{item.disp} {item.pc} ({day_label})"
             unscheduled.append({"stage": item.stage, "part": part_display, "missed_boxes": f"{missed_val} - {reason}"})
             
             unscheduled_to_carry.append({
-                "stage": item.stage,
-                "part_raw": part_display,
-                "disp": item.disp,
-                "pc": item.pc,
-                "qty": item.qty,
-                "channel": item.channel
+                "stage": item.stage, "part_raw": part_display, "disp": item.disp, "pc": item.pc, "qty": item.qty, "channel": item.channel
             })
 
         final_face, final_od, furnaces_formatted = [], [], []
         today_prod_map = {}
         for r in resources:
+            current_state["machines"][r.id] = { "ready_time": r.ready_time, "last_fam": r.last_fam, "last_pc": r.last_pc }
             if r.type == 'FACE': final_face.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})
+            
             for row in r.rows:
                 if row.get("is_terminal"):
                     part_str = row.get("part", "")
@@ -1108,10 +992,11 @@ def generate_schedule(payload: ScheduleRequest):
                 "difference": int(t_prod - d1_req)
             })
 
-        # Encapsulate state mutations into payload so we don't prematurely save them on testing 'Generate Plan'
+        # Save all simulation updates cleanly in the state payload to finalize via Save Plan UI trigger
         snapshot = {
             "carryover": unscheduled_to_carry,
-            "monthly_data": monthly_data.get(month_str, {})
+            "monthly_data": monthly_data.get(month_str, {}),
+            "plant_state": current_state
         }
 
         return {

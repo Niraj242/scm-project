@@ -78,12 +78,29 @@ def health_check():
 def get_monthly_tracking():
     return load_monthly_tracking()
 
+# REQUIREMENT 2: Extract and persist machine states, partials, and metrics purely upon explicit user save.
 @router.post("/api/save_plan")
 def save_plan(payload: SavePlanRequest):
     try:
         plans = load_saved_plan()
         plans[payload.date] = payload.plan
         save_json_file(SAVED_PLAN_FILE, plans)
+
+        # Persist extracted state mapping (carryovers and metrics) for tomorrow's run
+        if "state_snapshot" in payload.plan:
+            snapshot = payload.plan["state_snapshot"]
+            
+            if "carryover" in snapshot:
+                carryover_all = load_carryover()
+                carryover_all[payload.date] = snapshot["carryover"]
+                save_carryover(carryover_all)
+                
+            if "monthly_data" in snapshot:
+                month_str = payload.date[:7]
+                monthly_all = load_monthly_tracking()
+                monthly_all[month_str] = snapshot["monthly_data"]
+                save_monthly_tracking(monthly_all)
+
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -838,7 +855,7 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # REQUIREMENT 3 & 8: Machine state continuity & Correct Saved Plan calculations
+        # REQUIREMENT 3: Correct Time Shift Calculation from Previous Scheduled Plan
         saved_plan = load_saved_plan()
         prev_plan = saved_plan.get(prev_date_str, {})
         if prev_plan:
@@ -863,7 +880,9 @@ def generate_schedule(payload: ScheduleRequest):
                             if ":" in end_t_str:
                                 h, m = end_t_str.split(':')
                                 abs_h = int(h) + int(m) / 60.0
-                                rel_today = max(0.0, (abs_h + (days_added * 24.0)) - 10.0)
+                                # Shift calculations relative to Today's 10:00 AM start time, pulling exact end moment
+                                rel_from_yesterday = (abs_h + (days_added * 24.0)) - 10.0
+                                rel_today = max(0.0, rel_from_yesterday - 24.0)
                                 
                             for r in resources:
                                 if r.id == m_id:
@@ -891,8 +910,8 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # REQUIREMENT 2: Merge very small D1 + D2 jobs on same machine
-        for d1_item in [i for i in work_items if i.day_idx == 0 and i.stage in ['FACE', 'OD']]:
+        # REQUIREMENT 8 & 9: Merge D1 and D2 small batches intelligently across ALL stages including HT
+        for d1_item in [i for i in work_items if i.day_idx == 0]:
             d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
             if d2_item and (d1_item.qty + d2_item.qty) <= 5000:
                 d1_item.qty += d2_item.qty
@@ -1061,9 +1080,6 @@ def generate_schedule(payload: ScheduleRequest):
                 "channel": item.channel
             })
 
-        carryover_all[payload.date] = unscheduled_to_carry
-        save_carryover(carryover_all)
-
         final_face, final_od, furnaces_formatted = [], [], []
         today_prod_map = {}
         for r in resources:
@@ -1092,8 +1108,24 @@ def generate_schedule(payload: ScheduleRequest):
                 "difference": int(t_prod - d1_req)
             })
 
-        save_monthly_tracking(monthly_data)
-        return {"status": "success", "debug_logs": debug_logs, "data": {"face_grinding": final_face, "od_grinding": final_od, "heat_treatment": furnaces_formatted, "unscheduled": unscheduled, "summary": summary_list}}
+        # Encapsulate state mutations into payload so we don't prematurely save them on testing 'Generate Plan'
+        snapshot = {
+            "carryover": unscheduled_to_carry,
+            "monthly_data": monthly_data.get(month_str, {})
+        }
+
+        return {
+            "status": "success", 
+            "debug_logs": debug_logs, 
+            "data": {
+                "face_grinding": final_face, 
+                "od_grinding": final_od, 
+                "heat_treatment": furnaces_formatted, 
+                "unscheduled": unscheduled, 
+                "summary": summary_list,
+                "state_snapshot": snapshot
+            }
+        }
     except Exception as e:
         import traceback
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}

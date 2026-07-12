@@ -94,7 +94,6 @@ def normalize_channel(ch_str):
     return ch
 
 def get_process_flexibility(channel_norm, p_code, flex_map):
-    # Returns process requirements (True = Required, False = Not Required)
     return flex_map.get(channel_norm, {}).get(p_code, {'HT': True, 'FACE': True, 'OD': True})
 
 def is_invalid_part(raw_text):
@@ -209,7 +208,7 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
     if url in EXCEL_CACHE:
         cache_time, df_dict = EXCEL_CACHE[url]
         if now - cache_time < CACHE_TTL:
-            return df_dict, [f"Loaded {file_label} from ultra-fast cache."]
+            return df_dict, [f"Loaded {file_label} from cache."]
     try:
         resp = requests.get(url, timeout=180)
         if resp.status_code != 200: 
@@ -303,7 +302,7 @@ class WorkItem:
         self.stage = stage
         self.disp = disp
         self.pc = pc
-        self.day_idx = day_idx  # D0 = -1, D1 = 0, D2 = 1
+        self.day_idx = day_idx
         self.channel = channel
         self.qty = qty
         self.ready_time = ready_time
@@ -382,7 +381,7 @@ def generate_schedule(payload: ScheduleRequest):
     unscheduled = []
     logged_rpb = set()
     
-    # Automatic Buffer Loading (Merged with current entries)
+    # REQUIREMENT 6: Automatic Buffer Loading
     saved_bufs = load_saved_buffers()
     active_entries = saved_bufs.copy()
     if payload.entries:
@@ -438,6 +437,7 @@ def generate_schedule(payload: ScheduleRequest):
                     if mv_col_idx is None:
                         for j, val in enumerate(row_strs):
                             if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
+                            
                     if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                         r_idx = i
                         for j, val in enumerate(df_zero.iloc[i].values):
@@ -445,7 +445,7 @@ def generate_schedule(payload: ScheduleRequest):
                             if is_target_date(val, day_2): c2_col = j
                             s_val = str(val).strip()
                             if s_val.isdigit() and 1 <= int(s_val) <= 31: monthly_cols.append(j)
-                    if r_idx is not None and type_col_idx is not None: break
+                    if r_idx is not None and type_col_idx is not None and c1_col is not None: break
 
                 col_to_use = type_col_idx if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "SABB"] else mv_col_idx
                 if col_to_use is None: col_to_use = mv_col_idx if mv_col_idx is not None else type_col_idx
@@ -551,7 +551,7 @@ def generate_schedule(payload: ScheduleRequest):
             machines_data = {'FACE': {}, 'OD': {}}
             channel_flex_map = {} 
 
-            # EXACT Process Flexibility parsing including Heat Treatment
+            # REQUIREMENT 1: Exact Process Flexibility parsing including HT
             flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
             if flex_sheet_key:
                 df_flex = sheets_prod[flex_sheet_key].fillna('')
@@ -790,7 +790,7 @@ def generate_schedule(payload: ScheduleRequest):
 
         work_items = []
         
-        # D0 Logic: Carry forward unfinished operations from yesterday (Loads directly at required stage)
+        # REQUIREMENT 5 & 4: D0 Priority & Carry Forward
         carryover_all = load_carryover()
         prev_unscheduled = carryover_all.get(prev_date_str, [])
         for carry in prev_unscheduled:
@@ -802,9 +802,9 @@ def generate_schedule(payload: ScheduleRequest):
             c_chan = carry.get("channel", "UNKNOWN")
             c_flex = get_process_flexibility(c_chan, c_pc, channel_flex_map)
             if c_qty > 0 and c_disp and c_pc:
-                # day_idx = -1 makes this D0, granting it absolute top priority before D1 and D2
                 work_items.append(WorkItem(c_stage, c_disp, c_pc, -1, c_chan, c_qty, 0.0, 10000.0, c_flex))
 
+        # FIXED PROCESS FLEXIBILITY HIERARCHY
         for day_idx, demands, f_req, o_req, h_req in [(0, channel_demands_day1, face_req_d1, od_req_d1, ht_req_d1), (1, channel_demands_day2, face_req_d2, od_req_d2, ht_req_d2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
@@ -814,24 +814,31 @@ def generate_schedule(payload: ScheduleRequest):
                     req_f = f_req.get(display_name, {}).get(p_code, 0.0) if display_name in f_req else 0.0
                     req_h = h_req.get(display_name, {}).get(p_code, 0.0) if display_name in h_req else 0.0
                     
-                    init_f = req_f - req_h if flex.get('FACE', True) else 0.0
-                    if flex.get('OD', True): init_o = req_o - req_f if flex.get('FACE', True) else req_o - req_h
-                    else: init_o = 0.0
+                    # Prevent double counting by only subtracting from previous *active* stage
+                    if flex.get('FACE', True): init_o = req_o - req_f
+                    elif flex.get('HT', True): init_o = req_o - req_h
+                    else: init_o = req_o
+                        
+                    if flex.get('HT', True): init_f = req_f - req_h
+                    else: init_f = req_f
+                        
                     init_h = req_h
-                    
                     ch_score = ch_stats.get(ch_norm, {}).get('score', 0.0)
                     
-                    # Schedule strictly required initial operations based on Flex
-                    if init_h > 0 and flex.get('HT', True): work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, ch_score, flex))
-                    if init_f > 0 and flex.get('FACE', True): work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, ch_score, flex))
-                    if init_o > 0 and flex.get('OD', True): work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, ch_score, flex))
+                    # Spawn initial operations strictly respecting Flexibility Flags
+                    if flex.get('HT', True) and init_h > 0:
+                        work_items.append(WorkItem('HT', display_name, p_code, day_idx, data['channel'], init_h, 0.0, ch_score, flex))
+                    if flex.get('FACE', True) and init_f > 0:
+                        work_items.append(WorkItem('FACE', display_name, p_code, day_idx, data['channel'], init_f, 0.0, ch_score, flex))
+                    if flex.get('OD', True) and init_o > 0:
+                        work_items.append(WorkItem('OD', display_name, p_code, day_idx, data['channel'], init_o, 0.0, ch_score, flex))
 
         resources = []
         for f_name, cap in FURNACE_SPECS.items(): resources.append(Resource(f_name, 'HT', cap))
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # Machine state & Continuity from Saved Plan
+        # REQUIREMENT 3 & 8: Machine state continuity & Correct Saved Plan calculations
         saved_plan = load_saved_plan()
         prev_plan = saved_plan.get(prev_date_str, {})
         if prev_plan:
@@ -845,15 +852,18 @@ def generate_schedule(payload: ScheduleRequest):
                         if "-" in last_timing:
                             end_t_str = last_timing.split("-")[1].strip()
                             rel_today = 0.0
-                            
+                            days_added = 0
                             if "(+1)" in end_t_str:
-                                h, m = end_t_str.replace('(+1)', '').strip().split(':')
-                                abs_h = int(h) + int(m) / 60.0
-                                rel_today = max(0.0, abs_h - 10.0)
+                                days_added = 1
+                                end_t_str = end_t_str.replace('(+1)', '').strip()
                             elif "(+2)" in end_t_str:
-                                h, m = end_t_str.replace('(+2)', '').strip().split(':')
+                                days_added = 2
+                                end_t_str = end_t_str.replace('(+2)', '').strip()
+                                
+                            if ":" in end_t_str:
+                                h, m = end_t_str.split(':')
                                 abs_h = int(h) + int(m) / 60.0
-                                rel_today = max(0.0, (abs_h + 24.0) - 10.0)
+                                rel_today = max(0.0, (abs_h + (days_added * 24.0)) - 10.0)
                                 
                             for r in resources:
                                 if r.id == m_id:
@@ -881,7 +891,7 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # Merge D1 & D2 for identical parts if combined setup takes < 5000 rings (a "small machining time")
+        # REQUIREMENT 2: Merge very small D1 + D2 jobs on same machine
         for d1_item in [i for i in work_items if i.day_idx == 0 and i.stage in ['FACE', 'OD']]:
             d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
             if d2_item and (d1_item.qty + d2_item.qty) <= 5000:
@@ -889,7 +899,7 @@ def generate_schedule(payload: ScheduleRequest):
                 d1_item.merged_d2 = True
                 d2_item.qty = 0.0 
 
-        # Scheduling Loop (Targeting D0 first, then D1, then D2 implicitly)
+        # Target D0 first, then D1, then D2
         for target_day in [-1, 0, 1]:
             current_max_time = 24.0 
             
@@ -904,7 +914,6 @@ def generate_schedule(payload: ScheduleRequest):
                     break 
                     
                 best_pair = None
-                # Sort key strictly favors Day Index (D0 first)
                 best_key = (float('inf'), float('inf'), float('inf'), float('-inf'))
                 
                 for item in active_items:
@@ -930,8 +939,6 @@ def generate_schedule(payload: ScheduleRequest):
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         
                         gap = max(0.0, item.ready_time - (res.ready_time + setup))
-                        
-                        # Primary sort by item.day_idx ensures D0 (-1) is processed before D1 (0) 
                         key = (item.day_idx, start_time, gap, -item.priority)
                         
                         if key < best_key:
@@ -984,6 +991,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if res.ready_time >= res.max_time: res.blocked = True
                 item.qty -= chunk_qty
                 
+                # Dynamically trigger ONLY the next required stage based on Flex flags
                 next_stage = None
                 if res.type == 'HT': next_stage = 'FACE' if item.flex.get('FACE', True) else ('OD' if item.flex.get('OD', True) else None)
                 elif res.type == 'FACE': next_stage = 'OD' if item.flex.get('OD', True) else None
@@ -1044,7 +1052,6 @@ def generate_schedule(payload: ScheduleRequest):
             part_display = f"{item.disp} {item.pc} ({day_label})"
             unscheduled.append({"stage": item.stage, "part": part_display, "missed_boxes": f"{missed_val} - {reason}"})
             
-            # Saves strictly the next unfinished stage to completely prevent repeating completed stages
             unscheduled_to_carry.append({
                 "stage": item.stage,
                 "part_raw": part_display,

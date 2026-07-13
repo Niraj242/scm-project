@@ -29,7 +29,8 @@ MONTHLY_FILE = "monthly_tracking.json"
 SAVED_PLAN_FILE = "saved_plan.json"
 SAVED_BUFFERS_FILE = "saved_buffers.json"
 CARRYOVER_FILE = "carryover_tracking.json"
-PLANT_STATE_FILE = "plant_state.json" # NEW: Continuous State Tracking
+PLANT_STATE_FILE = "plant_state.json"
+PENDING_STATE_FILE = "pending_state.json" 
 
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
@@ -89,24 +90,26 @@ def save_plan(payload: SavePlanRequest):
         plans[payload.date] = payload.plan
         save_json_file(SAVED_PLAN_FILE, plans)
 
-        # Persist extracted state mapping (continuous tracking)
-        if "state_snapshot" in payload.plan:
-            snapshot = payload.plan["state_snapshot"]
-            
-            if "carryover" in snapshot:
+        # NEW: Robust Backend State Locking (Removes dependency on UI payload)
+        pending = load_json_file(PENDING_STATE_FILE)
+        if pending:
+            if "carryover" in pending:
                 carryover_all = load_carryover()
-                carryover_all[payload.date] = snapshot["carryover"]
+                carryover_all[payload.date] = pending["carryover"]
                 save_carryover(carryover_all)
                 
-            if "monthly_data" in snapshot:
+            if "monthly_data" in pending:
                 month_str = payload.date[:7]
                 monthly_all = load_monthly_tracking()
-                monthly_all[month_str] = snapshot["monthly_data"]
+                monthly_all[month_str] = pending["monthly_data"]
                 save_monthly_tracking(monthly_all)
 
-            # NEW: Save strict continuous machine and WIP state
-            if "plant_state" in snapshot:
-                save_plant_state(snapshot["plant_state"])
+            if "plant_state" in pending:
+                save_plant_state(pending["plant_state"])
+
+            # Clear pending after commit
+            if os.path.exists(PENDING_STATE_FILE):
+                os.remove(PENDING_STATE_FILE)
 
         return {"status": "success"}
     except Exception as e:
@@ -419,7 +422,6 @@ def generate_schedule(payload: ScheduleRequest):
     unscheduled = []
     logged_rpb = set()
     
-    # Load manual Buffers if inputted, but don't mix up with WIP 
     saved_bufs = load_saved_buffers()
     active_entries = saved_bufs.copy()
     if payload.entries:
@@ -433,7 +435,6 @@ def generate_schedule(payload: ScheduleRequest):
         day_1 = req_date  
         day_2 = req_date + timedelta(days=1)
         month_str = req_date.strftime("%Y-%m")
-        prev_date_str = (req_date - timedelta(days=1)).strftime("%Y-%m-%d")
         
         monthly_data = load_monthly_tracking()
         if month_str not in monthly_data:
@@ -446,7 +447,6 @@ def generate_schedule(payload: ScheduleRequest):
         debug_logs.extend(logs1)
         
         if sheets_zero:
-            # (Excel Demands Loading Logic Remains the Same)
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
                 if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
@@ -530,7 +530,6 @@ def generate_schedule(payload: ScheduleRequest):
         if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
             box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
         elif sheets_box:
-            # (Box Matrix Loading Remained Same)
             for s_name, df_b in sheets_box.items():
                 s_name_up = str(s_name).upper().strip()
                 if 'RING' in s_name_up and 'BOX' in s_name_up:
@@ -742,32 +741,49 @@ def generate_schedule(payload: ScheduleRequest):
         if "machines" not in current_state: current_state["machines"] = {}
         if "inventory" not in current_state: current_state["inventory"] = {}
 
+        # NEW: Dynamic time differencing (Ensures perfect continuity across days or within same day)
+        last_date_str = current_state.get("last_date", payload.date)
+        days_diff = 0
+        try:
+            d1 = datetime.strptime(last_date_str, "%Y-%m-%d")
+            d2 = datetime.strptime(payload.date, "%Y-%m-%d")
+            days_diff = (d2 - d1).days
+        except: pass
+        time_shift = days_diff * 24.0
+
         work_items = []
         resources = []
         for f_name, cap in FURNACE_SPECS.items(): resources.append(Resource(f_name, 'HT', cap))
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # Load historical Machine Continuitity (Shift times backward 24h as today is new 10AM start)
+        # Load historical Machine Continuity securely
         for res in resources:
             if res.id in current_state["machines"]:
                 sm = current_state["machines"][res.id]
-                shifted_ready = max(0.0, float(sm.get("ready_time", 0.0)) - 24.0)
-                res.ready_time = shifted_ready
+                shifted_ready = float(sm.get("ready_time", 0.0)) - time_shift
+                res.ready_time = max(0.0, shifted_ready)
                 res.last_fam = sm.get("last_fam")
                 res.last_pc = sm.get("last_pc")
 
-        # Process WIP Queues - Inject existing WIP FIRST
+        # Process WIP Queues - Inject existing WIP FIRST with correct time delays if it finished late yesterday
         for w_key, w_data in current_state["wip"].items():
             disp, pc = w_key.split('|')
             ch_norm = w_data.get("channel", "UNKNOWN")
             flex = get_process_flexibility(ch_norm, pc, channel_flex_map)
             
             for stage in ['HT', 'FACE', 'OD']:
-                qty = float(w_data.get(stage, 0.0))
+                stage_data = w_data.get(stage, {})
+                if isinstance(stage_data, (int, float)):
+                    qty, rt = float(stage_data), 0.0
+                else:
+                    qty = float(stage_data.get("qty", 0.0))
+                    rt = float(stage_data.get("rt", 0.0))
+                
                 if qty > 0:
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, 0.0, 10000.0, flex))
-                    current_state["wip"][w_key][stage] = 0.0 # Remove from WIP since it's scheduled
+                    shifted_rt = max(0.0, rt - time_shift)
+                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, shifted_rt, 10000.0, flex))
+                    current_state["wip"][w_key][stage] = {"qty": 0.0, "rt": 0.0}
 
         # Append new daily requirements at their purely FIRST REQUIRED PROCESS
         ch_stats = {}
@@ -787,7 +803,6 @@ def generate_schedule(payload: ScheduleRequest):
                     if first_stage:
                         work_items.append(WorkItem(first_stage, display_name, p_code, day_idx, data['channel'], req, 0.0, ch_stats[ch_norm]['score'], flex))
 
-        # Check UI Constraints (Machine Availability Overrides)
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
         for res in resources:
             conf = avail_dict.get(res.id, {})
@@ -802,7 +817,6 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # Merge D1 and D2 small batches
         for d1_item in [i for i in work_items if i.day_idx == 0]:
             d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
             if d2_item and (d1_item.qty + d2_item.qty) <= 5000:
@@ -907,7 +921,6 @@ def generate_schedule(payload: ScheduleRequest):
                 if next_stage: 
                     work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.flex))
                 else:
-                    # Update finished inventory
                     inv_key = f"{item.disp}|{item.pc}"
                     current_state["inventory"][inv_key] = current_state["inventory"].get(inv_key, 0.0) + chunk_qty
 
@@ -932,7 +945,6 @@ def generate_schedule(payload: ScheduleRequest):
                 else:
                     display_val = f"{math.ceil(chunk_qty / rpb)} Boxes" if rpb > 0 else f"{int(chunk_qty)} Rings (Q)"
                     timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
-                    
                     is_terminal = (next_stage is None)
                     
                     if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
@@ -942,10 +954,17 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             if item.qty <= 0.01: continue
             
-            # Save unscheduled portions to strictly trackable WIP State queues
             w_key = f"{item.disp}|{item.pc}"
-            if w_key not in current_state["wip"]: current_state["wip"][w_key] = {"HT": 0.0, "FACE": 0.0, "OD": 0.0, "channel": item.channel}
-            current_state["wip"][w_key][item.stage] += item.qty
+            if w_key not in current_state["wip"]: 
+                current_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel}
+            
+            # Legacy struct migration check
+            if isinstance(current_state["wip"][w_key].get(item.stage), (int, float)):
+                old_val = current_state["wip"][w_key][item.stage]
+                current_state["wip"][w_key][item.stage] = {"qty": old_val, "rt": 0.0}
+
+            current_state["wip"][w_key][item.stage]["qty"] += item.qty
+            current_state["wip"][w_key][item.stage]["rt"] = max(current_state["wip"][w_key][item.stage].get("rt", 0.0), item.ready_time)
 
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
@@ -992,12 +1011,14 @@ def generate_schedule(payload: ScheduleRequest):
                 "difference": int(t_prod - d1_req)
             })
 
-        # Save all simulation updates cleanly in the state payload to finalize via Save Plan UI trigger
+        # Save all simulation updates perfectly on the backend so no UI drop can corrupt it
+        current_state["last_date"] = payload.date
         snapshot = {
             "carryover": unscheduled_to_carry,
             "monthly_data": monthly_data.get(month_str, {}),
             "plant_state": current_state
         }
+        save_json_file(PENDING_STATE_FILE, snapshot)
 
         return {
             "status": "success", 

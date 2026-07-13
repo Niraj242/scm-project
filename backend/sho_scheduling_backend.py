@@ -462,14 +462,14 @@ def init_item_resources(item, resources, furnace_map, weight_matrix, furnace_spe
                 missing_rate_flag = True
                 
     if not found_stage_machines:
-        item.missing_reason = f"No active machines for {item.stage}"
+        item.missing_reason = f"Missing Data: No active machines configured for {item.stage}"
     elif len(item.valid_resources) == 0:
         if item.stage == 'HT' and missing_weight_flag:
-            item.missing_reason = "Missing Part Weight"
+            item.missing_reason = "Missing Data: Part Weight missing in Master"
         elif missing_rate_flag:
-            item.missing_reason = "Missing Machine Rate"
+            item.missing_reason = "Missing Data: Machine Rate missing in Master"
         else:
-            item.missing_reason = "No Valid Routing Found"
+            item.missing_reason = "Missing Data: No Valid Routing/Machine Found"
 
 class Resource:
     def __init__(self, r_id, r_type, capacity_info):
@@ -779,7 +779,6 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # Deep Normalized Rollover Mapping (Fixes Furnace starting timeline mismatches)
         for res in resources:
             norm_res_id = normalize_resource_name(res.id)
             matched_state = None
@@ -840,130 +839,132 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
 
-        # SIMULATION LOOP
-        for target_day in [-1, 0, 1]:
-            current_max_time = 24.0 
+        # ==========================================
+        # CONTINUOUS SCHEDULING SIMULATION LOOP
+        # ==========================================
+        current_max_time = 24.0 
+        
+        for r in resources:
+            r.max_time = current_max_time
+            if r.ready_time < current_max_time:
+                r.blocked = False
+                
+        while True:
+            # All available items globally mapped - breaks the WIP -> Day1 rigid wait barrier 
+            active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < current_max_time]
+            if not active_items: 
+                break 
+                
+            best_pair = None
+            best_key = (float('inf'), float('inf'), float('inf'), float('-inf'))
             
-            for r in resources:
-                r.max_time = current_max_time
-                if r.ready_time < current_max_time:
-                    r.blocked = False
+            for item in active_items:
+                for res in item.valid_resources:
+                    if res.blocked or res.ready_time >= res.max_time: continue
                     
-            while True:
-                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < current_max_time and i.day_idx == target_day]
-                if not active_items: 
-                    break 
+                    rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
                     
-                best_pair = None
-                best_key = (float('inf'), float('inf'), float('inf'), float('-inf'))
-                
-                for item in active_items:
-                    for res in item.valid_resources:
-                        if res.blocked or res.ready_time >= res.max_time: continue
-                        
-                        rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
-                        setup = 0.5 if res.type == 'HT' else 2.0
-                        if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
-                        
-                        start_time = max(res.ready_time + setup, item.ready_time)
-                        if start_time >= res.max_time: continue
-                        
-                        is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
-                        gap = max(0.0, item.ready_time - (res.ready_time + setup))
-                        
-                        key = (start_time, item.day_idx, gap, -item.priority)
-                        
-                        if key < best_key:
-                            best_key = key
-                            best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
-                            
-                if not best_pair: 
-                    break
+                    # Optimized Setup configuration prevents artificial jump to 12 PM start 
+                    setup = 0.5 if res.type == 'HT' else 0.25 
+                    if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 0.25 
                     
-                res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
-                
-                # ==========================================
-                # LOOK-AHEAD BATCH MERGING STEP
-                # ==========================================
-                if res.type == 'HT':
-                    weight = item.rates[res.id][1]
-                    est_runtime = (item.qty * weight) / rate_or_cap
-                    merge_threshold = 1.0  # Under 1 hour for Heat Treatment
-                else:
-                    est_runtime = item.qty / rate_or_cap
-                    merge_threshold = 2.0  # Under 2 hours for Face/OD Grinding
+                    start_time = max(res.ready_time + setup, item.ready_time)
+                    if start_time >= res.max_time: continue
                     
-                if item.day_idx in [-1, 0] and est_runtime < merge_threshold:
-                    for tomorrow_item in work_items:
-                        if (tomorrow_item.day_idx == 1 and 
-                            tomorrow_item.disp == item.disp and 
-                            tomorrow_item.pc == item.pc and 
-                            tomorrow_item.stage == item.stage and 
-                            tomorrow_item.channel == item.channel and 
-                            tomorrow_item.qty > 0.01):
-                            
-                            item.qty += tomorrow_item.qty
-                            tomorrow_item.qty = 0.0  # Consume tomorrow's run to avoid extra setups
-                            break
-                
-                chunk_qty = item.qty
-                
-                if res.type == 'HT':
-                    weight = item.rates[res.id][1]
-                    actual_time = (chunk_qty * weight) / rate_or_cap
-                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                        actual_time += (res.bd_end - max(start_time, res.bd_start))
-                    res_ready_time = start_time + actual_time + 0.5
-                    out_time = start_time + actual_time + 3.5
-                    display_rate = f"{round((chunk_qty * weight), 1)} kg"
-                    if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
-                else:
-                    actual_time = chunk_qty / rate_or_cap
-                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                        actual_time += (res.bd_end - max(start_time, res.bd_start))
-                    res_ready_time = start_time + actual_time
-                    out_time = res_ready_time
-                    display_rate = rate_or_cap
+                    is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
+                    gap = max(0.0, item.ready_time - (res.ready_time + setup))
                     
-                is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
-                res.ready_time = res_ready_time
-                res.last_fam = item.disp
-                res.last_pc = item.pc
+                    # Natural gap filler by heavily prioritizing lowest exact start time across all days 
+                    key = (start_time, item.day_idx, gap, -item.priority)
+                    
+                    if key < best_key:
+                        best_key = key
+                        best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
+                        
+            if not best_pair: 
+                break
                 
-                if res.ready_time >= res.max_time: res.blocked = True
-                item.qty -= chunk_qty
+            res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
+            
+            if res.type == 'HT':
+                weight = item.rates[res.id][1]
+                est_runtime = (item.qty * weight) / rate_or_cap
+                merge_threshold = 1.0  
+            else:
+                est_runtime = item.qty / rate_or_cap
+                merge_threshold = 2.0 
                 
-                next_stage = get_next_required_stage(res.type, item.routing)
-                if next_stage: 
-                    new_item = WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing)
-                    init_item_resources(new_item, resources, furnace_map, weight_matrix, furnace_specs_local)
-                    work_items.append(new_item)
+            if item.day_idx in [-1, 0] and est_runtime < merge_threshold:
+                for tomorrow_item in work_items:
+                    if (tomorrow_item.day_idx == 1 and 
+                        tomorrow_item.disp == item.disp and 
+                        tomorrow_item.pc == item.pc and 
+                        tomorrow_item.stage == item.stage and 
+                        tomorrow_item.channel == item.channel and 
+                        tomorrow_item.qty > 0.01):
+                        
+                        item.qty += tomorrow_item.qty
+                        tomorrow_item.qty = 0.0 
+                        break
+            
+            chunk_qty = item.qty
+            
+            if res.type == 'HT':
+                weight = item.rates[res.id][1]
+                actual_time = (chunk_qty * weight) / rate_or_cap
+                if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
+                    actual_time += (res.bd_end - max(start_time, res.bd_start))
+                res_ready_time = start_time + actual_time + 0.5
+                out_time = start_time + actual_time + 3.5
+                display_rate = f"{round((chunk_qty * weight), 1)} kg"
+                if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
+            else:
+                actual_time = chunk_qty / rate_or_cap
+                if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
+                    actual_time += (res.bd_end - max(start_time, res.bd_start))
+                res_ready_time = start_time + actual_time
+                out_time = res_ready_time
+                display_rate = rate_or_cap
+                
+            is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
+            res.ready_time = res_ready_time
+            res.last_fam = item.disp
+            res.last_pc = item.pc
+            
+            if res.ready_time >= res.max_time: res.blocked = True
+            item.qty -= chunk_qty
+            
+            next_stage = get_next_required_stage(res.type, item.routing)
+            if next_stage: 
+                new_item = WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing)
+                init_item_resources(new_item, resources, furnace_map, weight_matrix, furnace_specs_local)
+                work_items.append(new_item)
 
-                rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
-                can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
-                
-                if item.day_idx == -1: day_label = " (WIP)"
-                else: day_label = " (D2)" if item.day_idx == 1 else " (D1)"
+            rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
+            can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
+            
+            if item.day_idx == -1: day_label = " (WIP)"
+            else: day_label = " (D2)" if item.day_idx == 1 else " (D1)"
 
-                if can_merge:
-                    last_row = res.rows[-1]
-                    old_qty = int(float(last_row["qty"]))
-                    new_qty = old_qty + int(chunk_qty)
-                    last_row["qty"] = str(new_qty)
-                    
-                    old_start = last_row["timing"].split('-')[0]
-                    new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
-                    last_row["timing"] = f"{old_start}-{new_end}"
-                    
-                    display_val = f"{int(new_qty)} Rings ({math.ceil(new_qty / rpb)} Boxes)" if rpb > 0 else f"{int(new_qty)} Rings"
-                    if res.type != 'HT': last_row["std_box"] = display_val
-                else:
-                    display_val = f"{int(chunk_qty)} Rings ({math.ceil(chunk_qty / rpb)} Boxes)" if rpb > 0 else f"{int(chunk_qty)} Rings"
-                    timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
-                    is_terminal = (next_stage is None)
-                    
-                    if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
-                    else: res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
+            if can_merge:
+                last_row = res.rows[-1]
+                old_qty = int(float(last_row["qty"]))
+                new_qty = old_qty + int(chunk_qty)
+                last_row["qty"] = str(new_qty)
+                
+                old_start = last_row["timing"].split('-')[0]
+                new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
+                last_row["timing"] = f"{old_start}-{new_end}"
+                
+                display_val = f"{int(new_qty)} Rings ({math.ceil(new_qty / rpb)} Boxes)" if rpb > 0 else f"{int(new_qty)} Rings"
+                if res.type != 'HT': last_row["std_box"] = display_val
+            else:
+                display_val = f"{int(chunk_qty)} Rings ({math.ceil(chunk_qty / rpb)} Boxes)" if rpb > 0 else f"{int(chunk_qty)} Rings"
+                timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
+                is_terminal = (next_stage is None)
+                
+                if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
+                else: res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
 
         end_state = { "machines": {}, "wip": {} }
 
@@ -974,12 +975,12 @@ def generate_schedule(payload: ScheduleRequest):
                 "last_pc": r.last_pc
             }
 
-        # Clear Unscheduled Reason Separations
+        # Separating Reasons and Box Output Format
         for item in work_items:
             if item.qty <= 0.01: continue
             
             if len(item.valid_resources) > 0 and item.missing_reason == "Capacity Exceeded":
-                item.missing_reason = "Exceeds Production Window"
+                item.missing_reason = "Capacity Exceeded / Window Out of Time"
 
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
@@ -989,7 +990,12 @@ def generate_schedule(payload: ScheduleRequest):
                 end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
 
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
-            missed_val = f"{int(item.qty)} Rings" if rpb <= 0 else f"{int(item.qty)} Rings ({math.ceil(item.qty / rpb)} Boxes)"
+            
+            # Formats precisely to Boxes or (Q) based on box conversion availability 
+            if rpb > 0:
+                missed_val = f"{math.ceil(item.qty / rpb)} Boxes"
+            else:
+                missed_val = f"{int(item.qty)} (Q)"
             
             if item.day_idx == -1: day_label = "WIP"
             else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"

@@ -22,6 +22,7 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 EXCEL_CACHE = {}
 CACHE_TTL = 3600  # 1 hour cache
 
+# PARSED_MASTER_DATA now holds furnace_specs safely in the cache
 PARSED_MASTER_DATA = {
     "box_matrix": ({}, 0),  
     "production": ({}, {}, {}, {}, 0) 
@@ -30,7 +31,14 @@ PARSED_MASTER_DATA = {
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
-FURNACE_SPECS = {}
+
+# Failsafe default furnaces to ensure HT never breaks
+DEFAULT_FURNACES = {
+    "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
+    "ROLLER FURNACE ( 148 )": 250.0, "SIMPLICITY FURNACE(1238)": 180.0,
+    "BIRLEC FURNACE   ( 1158 )": 170.0, "SHOEI FURNACE    ( 1062 )": 350.0,
+    "AICHELIN UNITHERM ( 2033 )": 250.0
+}
 
 # ==========================================
 # DATABASE & PERSISTENCE
@@ -317,7 +325,6 @@ def is_target_date(val, target_date):
         return True
     return False
 
-# Extremely Fast Local Cache to prevent waiting minutes for generation
 def get_cached_excel_sheets(url, file_label="Unknown"):
     logs = []
     if not url or url.strip() == "": return None, logs
@@ -395,7 +402,7 @@ def get_weight_for_part(display_name, p_code, weights):
     WEIGHT_CACHE[key] = None
     return None
 
-def get_furnaces_for_part(display_name, p_code, furnace_map):
+def get_furnaces_for_part(display_name, p_code, furnace_map, furnace_specs):
     key = (display_name, p_code)
     if key in FURNACE_CACHE: return FURNACE_CACHE[key]
     
@@ -405,7 +412,7 @@ def get_furnaces_for_part(display_name, p_code, furnace_map):
             FURNACE_CACHE[key] = furnace_map[f"{var}_{p_code}"]
             return FURNACE_CACHE[key]
             
-    default_f = list(FURNACE_SPECS.keys())
+    default_f = list(furnace_specs.keys())
     FURNACE_CACHE[key] = default_f
     return default_f
 
@@ -446,9 +453,9 @@ class WorkItem:
         self.merged_d2 = False
         self.rates = {}
         self.valid_resources = []
-        self.missing_reason = "Capacity Exceeded" # Exact Reason Tracking
+        self.missing_reason = "Capacity Exceeded"
 
-def init_item_resources(item, resources, furnace_map, weight_matrix):
+def init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs):
     item.rates = {}
     item.valid_resources = []
     item.missing_reason = "Capacity Exceeded"
@@ -462,7 +469,7 @@ def init_item_resources(item, resources, furnace_map, weight_matrix):
         found_stage_machines = True
         
         if res.type == 'HT':
-            valid_furnaces = get_furnaces_for_part(item.disp, item.pc, furnace_map)
+            valid_furnaces = get_furnaces_for_part(item.disp, item.pc, furnace_map, furnace_specs)
             if res.id not in valid_furnaces: continue
             weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
             if not weight: 
@@ -502,45 +509,6 @@ class Resource:
         self.bd_end = 0.0
         self.capacity_info = capacity_info 
         self.rows = []
-
-def parse_master_production_data():
-    sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
-    machines_data = {'FACE': {}, 'OD': {}}
-    
-    global FURNACE_SPECS
-    FURNACE_SPECS.clear()
-
-    if sheets_prod:
-        for sheet_name, df_m in sheets_prod.items():
-            if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
-                for r in range(len(df_m)):
-                    row = df_m.iloc[r].values
-                    f_name = str(row[0]).strip().upper() if len(row) > 0 else ""
-                    cap = safe_float(row[1]) if len(row) > 1 else 0.0
-                    if f_name and cap > 0 and ('FURNACE' in f_name or 'AICHELIN' in f_name or 'UNITHERM' in f_name):
-                        FURNACE_SPECS[f_name] = cap
-
-            if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
-            str_matrix = df_m.fillna('').astype(str).values
-            for r in range(str_matrix.shape[0]):
-                row_text = " ".join(str_matrix[r]).upper()
-                if 'MACHINE' in row_text or 'M/C' in row_text:
-                    cells = [c.strip() for c in str_matrix[r] if c.strip()]
-                    m_cand = cells[1] if len(cells) > 1 else None
-                    if m_cand and m_cand not in ["MACHINE", "M/C"]:
-                        if "FACE" in row_text or "DDS" in m_cand.upper() or "BG" in m_cand.upper():
-                            machines_data['FACE'][m_cand] = True
-                        elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand:
-                            machines_data['OD'][m_cand] = True
-                            
-    if not FURNACE_SPECS:
-        FURNACE_SPECS = {
-            "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
-            "ROLLER FURNACE ( 148 )": 250.0, "SIMPLICITY FURNACE(1238)": 180.0,
-            "BIRLEC FURNACE   ( 1158 )": 170.0, "SHOEI FURNACE    ( 1062 )": 350.0,
-            "AICHELIN UNITHERM ( 2033 )": 250.0
-        }
-    return machines_data
 
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
@@ -701,12 +669,23 @@ def generate_schedule(payload: ScheduleRequest):
         prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
 
         if PARSED_MASTER_DATA["production"][4] == prod_cache_ts:
-            weight_matrix, furnace_map, machines_data, _, _ = PARSED_MASTER_DATA["production"]
+            weight_matrix, furnace_map, machines_data, furnace_specs_local, _ = PARSED_MASTER_DATA["production"]
         elif sheets_prod:
             weight_matrix = {}
             furnace_map = {}
             machines_data = {'FACE': {}, 'OD': {}}
+            furnace_specs_local = DEFAULT_FURNACES.copy() # Apply Failsafe!
 
+            for sheet_name, df_m in sheets_prod.items():
+                # Fix: Parse Furnace Capacities correctly again
+                if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
+                    for r in range(len(df_m)):
+                        row = df_m.iloc[r].values
+                        f_name = str(row[0]).strip().upper() if len(row) > 0 else ""
+                        cap = safe_float(row[1]) if len(row) > 1 else 0.0
+                        if f_name and cap > 0 and ('FURNACE' in f_name or 'AICHELIN' in f_name or 'UNITHERM' in f_name):
+                            furnace_specs_local[f_name] = cap
+                            
             if 'WEIGHTS' in sheets_prod:
                 df_w = sheets_prod['WEIGHTS'].fillna('')
                 header_idx = -1
@@ -751,7 +730,7 @@ def generate_schedule(payload: ScheduleRequest):
                             matched_fn = None
                             if fn == "AU" or "UNITHERM" in fn: matched_fn = "AICHELIN UNITHERM ( 2033 )"
                             elif "AICHELIN" in fn: matched_fn = "AICHELIN.(896)"
-                            else: matched_fn = next((k for k in FURNACE_SPECS.keys() if fn[:4] in k.upper()), None)
+                            else: matched_fn = next((k for k in furnace_specs_local.keys() if fn[:4] in k.upper()), None)
                             if matched_fn and matched_fn not in valid_furnaces: valid_furnaces.append(matched_fn)
                         if valid_furnaces: 
                             for ck in clean_keys: furnace_map[f"{ck}_{p_code}"] = valid_furnaces
@@ -814,18 +793,19 @@ def generate_schedule(payload: ScheduleRequest):
                                     if rate_rings > 0:
                                         for ck in set(clean_keys): machines_data[current_m_type][current_m_num]['rates'][f"{ck}_{pc}"] = rate_rings
                                             
-            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, {}, prod_cache_ts)
+            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, furnace_specs_local, prod_cache_ts)
         del sheets_prod
 
         # ==========================================
         # DB-BACKED TIME-TRAVEL INITIALIZATION
         # ==========================================
-        # Strictly only loads WIP (parts mid-routing), skips unscheduled D1 duplicates
         current_state = get_previous_day_state(payload.date)
 
         work_items = []
         resources = []
-        for f_name, cap in FURNACE_SPECS.items(): resources.append(Resource(f_name, 'HT', cap))
+        
+        # Furnaces now securely loaded!
+        for f_name, cap in furnace_specs_local.items(): resources.append(Resource(f_name, 'HT', cap))
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
@@ -836,7 +816,6 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = sm.get("last_fam")
                 res.last_pc = sm.get("last_pc")
 
-        # Inject actual WIP safely (Only parts mid-routing, avoiding pure duplicate D0 requirements)
         for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
             disp, pc = w_key.split('|')
@@ -849,7 +828,6 @@ def generate_schedule(payload: ScheduleRequest):
                 qty = float(stage_data.get("qty", 0.0))
                 rt = float(stage_data.get("rt", 0.0))
                 
-                # ONLY load WIP if it is NOT the very first stage of its routing
                 first_stage = get_first_required_stage(routing)
                 if qty > 0 and stage != first_stage:
                     work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
@@ -893,7 +871,7 @@ def generate_schedule(payload: ScheduleRequest):
                     d2_item.qty = 0.0 
 
         for item in work_items:
-            init_item_resources(item, resources, furnace_map, weight_matrix)
+            init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
 
         # SIMULATION LOOP
         for target_day in [-1, 0, 1]:
@@ -984,7 +962,7 @@ def generate_schedule(payload: ScheduleRequest):
                 next_stage = get_next_required_stage(res.type, item.routing)
                 if next_stage: 
                     new_item = WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing)
-                    init_item_resources(new_item, resources, furnace_map, weight_matrix)
+                    init_item_resources(new_item, resources, furnace_map, weight_matrix, furnace_specs_local)
                     work_items.append(new_item)
 
                 rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
@@ -1025,7 +1003,6 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             if item.qty <= 0.01: continue
             
-            # Save strictly what is mid-routing (WIP) so we don't carry over brand new unstarted reqs
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
                 if w_key not in end_state["wip"]: 
@@ -1047,7 +1024,7 @@ def generate_schedule(payload: ScheduleRequest):
                 "stage": item.stage, 
                 "part": part_display, 
                 "missed_boxes": missed_val,
-                "reason": item.missing_reason  # Added Exact Reason Parameter
+                "reason": item.missing_reason 
             })
 
         final_face, final_od, furnaces_formatted = [], [], []

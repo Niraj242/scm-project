@@ -9,23 +9,9 @@ import time
 import sqlite3
 import pickle
 from datetime import datetime, timedelta
-from fastapi import FastAPI, APIRouter
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Dict, Any, List
-
-# ==========================================
-# APP INITIALIZATION & CORS
-# ==========================================
-app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 router = APIRouter()
 
@@ -147,9 +133,35 @@ class SavePlanRequest(BaseModel):
     date: str
     plan: Dict[str, Any]
 
-# ==========================================
-# CORE UTILITIES & PARSERS
-# ==========================================
+@router.get("/api/health")
+def health_check():
+    return {"status": "ok"}
+
+@router.get("/api/monthly_tracking")
+def get_monthly_tracking_api():
+    return load_monthly_tracking()
+
+@router.post("/api/save_plan")
+def save_plan(payload: SavePlanRequest):
+    try:
+        plans = load_saved_plan()
+        plans[payload.date] = payload.plan
+        save_setting('saved_plan', plans)
+
+        pending = get_setting('pending_state', {})
+        if pending:
+            if "monthly_data" in pending:
+                month_str = payload.date[:7]
+                monthly_all = load_monthly_tracking()
+                monthly_all[month_str] = pending["monthly_data"]
+                save_monthly_tracking(monthly_all)
+            if "plant_state" in pending:
+                save_daily_state(payload.date, pending["plant_state"])
+            save_setting('pending_state', {})
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
@@ -318,198 +330,6 @@ def get_cached_excel_sheets(url, file_label="Unknown"):
     except Exception as e:
         raise Exception(f"Failed to load {file_label} Excel sheet: {str(e)}")
 
-def load_box_matrix_data():
-    global PARSED_MASTER_DATA
-    sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
-    box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
-    
-    if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts and box_cache_ts != 0:
-        return PARSED_MASTER_DATA["box_matrix"][0]
-        
-    box_matrix = {}
-    if sheets_box:
-        for s_name, df_b in sheets_box.items():
-            s_name_up = str(s_name).upper().strip()
-            if 'RING' in s_name_up and 'BOX' in s_name_up:
-                df_box = df_b.fillna('')
-                for idx in range(1, len(df_box)):
-                    row_vals = list(df_box.iloc[idx])
-                    for i in range(0, len(row_vals) - 2, 3):
-                        fam_raw = str(row_vals[i]).strip()
-                        if not fam_raw or is_invalid_part(fam_raw): continue
-                        fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
-                        for f_raw in fams_to_process:
-                            for p_c in ['IR', 'OR']:
-                                clean_keys = get_lookup_variants(f_raw, p_c)
-                                for ck in clean_keys:
-                                    or_qty = safe_float(row_vals[i+1])
-                                    ir_qty = safe_float(row_vals[i+2])
-                                    if ck not in box_matrix: box_matrix[ck] = {}
-                                    if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': s_name}
-                                    if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': s_name}
-            elif 'BOX' in s_name_up and 'DAY' in s_name_up:
-                df_fb = df_b.fillna('')
-                type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
-                for r_idx in range(min(20, len(df_fb))):
-                    norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
-                    t_c = next((j for j, h in enumerate(norm_strs) if 'TYPE' in h or 'BEARING' in h), -1)
-                    i_c = next((j for j, h in enumerate(norm_strs) if 'IR' in h and 'BOX' in h), -1)
-                    o_c = next((j for j, h in enumerate(norm_strs) if 'OR' in h and 'BOX' in h), -1)
-                    s_c = next((j for j, h in enumerate(norm_strs) if 'RING' in h and 'BOX' in h and 'IR' not in h and 'OR' not in h), -1)
-                    if t_c != -1 and (i_c != -1 or o_c != -1 or s_c != -1):
-                        type_col, ir_col, or_col, single_rpb_col = t_c, i_c, o_c, s_c; break
-                if type_col != -1:
-                    for idx in range(r_idx + 1, len(df_fb)):
-                        row_vals = list(df_fb.iloc[idx])
-                        raw_t = str(row_vals[type_col]).strip()
-                        if not raw_t or is_invalid_part(raw_t): continue
-                        for p_c in ['IR', 'OR']:
-                            clean_keys = get_lookup_variants(raw_t, p_c)
-                            for ck in clean_keys:
-                                if ck not in box_matrix: box_matrix[ck] = {}
-                                if p_c == 'IR' and ('IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0):
-                                    fq = safe_float(row_vals[ir_col]) if ir_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
-                                    if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': s_name}
-                                if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
-                                    fq = safe_float(row_vals[or_col]) if or_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
-                                    if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': s_name}
-        PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
-    return box_matrix
-
-def load_production_data():
-    global PARSED_MASTER_DATA
-    prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
-    
-    if PARSED_MASTER_DATA["production"][4] == prod_cache_ts and prod_cache_ts != 0:
-        return PARSED_MASTER_DATA["production"]
-        
-    sheets_prod, _ = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
-    weight_matrix = {}
-    furnace_map = {}
-    machines_data = {'FACE': {}, 'OD': {}}
-    furnace_specs_local = DEFAULT_FURNACES.copy()
-    box_matrix = load_box_matrix_data()
-
-    if sheets_prod:
-        for sheet_name, df_m in sheets_prod.items():
-            if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
-                for r in range(len(df_m)):
-                    row = df_m.iloc[r].values
-                    f_name = str(row[0]).strip().upper() if len(row) > 0 else ""
-                    cap = safe_float(row[1]) if len(row) > 1 else 0.0
-                    if f_name and cap > 0 and ('FURNACE' in f_name or 'AICHELIN' in f_name or 'UNITHERM' in f_name):
-                        furnace_specs_local[f_name] = cap
-                        
-        if 'WEIGHTS' in sheets_prod:
-            df_w = sheets_prod['WEIGHTS'].fillna('')
-            header_idx = -1
-            for r_idx in range(min(10, len(df_w))):
-                h_row = [str(x).strip().upper() for x in df_w.iloc[r_idx].values]
-                if any('TYPE' in h for h in h_row) and any('IR/OR' in h or 'WEIGHT' in h or 'IR' in h for h in h_row):
-                    header_idx = r_idx; break
-            
-            if header_idx != -1:
-                norm_w_headers = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
-                type_idx = next((j for j, h in enumerate(norm_w_headers) if 'TYPE' in h), -1)
-                ir_or_idx = next((j for j, h in enumerate(norm_w_headers) if 'IROR' in h or 'IR' in h), -1)
-                wt_idx = next((j for j, h in enumerate(norm_w_headers) if 'WEIGHT' in h), -1)
-
-                if type_idx != -1:
-                    for offset in range(1, len(df_w) - header_idx):
-                        row_vals = df_w.iloc[header_idx + offset].values
-                        raw_fam = str(row_vals[type_idx]).strip()
-                        if is_invalid_part(raw_fam): continue
-                        ir_or_val = str(row_vals[ir_or_idx]).strip() if ir_or_idx != -1 else ""
-                        part_code = 'OR' if '100' in ir_or_val else ('IR' if ('120' in ir_or_val or '010' in ir_or_val) else None)
-                        if part_code and wt_idx != -1:
-                            wt_val = safe_float(row_vals[wt_idx])
-                            if wt_val > 0:
-                                clean_keys = get_lookup_variants(raw_fam, part_code)
-                                for ck in clean_keys: weight_matrix[f"{ck}_{part_code}"] = wt_val
-
-        fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper() and 'FLEX' in str(k).upper()), None)
-        if fur_sheet_key:
-            df_f = sheets_prod[fur_sheet_key]
-            df_f.columns = [str(x).strip().upper() for x in df_f.iloc[0]]
-            for idx, r in df_f.iloc[1:].iterrows():
-                comp_level = str(r.get('COMP LEVEL 1', r.iloc[0] if len(r) > 0 else '')).strip()
-                if is_invalid_part(comp_level): continue
-                p_code = 'IR' if comp_level.startswith('IM') else ('OR' if comp_level.startswith('OM') else None)
-                if p_code:
-                    clean_keys = get_lookup_variants(comp_level, p_code)
-                    valid_furnaces = []
-                    for fn_key in ['PRIMARY FURNA', 'PRIMARY FURNACE', 'ALTERNATIVE 1', 'ALTERNATIVE 2']:
-                        fn = str(r.get(fn_key, '')).strip().upper()
-                        if not fn or fn == 'NAN': continue
-                        matched_fn = None
-                        if fn == "AU" or "UNITHERM" in fn: matched_fn = "AICHELIN UNITHERM ( 2033 )"
-                        elif "AICHELIN" in fn: matched_fn = "AICHELIN.(896)"
-                        else: matched_fn = next((k for k in furnace_specs_local.keys() if fn[:4] in k.upper()), None)
-                        if matched_fn and matched_fn not in valid_furnaces: valid_furnaces.append(matched_fn)
-                    if valid_furnaces: 
-                        for ck in clean_keys: furnace_map[f"{ck}_{p_code}"] = valid_furnaces
-        
-        for sheet_name, df_m in sheets_prod.items():
-            if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
-            str_matrix = df_m.fillna('').astype(str).values
-            current_m_num = None
-            current_m_type = "UNKNOWN"
-            for r in range(str_matrix.shape[0]):
-                row_text = " ".join(str_matrix[r]).upper()
-                if 'MACHINE' in row_text or 'M/C' in row_text:
-                    cells = [c.strip() for c in str_matrix[r] if c.strip()]
-                    m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
-                    if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
-                        current_m_num = m_cand
-                        if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): current_m_type = "FACE"
-                        elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: current_m_type = "OD"
-                
-                if current_m_num and current_m_type in ['FACE', 'OD']:
-                    h_row = [c.strip().upper() for c in str_matrix[r]]
-                    if any('TYPE' in h or 'PART' in h for h in h_row) and any('HR' in h for h in h_row):
-                        if current_m_num not in machines_data[current_m_type]:
-                            machines_data[current_m_type][current_m_num] = {'name': current_m_num, 'rates': {}, 'ready_time': 0.0}
-                            
-                        norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in h_row]
-                        std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
-                        box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
-                        ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
-                        rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'BOX' in h and 'HR' not in h), -1)
-                        type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h or 'PART' in h), -1)
-                        part_idx = next((j for j, h in enumerate(norm_headers) if 'PART' in h and 'NO' not in h), -1)
-                        comb_idx = next((j for j, h in enumerate(norm_headers) if 'COMBINED' in h), -1)
-                        
-                        for offset2 in range(1, 200):
-                            if r + offset2 >= str_matrix.shape[0]: break
-                            row_vals = str_matrix[r + offset2]
-                            inner_row_text = " ".join(row_vals).upper()
-                            if "MACHINE" in inner_row_text or "M/C" in inner_row_text: break 
-                            raw_t = str(row_vals[type_idx]).strip() if type_idx != -1 else ""
-                            if is_invalid_part(raw_t): continue
-                            part_val = str(row_vals[part_idx]).strip().upper() if part_idx != -1 else ""
-                            p_codes = []
-                            if '100' in part_val or 'OR' in part_val: p_codes.append('OR')
-                            if '120' in part_val or 'IR' in part_val or '010' in part_val: p_codes.append('IR')
-                            if not p_codes: p_codes = ['IR', 'OR']
-                            for pc in p_codes:
-                                clean_keys = get_lookup_variants(raw_t, pc)
-                                comb_val = str(row_vals[comb_idx]).strip() if comb_idx != -1 else ""
-                                if comb_val and not is_invalid_part(comb_val): clean_keys.extend(get_lookup_variants(comb_val, pc))
-                                if not clean_keys: continue
-                                    
-                                rate_rings = 0.0
-                                rpb = get_box_for_part(raw_t, pc, box_matrix)
-                                if rpb_idx != -1 and safe_float(row_vals[rpb_idx]) > 0: rpb = safe_float(row_vals[rpb_idx])
-                                if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0: rate_rings = safe_float(row_vals[ring_hr_idx])
-                                elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
-                                elif std_hr_idx != -1 and safe_float(row_vals[std_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[std_hr_idx]) * rpb
-                                    
-                                if rate_rings > 0:
-                                    for ck in set(clean_keys): machines_data[current_m_type][current_m_num]['rates'][f"{ck}_{pc}"] = rate_rings
-                                        
-        PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, furnace_specs_local, prod_cache_ts)
-    return PARSED_MASTER_DATA["production"]
-
 def get_rate_for_part(display_name, p_code, rates, res_id=""):
     key = (display_name, p_code, res_id)
     if key in RATE_CACHE: return RATE_CACHE[key]
@@ -572,6 +392,7 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix):
             source = box_matrix[var][p_code]['source']
             return qty, source, var
             
+    # Fuzzy Fallback Fallthrough for Ring to Box Mismatches
     norm_disp = re.sub(r'[\s./_\-]', '', str(display_name).upper())
     for b_key, b_val in box_matrix.items():
         norm_bkey = re.sub(r'[\s./_\-]', '', str(b_key).upper())
@@ -593,7 +414,7 @@ def format_time(rel_hrs):
     m = total_minutes % 60
     days_added = (base_hour + (total_minutes // 60)) // 24
     day_plus = f" (+{days_added})" if days_added > 0 else ""
-    return f"{h:02d}:{m:02d}{day_plus}"
+    return f"{h:02d}:{m:02d}"
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
@@ -665,59 +486,6 @@ class Resource:
         self.capacity_info = capacity_info 
         self.rows = []
 
-# ==========================================
-# NEWLY IMPLEMENTED APIS (FIXES THE 404s)
-# ==========================================
-@router.get("/api/health")
-def health_check():
-    return {"status": "ok"}
-
-@router.get("/api/machines")
-def get_machines_list():
-    """Dynamically parses and builds a non-redundant list of all operational machine IDs for the UI configuration."""
-    weight_matrix, furnace_map, machines_data, furnace_specs_local, _ = load_production_data()
-    
-    unique_machines = set()
-    unique_machines.update(furnace_specs_local.keys())
-    unique_machines.update(machines_data.get('FACE', {}).keys())
-    unique_machines.update(machines_data.get('OD', {}).keys())
-    
-    return sorted(list(unique_machines))
-
-@router.get("/api/get_plan")
-def get_saved_plan_by_date(date: str):
-    """Retrieves the exact saved schedule array structure for a specific calendar target date."""
-    plans = load_saved_plan()
-    return plans.get(date, {})
-
-@router.get("/api/monthly_tracking")
-def get_monthly_tracking_api():
-    return load_monthly_tracking()
-
-@router.post("/api/save_plan")
-def save_plan(payload: SavePlanRequest):
-    try:
-        plans = load_saved_plan()
-        plans[payload.date] = payload.plan
-        save_setting('saved_plan', plans)
-
-        pending = get_setting('pending_state', {})
-        if pending:
-            if "monthly_data" in pending:
-                month_str = payload.date[:7]
-                monthly_all = load_monthly_tracking()
-                monthly_all[month_str] = pending["monthly_data"]
-                save_monthly_tracking(monthly_all)
-            if "plant_state" in pending:
-                save_daily_state(payload.date, pending["plant_state"])
-            save_setting('pending_state', {})
-        return {"status": "success"}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-
-# ==========================================
-# SCHEDULER SIMULATION ENGINE
-# ==========================================
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
@@ -816,8 +584,192 @@ def generate_schedule(payload: ScheduleRequest):
 
         del sheets_zero
 
-        box_matrix = load_box_matrix_data()
-        weight_matrix, furnace_map, machines_data, furnace_specs_local, _ = load_production_data()
+        box_matrix = {}
+        sheets_box, logs2 = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
+        debug_logs.extend(logs2)
+        box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
+        
+        if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
+            box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
+        elif sheets_box:
+            for s_name, df_b in sheets_box.items():
+                s_name_up = str(s_name).upper().strip()
+                if 'RING' in s_name_up and 'BOX' in s_name_up:
+                    df_box = df_b.fillna('')
+                    for idx in range(1, len(df_box)):
+                        row_vals = list(df_box.iloc[idx])
+                        for i in range(0, len(row_vals) - 2, 3):
+                            fam_raw = str(row_vals[i]).strip()
+                            if not fam_raw or is_invalid_part(fam_raw): continue
+                            fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
+                            for f_raw in fams_to_process:
+                                for p_c in ['IR', 'OR']:
+                                    clean_keys = get_lookup_variants(f_raw, p_c)
+                                    for ck in clean_keys:
+                                        or_qty = safe_float(row_vals[i+1])
+                                        ir_qty = safe_float(row_vals[i+2])
+                                        if ck not in box_matrix: box_matrix[ck] = {}
+                                        if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': s_name}
+                                        if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': s_name}
+                elif 'BOX' in s_name_up and 'DAY' in s_name_up:
+                    df_fb = df_b.fillna('')
+                    type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
+                    for r_idx in range(min(20, len(df_fb))):
+                        norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
+                        t_c = next((j for j, h in enumerate(norm_strs) if 'TYPE' in h or 'BEARING' in h), -1)
+                        i_c = next((j for j, h in enumerate(norm_strs) if 'IR' in h and 'BOX' in h), -1)
+                        o_c = next((j for j, h in enumerate(norm_strs) if 'OR' in h and 'BOX' in h), -1)
+                        s_c = next((j for j, h in enumerate(norm_strs) if 'RING' in h and 'BOX' in h and 'IR' not in h and 'OR' not in h), -1)
+                        if t_c != -1 and (i_c != -1 or o_c != -1 or s_c != -1):
+                            type_col, ir_col, or_col, single_rpb_col = t_c, i_c, o_c, s_c; break
+                    if type_col != -1:
+                        for idx in range(r_idx + 1, len(df_fb)):
+                            row_vals = list(df_fb.iloc[idx])
+                            raw_t = str(row_vals[type_col]).strip()
+                            if not raw_t or is_invalid_part(raw_t): continue
+                            for p_c in ['IR', 'OR']:
+                                clean_keys = get_lookup_variants(raw_t, p_c)
+                                for ck in clean_keys:
+                                    if ck not in box_matrix: box_matrix[ck] = {}
+                                    if p_c == 'IR' and ('IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0):
+                                        fq = safe_float(row_vals[ir_col]) if ir_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
+                                        if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': s_name}
+                                    if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
+                                        fq = safe_float(row_vals[or_col]) if or_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
+                                        if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': s_name}
+            PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
+        del sheets_box
+
+        sheets_prod, logs3 = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
+        debug_logs.extend(logs3)
+        prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
+
+        if PARSED_MASTER_DATA["production"][4] == prod_cache_ts:
+            weight_matrix, furnace_map, machines_data, furnace_specs_local, _ = PARSED_MASTER_DATA["production"]
+        elif sheets_prod:
+            weight_matrix = {}
+            furnace_map = {}
+            machines_data = {'FACE': {}, 'OD': {}}
+            furnace_specs_local = DEFAULT_FURNACES.copy() 
+
+            for sheet_name, df_m in sheets_prod.items():
+                if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
+                    for r in range(len(df_m)):
+                        row = df_m.iloc[r].values
+                        f_name = str(row[0]).strip().upper() if len(row) > 0 else ""
+                        cap = safe_float(row[1]) if len(row) > 1 else 0.0
+                        if f_name and cap > 0 and ('FURNACE' in f_name or 'AICHELIN' in f_name or 'UNITHERM' in f_name):
+                            furnace_specs_local[f_name] = cap
+                            
+            if 'WEIGHTS' in sheets_prod:
+                df_w = sheets_prod['WEIGHTS'].fillna('')
+                header_idx = -1
+                for r_idx in range(min(10, len(df_w))):
+                    h_row = [str(x).strip().upper() for x in df_w.iloc[r_idx].values]
+                    if any('TYPE' in h for h in h_row) and any('IR/OR' in h or 'WEIGHT' in h or 'IR' in h for h in h_row):
+                        header_idx = r_idx; break
+                
+                if header_idx != -1:
+                    norm_w_headers = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
+                    type_idx = next((j for j, h in enumerate(norm_w_headers) if 'TYPE' in h), -1)
+                    ir_or_idx = next((j for j, h in enumerate(norm_w_headers) if 'IROR' in h or 'IR' in h), -1)
+                    wt_idx = next((j for j, h in enumerate(norm_w_headers) if 'WEIGHT' in h), -1)
+
+                    if type_idx != -1:
+                        for offset in range(1, len(df_w) - header_idx):
+                            row_vals = df_w.iloc[header_idx + offset].values
+                            raw_fam = str(row_vals[type_idx]).strip()
+                            if is_invalid_part(raw_fam): continue
+                            ir_or_val = str(row_vals[ir_or_idx]).strip() if ir_or_idx != -1 else ""
+                            part_code = 'OR' if '100' in ir_or_val else ('IR' if ('120' in ir_or_val or '010' in ir_or_val) else None)
+                            if part_code and wt_idx != -1:
+                                wt_val = safe_float(row_vals[wt_idx])
+                                if wt_val > 0:
+                                    clean_keys = get_lookup_variants(raw_fam, part_code)
+                                    for ck in clean_keys: weight_matrix[f"{ck}_{part_code}"] = wt_val
+
+            fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper() and 'FLEX' in str(k).upper()), None)
+            if fur_sheet_key:
+                df_f = sheets_prod[fur_sheet_key]
+                df_f.columns = [str(x).strip().upper() for x in df_f.iloc[0]]
+                for idx, r in df_f.iloc[1:].iterrows():
+                    comp_level = str(r.get('COMP LEVEL 1', r.iloc[0] if len(r) > 0 else '')).strip()
+                    if is_invalid_part(comp_level): continue
+                    p_code = 'IR' if comp_level.startswith('IM') else ('OR' if comp_level.startswith('OM') else None)
+                    if p_code:
+                        clean_keys = get_lookup_variants(comp_level, p_code)
+                        valid_furnaces = []
+                        for fn_key in ['PRIMARY FURNA', 'PRIMARY FURNACE', 'ALTERNATIVE 1', 'ALTERNATIVE 2']:
+                            fn = str(r.get(fn_key, '')).strip().upper()
+                            if not fn or fn == 'NAN': continue
+                            matched_fn = None
+                            if fn == "AU" or "UNITHERM" in fn: matched_fn = "AICHELIN UNITHERM ( 2033 )"
+                            elif "AICHELIN" in fn: matched_fn = "AICHELIN.(896)"
+                            else: matched_fn = next((k for k in furnace_specs_local.keys() if fn[:4] in k.upper()), None)
+                            if matched_fn and matched_fn not in valid_furnaces: valid_furnaces.append(matched_fn)
+                        if valid_furnaces: 
+                            for ck in clean_keys: furnace_map[f"{ck}_{p_code}"] = valid_furnaces
+            
+            for sheet_name, df_m in sheets_prod.items():
+                if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
+                str_matrix = df_m.fillna('').astype(str).values
+                current_m_num = None
+                current_m_type = "UNKNOWN"
+                for r in range(str_matrix.shape[0]):
+                    row_text = " ".join(str_matrix[r]).upper()
+                    if 'MACHINE' in row_text or 'M/C' in row_text:
+                        cells = [c.strip() for c in str_matrix[r] if c.strip()]
+                        m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
+                        if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
+                            current_m_num = m_cand
+                            if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): current_m_type = "FACE"
+                            elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: current_m_type = "OD"
+                    
+                    if current_m_num and current_m_type in ['FACE', 'OD']:
+                        h_row = [c.strip().upper() for c in str_matrix[r]]
+                        if any('TYPE' in h or 'PART' in h for h in h_row) and any('HR' in h for h in h_row):
+                            if current_m_num not in machines_data[current_m_type]:
+                                machines_data[current_m_type][current_m_num] = {'name': current_m_num, 'rates': {}, 'ready_time': 0.0}
+                                
+                            norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in h_row]
+                            std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
+                            box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
+                            ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
+                            rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'BOX' in h and 'HR' not in h), -1)
+                            type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h or 'PART' in h), -1)
+                            part_idx = next((j for j, h in enumerate(norm_headers) if 'PART' in h and 'NO' not in h), -1)
+                            comb_idx = next((j for j, h in enumerate(norm_headers) if 'COMBINED' in h), -1)
+                            
+                            for offset2 in range(1, 200):
+                                if r + offset2 >= str_matrix.shape[0]: break
+                                row_vals = str_matrix[r + offset2]
+                                inner_row_text = " ".join(row_vals).upper()
+                                if "MACHINE" in inner_row_text or "M/C" in inner_row_text: break 
+                                raw_t = str(row_vals[type_idx]).strip() if type_idx != -1 else ""
+                                if is_invalid_part(raw_t): continue
+                                part_val = str(row_vals[part_idx]).strip().upper() if part_idx != -1 else ""
+                                p_codes = []
+                                if '100' in part_val or 'OR' in part_val: p_codes.append('OR')
+                                if '120' in part_val or 'IR' in part_val or '010' in part_val: p_codes.append('IR')
+                                if not p_codes: p_codes = ['IR', 'OR']
+                                for pc in p_codes:
+                                    clean_keys = get_lookup_variants(raw_t, pc)
+                                    comb_val = str(row_vals[comb_idx]).strip() if comb_idx != -1 else ""
+                                    if comb_val and not is_invalid_part(comb_val): clean_keys.extend(get_lookup_variants(comb_val, pc))
+                                    if not clean_keys: continue
+                                        
+                                    rate_rings = 0.0
+                                    rpb = get_box_for_part(raw_t, pc, box_matrix)
+                                    if rpb_idx != -1 and safe_float(row_vals[rpb_idx]) > 0: rpb = safe_float(row_vals[rpb_idx])
+                                    if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0: rate_rings = safe_float(row_vals[ring_hr_idx])
+                                    elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
+                                    elif std_hr_idx != -1 and safe_float(row_vals[std_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[std_hr_idx]) * rpb
+                                        
+                                    if rate_rings > 0:
+                                        for ck in set(clean_keys): machines_data[current_m_type][current_m_num]['rates'][f"{ck}_{pc}"] = rate_rings
+                                            
+            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, furnace_specs_local, prod_cache_ts)
+        del sheets_prod
 
         current_state = get_previous_day_state(payload.date)
         work_items = []
@@ -827,6 +779,7 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
+        # Deep Normalized Rollover Mapping (Fixes Furnace starting timeline mismatches)
         for res in resources:
             norm_res_id = normalize_resource_name(res.id)
             matched_state = None
@@ -839,47 +792,87 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = matched_state.get("last_fam")
                 res.last_pc = matched_state.get("last_pc")
 
-        # STRICT WIP DEDUCTION LOGIC
-        wip_deductions = {}
+        ht_balances = {}
         for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
             disp, pc = w_key.split('|')
             ch_norm = w_data.get("channel", "UNKNOWN")
+            
+            if "ht_balance" in w_data:
+                ht_balances[(disp, pc)] = float(w_data["ht_balance"])
+                
             routing = get_routing_for_part(ch_norm, pc)
+            first_stage = get_first_required_stage(routing)
             
             for stage in ['HT', 'FACE', 'OD']:
                 if stage not in routing: continue
+                
+                # Rule 5: Only restore stages that actually exist in the saved state (the pending stage)
+                if stage not in w_data: continue
+                
                 stage_data = w_data.get(stage, {})
                 qty = float(stage_data.get("qty", 0.0))
                 rt = float(stage_data.get("rt", 0.0))
                 
-                if qty > 0:
-                    first_stage = get_first_required_stage(routing)
-                    if stage != first_stage:
-                        wip_deductions[(disp, pc)] = wip_deductions.get((disp, pc), 0.0) + qty
-                        work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
+                if qty > 0 and stage != first_stage:
+                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
 
         ch_stats = {}
+        # Pre-calculate priorities to match original logic
         for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
                 if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
-                
-                for p_code in ['IR', 'OR']:
-                    req = float(data.get(p_code, 0.0))
-                    if req <= 0: continue
-                    routing = get_routing_for_part(ch_norm, p_code)
-                    first_stage = get_first_required_stage(routing)
-                    
-                    if first_stage:
-                        deduct = min(req, wip_deductions.get((display_name, p_code), 0.0))
-                        if deduct > 0:
-                            wip_deductions[(display_name, p_code)] -= deduct
-                            req -= deduct
 
-                    if req > 0 and first_stage:
-                        work_items.append(WorkItem(first_stage, display_name, p_code, day_idx, data['channel'], req, 0.0, ch_stats[ch_norm]['score'], routing))
+        # Apply HT balances and schedule
+        tracker_ht = {}
+        for display_name, data in channel_demands_day1.items():
+            for p_code in ['IR', 'OR']:
+                raw_d1 = float(data.get(p_code, 0.0))
+                if raw_d1 > 0:
+                    key = (display_name, p_code)
+                    if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
+                    tracker_ht[key]['raw_d1'] = raw_d1
+                    
+        for display_name, data in channel_demands_day2.items():
+            for p_code in ['IR', 'OR']:
+                raw_d2 = float(data.get(p_code, 0.0))
+                if raw_d2 > 0:
+                    key = (display_name, p_code)
+                    if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
+                    tracker_ht[key]['raw_d2'] = raw_d2
+
+        for key, reqs in tracker_ht.items():
+            disp, pc = key
+            ch_norm = normalize_channel(reqs['channel'])
+            routing = get_routing_for_part(ch_norm, pc)
+            first_stage = get_first_required_stage(routing)
+            
+            if not first_stage: continue
+            
+            raw_d1 = reqs['raw_d1']
+            raw_d2 = reqs['raw_d2']
+            bal = ht_balances.get(key, 0.0)
+            
+            d1_sat = min(raw_d1, bal)
+            bal -= d1_sat
+            net_d1 = raw_d1 - d1_sat
+            
+            d2_sat = min(raw_d2, bal)
+            bal -= d2_sat
+            net_d2 = raw_d2 - d2_sat
+            
+            reqs['net_d1'] = net_d1
+            reqs['net_d2'] = net_d2
+            reqs['d2_satisfied'] = d2_sat
+            reqs['leftover_bal'] = bal
+            reqs['first_stage'] = first_stage
+            
+            if net_d1 > 0:
+                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, ch_stats[ch_norm]['score'], routing))
+            if net_d2 > 0:
+                work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, ch_stats[ch_norm]['score'], routing))
 
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
         for res in resources:
@@ -940,13 +933,16 @@ def generate_schedule(payload: ScheduleRequest):
                     
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
+                # ==========================================
+                # LOOK-AHEAD BATCH MERGING STEP
+                # ==========================================
                 if res.type == 'HT':
                     weight = item.rates[res.id][1]
                     est_runtime = (item.qty * weight) / rate_or_cap
-                    merge_threshold = 1.0
+                    merge_threshold = 1.0  # Under 1 hour for Heat Treatment
                 else:
                     est_runtime = item.qty / rate_or_cap
-                    merge_threshold = 2.0
+                    merge_threshold = 2.0  # Under 2 hours for Face/OD Grinding
                     
                 if item.day_idx in [-1, 0] and est_runtime < merge_threshold:
                     for tomorrow_item in work_items:
@@ -958,7 +954,7 @@ def generate_schedule(payload: ScheduleRequest):
                             tomorrow_item.qty > 0.01):
                             
                             item.qty += tomorrow_item.qty
-                            tomorrow_item.qty = 0.0 
+                            tomorrow_item.qty = 0.0  # Consume tomorrow's run to avoid extra setups
                             break
                 
                 chunk_qty = item.qty
@@ -1024,91 +1020,129 @@ def generate_schedule(payload: ScheduleRequest):
 
         for r in resources:
             end_state["machines"][r.id] = {
-                "ready_time": max(0.0, r.ready_time - 24.0),
+                "ready_time": r.ready_time - 24.0,
                 "last_fam": r.last_fam,
                 "last_pc": r.last_pc
             }
 
+        # Calculate Pending HT per part for balance tracking
+        pending_ht = {}
+        for item in work_items:
+            if item.qty <= 0.01: continue
+            key = (item.disp, item.pc)
+            if item.stage == get_first_required_stage(item.routing):
+                pending_ht[key] = pending_ht.get(key, 0.0) + item.qty
+
+        new_ht_balances = {}
+        for key, reqs in tracker_ht.items():
+            fs = reqs.get('first_stage')
+            if not fs: continue
+            
+            p_ht = pending_ht.get(key, 0.0)
+            sched_ht = reqs['net_d1'] + reqs['net_d2']
+            
+            completed_ht = max(0.0, sched_ht - p_ht)
+            completed_d2 = max(0.0, completed_ht - reqs['net_d1'])
+            
+            new_bal = reqs['d2_satisfied'] + completed_d2 + reqs['leftover_bal']
+            if new_bal > 0:
+                new_ht_balances[key] = new_bal
+                
+        for key, bal in ht_balances.items():
+            if key not in tracker_ht and bal > 0:
+                new_ht_balances[key] = bal
+
+        # Clear Unscheduled Reason Separations and Save WIP
         for item in work_items:
             if item.qty <= 0.01: continue
             
             if len(item.valid_resources) > 0 and item.missing_reason == "Capacity Exceeded":
                 item.missing_reason = "Exceeds Production Window"
 
+            # Requirement 1 & 5: Save only the pending stage, never recreate empty completed stages
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
                 if w_key not in end_state["wip"]: 
                     end_state["wip"][w_key] = {"channel": item.channel}
                 
                 if item.stage not in end_state["wip"][w_key]:
-                    end_state["wip"][w_key][item.stage] = {"qty": 0.0, "rt": 0.0}
+                    end_state["wip"][w_key][item.stage] = {"qty": 0, "rt": 0}
+                    
                 end_state["wip"][w_key][item.stage]["qty"] += item.qty
                 end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
 
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
+            missed_val = f"{int(item.qty)} Rings" if rpb <= 0 else f"{int(item.qty)} Rings ({math.ceil(item.qty / rpb)} Boxes)"
+            
+            if item.day_idx == -1: day_label = "WIP"
+            else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"
+                
+            part_display = f"{item.disp} {item.pc} ({day_label})"
+            
             unscheduled.append({
-                "part": f"{item.disp} {item.pc}",
-                "channel": item.channel,
-                "missing": item.stage,
-                "qty": str(int(item.qty)),
-                "boxes": str(math.ceil(item.qty / rpb)) if rpb > 0 else "0",
-                "reason": item.missing_reason,
-                "alert": True
+                "stage": item.stage, 
+                "part": part_display, 
+                "missed_boxes": missed_val,
+                "reason": item.missing_reason 
             })
 
-        save_setting('pending_state', {
+        # Inject HT Balances into end_state
+        for key, bal in new_ht_balances.items():
+            if bal > 0:
+                w_key = f"{key[0]}|{key[1]}"
+                if w_key not in end_state["wip"]:
+                    channel = tracker_ht[key]['channel'] if key in tracker_ht else "UNKNOWN"
+                    end_state["wip"][w_key] = {"channel": channel}
+                end_state["wip"][w_key]["ht_balance"] = bal
+
+        final_face, final_od, furnaces_formatted = [], [], []
+        today_prod_map = {}
+        
+        for r in resources:
+            if r.type == 'FACE': final_face.append({"machine": r.id, "rows": r.rows})
+            elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
+            elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})
+            
+            for row in r.rows:
+                if row.get("is_terminal"):
+                    part_str = row.get("part", "")
+                    qty = float(row.get("qty", 0)) if str(row.get("qty", 0)).replace('.','',1).isdigit() else 0
+                    disp = part_str.split("-")[0] if "-" in part_str else part_str.split(" ")[0]
+                    today_prod_map[disp] = today_prod_map.get(disp, 0) + qty
+
+        summary_list = []
+        for disp_name, data in monthly_data.get(month_str, {}).items():
+            ch = data.get("channel", "Unknown")
+            mo_req = data.get("total_req", 0)
+            mtd_prod = data.get("produced", 0)
+            d1_data = channel_demands_day1.get(disp_name, {})
+            d1_req = max(d1_data.get("IR", 0), d1_data.get("OR", 0))
+            t_prod = today_prod_map.get(disp_name, 0)
+            summary_list.append({
+                "type": disp_name, "channel": ch, "monthly_req": int(mo_req), "today_req": int(d1_req), "today_prod": int(t_prod),
+                "mtd_prod": int(mtd_prod), "balance": int(mo_req - mtd_prod),
+                "remaining_pct": round(((mo_req - mtd_prod) / mo_req * 100), 1) if mo_req > 0 else 0,
+                "difference": int(t_prod - d1_req)
+            })
+            
+        snapshot = {
             "monthly_data": monthly_data.get(month_str, {}),
             "plant_state": end_state
-        })
-
-        schedule = {}
-        for r in resources:
-            if not r.rows: continue
-            block = f"{r.type}_block"
-            if block not in schedule: schedule[block] = []
-            
-            mc_name = str(r.id)
-            if mc_name.startswith("MC_"): mc_name = mc_name[3:]
-            
-            if r.type == 'HT':
-                for i, row in enumerate(r.rows):
-                    schedule[block].append({
-                        "mc_no": mc_name if i == 0 else "",
-                        "part": row["part"],
-                        "qty": row["qty"],
-                        "cha": row["cha"],
-                        "rate": row["rate"],
-                        "timing": row["timing"],
-                        "alert": row["alert"],
-                        "is_terminal": row["is_terminal"]
-                    })
-            else:
-                formatted_rows = {}
-                for i, row in enumerate(r.rows):
-                    if i >= 3: break
-                    col_key = f"p_1st" if i == 0 else f"p_{i+1}th" if i > 2 else f"p_{i+1}nd" if i == 1 else f"p_{i+1}rd"
-                    formatted_rows[f"{col_key}_part"] = row["part"]
-                    formatted_rows[f"{col_key}_std_box"] = row["std_box"]
-                    formatted_rows[f"{col_key}_timing"] = row["timing"]
-                    formatted_rows[f"{col_key}_alert"] = row["alert"]
-                    formatted_rows[f"{col_key}_is_terminal"] = row.get("is_terminal", False)
-                if formatted_rows:
-                    formatted_rows["mc_no"] = mc_name
-                    schedule[block].append(formatted_rows)
-                    
-        return {
-            "status": "success",
-            "schedule": schedule,
-            "unscheduled": unscheduled,
-            "debug": debug_logs
         }
-        
+        save_setting("pending_state", snapshot)
+
+        return {
+            "status": "success", 
+            "debug_logs": debug_logs, 
+            "data": {
+                "face_grinding": final_face, 
+                "od_grinding": final_od, 
+                "heat_treatment": furnaces_formatted, 
+                "unscheduled": unscheduled, 
+                "summary": summary_list,
+                "state_snapshot": snapshot
+            }
+        }
     except Exception as e:
         import traceback
-        traceback.print_exc()
-        return {"status": "error", "detail": str(e), "debug": debug_logs}
-
-# ==========================================
-# MOUNT ROUTER AT THE BOTTOM
-# ==========================================
-app.include_router(router)
+        return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}

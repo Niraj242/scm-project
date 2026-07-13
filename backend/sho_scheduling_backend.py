@@ -168,6 +168,9 @@ def normalize_channel(ch_str):
     if ch.isdigit(): return f"CH{int(ch)}"
     return ch
 
+def normalize_resource_name(name):
+    return re.sub(r'[\s().\-_]', '', str(name).upper())
+
 def get_routing_for_part(channel_norm, p_code):
     return PROCESS_FLOW.get((channel_norm, p_code), DEFAULT_ROUTING)
 
@@ -388,6 +391,15 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix):
             qty = box_matrix[var][p_code]['qty']
             source = box_matrix[var][p_code]['source']
             return qty, source, var
+            
+    # Fuzzy Fallback Fallthrough for Ring to Box Mismatches
+    norm_disp = re.sub(r'[\s./_\-]', '', str(display_name).upper())
+    for b_key, b_val in box_matrix.items():
+        norm_bkey = re.sub(r'[\s./_\-]', '', str(b_key).upper())
+        if norm_bkey in norm_disp or norm_disp in norm_bkey:
+            if p_code in b_val:
+                return b_val[p_code]['qty'], b_val[p_code]['source'], b_key
+                
     return 0.0, "NONE", variants[0] if variants else display_name
 
 def get_box_for_part(display_name, p_code, box_matrix):
@@ -767,12 +779,18 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
+        # Deep Normalized Rollover Mapping (Fixes Furnace starting timeline mismatches)
         for res in resources:
-            if res.id in current_state.get("machines", {}):
-                sm = current_state["machines"][res.id]
-                res.ready_time = float(sm.get("ready_time", 0.0))
-                res.last_fam = sm.get("last_fam")
-                res.last_pc = sm.get("last_pc")
+            norm_res_id = normalize_resource_name(res.id)
+            matched_state = None
+            for sm_id, sm_data in current_state.get("machines", {}).items():
+                if normalize_resource_name(sm_id) == norm_res_id:
+                    matched_state = sm_data
+                    break
+            if matched_state:
+                res.ready_time = float(matched_state.get("ready_time", 0.0))
+                res.last_fam = matched_state.get("last_fam")
+                res.last_pc = matched_state.get("last_pc")
 
         for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
@@ -848,12 +866,11 @@ def generate_schedule(payload: ScheduleRequest):
                         if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                         
                         start_time = max(res.ready_time + setup, item.ready_time)
-                        if start_time >= res.max_time: continue # Prevent starting new batches after cutoff
+                        if start_time >= res.max_time: continue
                         
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         gap = max(0.0, item.ready_time - (res.ready_time + setup))
                         
-                        # Fix Idle Times: Prioritize early starts first, then day_idx
                         key = (start_time, item.day_idx, gap, -item.priority)
                         
                         if key < best_key:
@@ -865,26 +882,45 @@ def generate_schedule(payload: ScheduleRequest):
                     
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
-                # Fix Fragmented Batches: No more forced chunking if it bleeds slightly past max_time
+                # ==========================================
+                # LOOK-AHEAD BATCH MERGING STEP
+                # ==========================================
+                if res.type == 'HT':
+                    weight = item.rates[res.id][1]
+                    est_runtime = (item.qty * weight) / rate_or_cap
+                    merge_threshold = 1.0  # Under 1 hour for Heat Treatment
+                else:
+                    est_runtime = item.qty / rate_or_cap
+                    merge_threshold = 2.0  # Under 2 hours for Face/OD Grinding
+                    
+                if item.day_idx in [-1, 0] and est_runtime < merge_threshold:
+                    for tomorrow_item in work_items:
+                        if (tomorrow_item.day_idx == 1 and 
+                            tomorrow_item.disp == item.disp and 
+                            tomorrow_item.pc == item.pc and 
+                            tomorrow_item.stage == item.stage and 
+                            tomorrow_item.channel == item.channel and 
+                            tomorrow_item.qty > 0.01):
+                            
+                            item.qty += tomorrow_item.qty
+                            tomorrow_item.qty = 0.0  # Consume tomorrow's run to avoid extra setups
+                            break
+                
                 chunk_qty = item.qty
                 
                 if res.type == 'HT':
                     weight = item.rates[res.id][1]
                     actual_time = (chunk_qty * weight) / rate_or_cap
-                    
                     if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
                         actual_time += (res.bd_end - max(start_time, res.bd_start))
-                        
                     res_ready_time = start_time + actual_time + 0.5
                     out_time = start_time + actual_time + 3.5
                     display_rate = f"{round((chunk_qty * weight), 1)} kg"
                     if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
                 else:
                     actual_time = chunk_qty / rate_or_cap
-                    
                     if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
                         actual_time += (res.bd_end - max(start_time, res.bd_start))
-                        
                     res_ready_time = start_time + actual_time
                     out_time = res_ready_time
                     display_rate = rate_or_cap
@@ -894,7 +930,6 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = item.disp
                 res.last_pc = item.pc
                 
-                # Lock machine only if it completely finished past the shift line
                 if res.ready_time >= res.max_time: res.blocked = True
                 item.qty -= chunk_qty
                 
@@ -920,7 +955,6 @@ def generate_schedule(payload: ScheduleRequest):
                     new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
                     last_row["timing"] = f"{old_start}-{new_end}"
                     
-                    # Fix Box Calculation Displays
                     display_val = f"{int(new_qty)} Rings ({math.ceil(new_qty / rpb)} Boxes)" if rpb > 0 else f"{int(new_qty)} Rings"
                     if res.type != 'HT': last_row["std_box"] = display_val
                 else:
@@ -940,14 +974,17 @@ def generate_schedule(payload: ScheduleRequest):
                 "last_pc": r.last_pc
             }
 
+        # Clear Unscheduled Reason Separations
         for item in work_items:
             if item.qty <= 0.01: continue
             
+            if len(item.valid_resources) > 0 and item.missing_reason == "Capacity Exceeded":
+                item.missing_reason = "Exceeds Production Window"
+
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
                 if w_key not in end_state["wip"]: 
                     end_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel}
-
                 end_state["wip"][w_key][item.stage]["qty"] += item.qty
                 end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
 

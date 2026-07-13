@@ -392,7 +392,6 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix):
             source = box_matrix[var][p_code]['source']
             return qty, source, var
             
-    # Fuzzy Fallback Fallthrough for Ring to Box Mismatches
     norm_disp = re.sub(r'[\s./_\-]', '', str(display_name).upper())
     for b_key, b_val in box_matrix.items():
         norm_bkey = re.sub(r'[\s./_\-]', '', str(b_key).upper())
@@ -864,9 +863,9 @@ def generate_schedule(payload: ScheduleRequest):
                     
                     rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
                     
-                    # Optimized Setup configuration prevents artificial jump to 12 PM start 
-                    setup = 0.5 if res.type == 'HT' else 0.25 
-                    if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 0.25 
+                    # Restored 2.0 hour setup for Face/OD if part changes completely
+                    setup = 0.5 if res.type == 'HT' else 2.0 
+                    if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                     
                     start_time = max(res.ready_time + setup, item.ready_time)
                     if start_time >= res.max_time: continue

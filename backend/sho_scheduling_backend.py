@@ -9,9 +9,23 @@ import time
 import sqlite3
 import pickle
 from datetime import datetime, timedelta
-from fastapi import APIRouter
+from fastapi import FastAPI, APIRouter
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Dict, Any, List
+
+# ==========================================
+# APP INITIALIZATION & CORS (CRITICAL FOR RENDER)
+# ==========================================
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all frontend origins to connect
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 router = APIRouter()
 
@@ -800,8 +814,6 @@ def generate_schedule(payload: ScheduleRequest):
             ch_norm = w_data.get("channel", "UNKNOWN")
             routing = get_routing_for_part(ch_norm, pc)
             
-            # Since we STRICTLY only save the next pending stage below, 
-            # w_data will only have that singular stage. Never recreate completed ones.
             for stage in ['HT', 'FACE', 'OD']:
                 if stage not in routing: continue
                 stage_data = w_data.get(stage, {})
@@ -811,7 +823,6 @@ def generate_schedule(payload: ScheduleRequest):
                 if qty > 0:
                     first_stage = get_first_required_stage(routing)
                     if stage != first_stage:
-                        # Stage has moved past Heat Treatment. Tally deduction to remove from future HT.
                         wip_deductions[(disp, pc)] = wip_deductions.get((disp, pc), 0.0) + qty
                         work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
 
@@ -828,7 +839,6 @@ def generate_schedule(payload: ScheduleRequest):
                     routing = get_routing_for_part(ch_norm, p_code)
                     first_stage = get_first_required_stage(routing)
                     
-                    # Deduct completed physical inventory from incoming Heat Treatment demand.
                     if first_stage:
                         deduct = min(req, wip_deductions.get((display_name, p_code), 0.0))
                         if deduct > 0:
@@ -986,7 +996,6 @@ def generate_schedule(payload: ScheduleRequest):
                 "last_pc": r.last_pc
             }
 
-        # Clear Unscheduled Reason Separations
         for item in work_items:
             if item.qty <= 0.01: continue
             
@@ -995,7 +1004,6 @@ def generate_schedule(payload: ScheduleRequest):
 
             # ==========================================
             # STRICT WIP SAVING LOGIC
-            # Save ONLY the next pending stage. Overwrite multiple chunks to combine them.
             # ==========================================
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
@@ -1069,3 +1077,8 @@ def generate_schedule(payload: ScheduleRequest):
         import traceback
         traceback.print_exc()
         return {"status": "error", "detail": str(e), "debug": debug_logs}
+
+# ==========================================
+# MOUNT ROUTER AT THE BOTTOM (CRITICAL)
+# ==========================================
+app.include_router(router)

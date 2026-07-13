@@ -6,6 +6,7 @@ import requests
 import io
 import json
 import time
+import sqlite3
 from datetime import datetime, timedelta
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -25,20 +26,64 @@ PARSED_MASTER_DATA = {
     "production": ({}, {}, {}, {}, 0) 
 }
 
-MONTHLY_FILE = "monthly_tracking.json"
-SAVED_PLAN_FILE = "saved_plan.json"
-SAVED_BUFFERS_FILE = "saved_buffers.json"
-CARRYOVER_FILE = "carryover_tracking.json"
-PLANT_STATE_FILE = "plant_state.json"
-PENDING_STATE_FILE = "pending_state.json" 
-
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
 FURNACE_SPECS = {}
 
 # ==========================================
-# 1. CENTRALIZED ROUTING CONFIGURATION
+# 1. DATABASE & PERSISTENCE (Replaces JSON files)
+# ==========================================
+DB_PATH = "sho_data.db"
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
+        c.execute('CREATE TABLE IF NOT EXISTS daily_state (date TEXT PRIMARY KEY, state_json TEXT)')
+        conn.commit()
+
+init_db()
+
+def get_setting(key, default=None):
+    if default is None: default = {}
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('SELECT value FROM settings WHERE key=?', (key,))
+        row = c.fetchone()
+        return json.loads(row[0]) if row else default
+
+def save_setting(key, value):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('REPLACE INTO settings (key, value) VALUES (?, ?)', (key, json.dumps(value)))
+        conn.commit()
+
+def get_previous_day_state(target_date_str):
+    """Loads the strictly final state of the day BEFORE the requested schedule date."""
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('SELECT state_json FROM daily_state WHERE date < ? ORDER BY date DESC LIMIT 1', (target_date_str,))
+        row = c.fetchone()
+        if row: return json.loads(row[0])
+        return {"machines": {}, "wip": {}}
+
+def save_daily_state(date_str, state_data):
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('REPLACE INTO daily_state (date, state_json) VALUES (?, ?)', (date_str, json.dumps(state_data)))
+        conn.commit()
+
+def load_monthly_tracking(): return get_setting('monthly_tracking', {})
+def save_monthly_tracking(data): save_setting('monthly_tracking', data)
+def load_saved_plan(): return get_setting('saved_plan', {})
+def load_saved_buffers(): return get_setting('saved_buffers', {})
+def save_buffers_to_disk(entries): save_setting('saved_buffers', entries)
+def load_carryover(): return get_setting('carryover_tracking', {})
+def save_carryover(data): save_setting('carryover_tracking', data)
+
+# ==========================================
+# 2. CENTRALIZED ROUTING CONFIGURATION
 # ==========================================
 PROCESS_FLOW = {
     ("CH1", "IR"): ["HT", "CHANNEL"],
@@ -87,7 +132,6 @@ PROCESS_FLOW = {
     ("T11", "IR"): ["CHANNEL"],
     ("T11", "OR"): ["CHANNEL"],
 
-
     ("HUB 1.1", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("HUB 1.1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("HUB 1.2", "IR"): ["HT", "FACE", "CHANNEL"],
@@ -104,35 +148,8 @@ PROCESS_FLOW = {
     ("THUB 1.2", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("THUB 1.3", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("THUB 1.3", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
-
 }
 DEFAULT_ROUTING = ["HT", "FACE", "OD", "CHANNEL"]
-
-def load_json_file(filename):
-    if os.path.exists(filename):
-        try:
-            with open(filename, 'r') as f: return json.load(f)
-        except: return {}
-    return {}
-
-def save_json_file(filename, data):
-    try:
-        with open(filename, 'w') as f: json.dump(data, f)
-    except Exception as e:
-        print(f"Error saving {filename}: {e}")
-
-def load_monthly_tracking(): return load_json_file(MONTHLY_FILE)
-def save_monthly_tracking(data): save_json_file(MONTHLY_FILE, data)
-
-def load_saved_plan(): return load_json_file(SAVED_PLAN_FILE)
-def load_saved_buffers(): return load_json_file(SAVED_BUFFERS_FILE)
-def save_buffers_to_disk(entries): save_json_file(SAVED_BUFFERS_FILE, entries)
-
-def load_carryover(): return load_json_file(CARRYOVER_FILE)
-def save_carryover(data): save_json_file(CARRYOVER_FILE, data)
-
-def load_plant_state(): return load_json_file(PLANT_STATE_FILE)
-def save_plant_state(data): save_json_file(PLANT_STATE_FILE, data)
 
 class ScheduleRequest(BaseModel):
     sector: str
@@ -151,7 +168,7 @@ def health_check():
     return {"status": "ok"}
 
 @router.get("/api/monthly_tracking")
-def get_monthly_tracking():
+def get_monthly_tracking_api():
     return load_monthly_tracking()
 
 @router.post("/api/save_plan")
@@ -159,9 +176,9 @@ def save_plan(payload: SavePlanRequest):
     try:
         plans = load_saved_plan()
         plans[payload.date] = payload.plan
-        save_json_file(SAVED_PLAN_FILE, plans)
+        save_setting('saved_plan', plans)
 
-        pending = load_json_file(PENDING_STATE_FILE)
+        pending = get_setting('pending_state', {})
         if pending:
             if "carryover" in pending:
                 carryover_all = load_carryover()
@@ -175,10 +192,9 @@ def save_plan(payload: SavePlanRequest):
                 save_monthly_tracking(monthly_all)
 
             if "plant_state" in pending:
-                save_plant_state(pending["plant_state"])
+                save_daily_state(payload.date, pending["plant_state"])
 
-            if os.path.exists(PENDING_STATE_FILE):
-                os.remove(PENDING_STATE_FILE)
+            save_setting('pending_state', {})
 
         return {"status": "success"}
     except Exception as e:
@@ -187,9 +203,7 @@ def save_plan(payload: SavePlanRequest):
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
-    # Normalize back to match PROCESS_FLOW keys (e.g., "CH1")
-    if ch.isdigit():
-        return f"CH{ch}"
+    if ch.isdigit(): return f"CH{int(ch)}"
     return ch
 
 # ==========================================
@@ -425,6 +439,26 @@ class WorkItem:
         self.priority = priority
         self.routing = routing
         self.merged_d2 = False
+        self.rates = {}
+        self.valid_resources = []
+
+def init_item_resources(item, resources, furnace_map, weight_matrix):
+    item.rates = {}
+    item.valid_resources = []
+    for res in resources:
+        if res.type != item.stage: continue
+        if res.type == 'HT':
+            valid_furnaces = get_furnaces_for_part(item.disp, item.pc, furnace_map)
+            if res.id not in valid_furnaces: continue
+            weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
+            if not weight: continue 
+            item.rates[res.id] = (res.capacity_info, weight)
+            item.valid_resources.append(res)
+        else:
+            rate = get_rate_for_part(item.disp, item.pc, res.capacity_info, res.id)
+            if rate > 0:
+                item.rates[res.id] = rate
+                item.valid_resources.append(res)
 
 class Resource:
     def __init__(self, r_id, r_type, capacity_info):
@@ -496,9 +530,6 @@ def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []
     logged_rpb = set()
-    
-    # Track inventory precisely to avoid double counting Buffer vs WIP
-    inventory_delta = {} 
     
     saved_bufs = load_saved_buffers()
     active_entries = saved_bufs.copy()
@@ -778,21 +809,10 @@ def generate_schedule(payload: ScheduleRequest):
         del sheets_prod
 
         # ==========================================
-        # CONTINUOUS STATE INITIALIZATION (MES)
+        # DB-BACKED TIME-TRAVEL INITIALIZATION
         # ==========================================
-        current_state = load_plant_state()
-        if "wip" not in current_state: current_state["wip"] = {}
-        if "machines" not in current_state: current_state["machines"] = {}
-        if "inventory" not in current_state: current_state["inventory"] = {}
-
-        last_date_str = current_state.get("last_date", payload.date)
-        days_diff = 0
-        try:
-            d1 = datetime.strptime(last_date_str, "%Y-%m-%d")
-            d2 = datetime.strptime(payload.date, "%Y-%m-%d")
-            days_diff = (d2 - d1).days
-        except: pass
-        time_shift = days_diff * 24.0
+        # Loads ONLY the final WIP from the previous day. Avoids doubling up requirements.
+        current_state = get_previous_day_state(payload.date)
 
         work_items = []
         resources = []
@@ -800,43 +820,33 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # Load historical Machine Continuity securely
         for res in resources:
-            if res.id in current_state["machines"]:
+            if res.id in current_state.get("machines", {}):
                 sm = current_state["machines"][res.id]
-                shifted_ready = float(sm.get("ready_time", 0.0)) - time_shift
-                res.ready_time = max(0.0, shifted_ready)
+                res.ready_time = float(sm.get("ready_time", 0.0))
                 res.last_fam = sm.get("last_fam")
                 res.last_pc = sm.get("last_pc")
 
-        # Process WIP Queues - Inject existing WIP FIRST with correct time delays
-        for w_key, w_data in current_state["wip"].items():
+        # Inject existing WIP safely
+        for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
             disp, pc = w_key.split('|')
             ch_norm = w_data.get("channel", "UNKNOWN")
             routing = get_routing_for_part(ch_norm, pc)
             
             for stage in ['HT', 'FACE', 'OD']:
-                if stage not in routing: continue # SKIP entirely if not in routing
+                if stage not in routing: continue
                 stage_data = w_data.get(stage, {})
-                if isinstance(stage_data, (int, float)):
-                    qty, rt = float(stage_data), 0.0
-                else:
-                    qty = float(stage_data.get("qty", 0.0))
-                    rt = float(stage_data.get("rt", 0.0))
+                qty = float(stage_data.get("qty", 0.0))
+                rt = float(stage_data.get("rt", 0.0))
                 
                 if qty > 0:
-                    shifted_rt = max(0.0, rt - time_shift)
-                    # Priority 10000 ensures WIP finishes before new demand
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, shifted_rt, 10000.0, routing))
-                    current_state["wip"][w_key][stage] = {"qty": 0.0, "rt": 0.0}
+                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
 
-        # Append new daily requirements at their purely FIRST REQUIRED PROCESS
         ch_stats = {}
         for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
-                
                 if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
                 
@@ -863,17 +873,19 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        # Intelligent Batch Merging (Constraint 10)
         for d1_item in [i for i in work_items if i.day_idx == 0]:
             d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
             if d2_item:
-                # Merge small jobs to reduce setups if routing/part matches
                 if (d1_item.qty + d2_item.qty) <= 5000:
                     d1_item.qty += d2_item.qty
                     d1_item.merged_d2 = True
                     d2_item.qty = 0.0 
 
-        # SIMULATION LOOP (With Auto WIP Cascade)
+        # PRE-CACHE RATES FOR BLISTERING SPEED
+        for item in work_items:
+            init_item_resources(item, resources, furnace_map, weight_matrix)
+
+        # SIMULATION LOOP
         for target_day in [-1, 0, 1]:
             current_max_time = 24.0 
             
@@ -891,20 +903,10 @@ def generate_schedule(payload: ScheduleRequest):
                 best_key = (float('inf'), float('inf'), float('inf'), float('-inf'))
                 
                 for item in active_items:
-                    for res in resources:
+                    for res in item.valid_resources:
                         if res.blocked or res.ready_time >= res.max_time: continue
-                        if res.type != item.stage: continue
-                        rate_or_cap = 0.0
-                        if res.type == 'HT':
-                            valid_furnaces = get_furnaces_for_part(item.disp, item.pc, furnace_map)
-                            if res.id not in valid_furnaces: continue
-                            weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
-                            if not weight: continue 
-                            rate_or_cap = res.capacity_info
-                        else:
-                            rate_or_cap = get_rate_for_part(item.disp, item.pc, res.capacity_info, res.id)
-                            if rate_or_cap <= 0: continue
-                            
+                        
+                        rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
                         setup = 0.5 if res.type == 'HT' else 2.0
                         if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                         
@@ -926,15 +928,17 @@ def generate_schedule(payload: ScheduleRequest):
                 max_allowed_time = res.max_time + 5.0 
                 
                 if res.type == 'HT':
-                    weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
+                    weight = item.rates[res.id][1]
                     actual_time = (item.qty * weight) / rate_or_cap
                     
                     if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
                         actual_time += (res.bd_end - max(start_time, res.bd_start))
                         
                     if start_time + actual_time > max_allowed_time:
+                        allowed_time = max(0.1, max_allowed_time - start_time)
+                        chunk_qty = min(item.qty, (allowed_time * rate_or_cap) / weight)
+                        actual_time = (chunk_qty * weight) / rate_or_cap
                         res.blocked = True
-                        continue
                     else:
                         chunk_qty = item.qty
                         
@@ -949,8 +953,10 @@ def generate_schedule(payload: ScheduleRequest):
                         actual_time += (res.bd_end - max(start_time, res.bd_start))
                         
                     if start_time + actual_time > max_allowed_time:
+                        allowed_time = max(0.1, max_allowed_time - start_time)
+                        chunk_qty = min(item.qty, allowed_time * rate_or_cap)
+                        actual_time = chunk_qty / rate_or_cap
                         res.blocked = True
-                        continue
                     else:
                         chunk_qty = item.qty
                         
@@ -965,14 +971,11 @@ def generate_schedule(payload: ScheduleRequest):
                 if res.ready_time >= res.max_time: res.blocked = True
                 item.qty -= chunk_qty
                 
-                # WIP SPAWNING: Cascade to ONLY processes in PROCESS_FLOW
                 next_stage = get_next_required_stage(res.type, item.routing)
                 if next_stage: 
-                    work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing))
-                else:
-                    # Final stage hit (Channel reached)
-                    inv_key = f"{item.disp}|{item.pc}"
-                    inventory_delta[inv_key] = inventory_delta.get(inv_key, 0.0) + chunk_qty
+                    new_item = WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing)
+                    init_item_resources(new_item, resources, furnace_map, weight_matrix)
+                    work_items.append(new_item)
 
                 rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
                 can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
@@ -1001,20 +1004,24 @@ def generate_schedule(payload: ScheduleRequest):
                     else: res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
 
         unscheduled_to_carry = []
+        end_state = { "machines": {}, "wip": {} }
+
+        for r in resources:
+            end_state["machines"][r.id] = {
+                "ready_time": max(0.0, r.ready_time - 24.0),
+                "last_fam": r.last_fam,
+                "last_pc": r.last_pc
+            }
+
         for item in work_items:
             if item.qty <= 0.01: continue
             
             w_key = f"{item.disp}|{item.pc}"
-            if w_key not in current_state["wip"]: 
-                current_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel}
-            
-            # Legacy struct migration check
-            if isinstance(current_state["wip"][w_key].get(item.stage), (int, float)):
-                old_val = current_state["wip"][w_key][item.stage]
-                current_state["wip"][w_key][item.stage] = {"qty": old_val, "rt": 0.0}
+            if w_key not in end_state["wip"]: 
+                end_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel}
 
-            current_state["wip"][w_key][item.stage]["qty"] += item.qty
-            current_state["wip"][w_key][item.stage]["rt"] = max(current_state["wip"][w_key][item.stage].get("rt", 0.0), item.ready_time)
+            end_state["wip"][w_key][item.stage]["qty"] += item.qty
+            end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
 
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
@@ -1033,8 +1040,8 @@ def generate_schedule(payload: ScheduleRequest):
 
         final_face, final_od, furnaces_formatted = [], [], []
         today_prod_map = {}
+        
         for r in resources:
-            current_state["machines"][r.id] = { "ready_time": r.ready_time, "last_fam": r.last_fam, "last_pc": r.last_pc }
             if r.type == 'FACE': final_face.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
             elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info)} kg/hr", "rows": r.rows})
@@ -1060,18 +1067,13 @@ def generate_schedule(payload: ScheduleRequest):
                 "remaining_pct": round(((mo_req - mtd_prod) / mo_req * 100), 1) if mo_req > 0 else 0,
                 "difference": int(t_prod - d1_req)
             })
-
-        # Save COMPLETE production state for continuity
-        current_state["last_date"] = payload.date
-        for k, v in inventory_delta.items():
-            current_state["inventory"][k] = current_state["inventory"].get(k, 0.0) + v
             
         snapshot = {
             "carryover": unscheduled_to_carry,
             "monthly_data": monthly_data.get(month_str, {}),
-            "plant_state": current_state
+            "plant_state": end_state
         }
-        save_json_file(PENDING_STATE_FILE, snapshot)
+        save_setting("pending_state", snapshot)
 
         return {
             "status": "success", 

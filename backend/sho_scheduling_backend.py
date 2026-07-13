@@ -790,6 +790,9 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = matched_state.get("last_fam")
                 res.last_pc = matched_state.get("last_pc")
 
+        # ==========================================
+        # STRICT WIP DEDUCTION LOGIC
+        # ==========================================
         wip_deductions = {}
         for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
@@ -797,16 +800,20 @@ def generate_schedule(payload: ScheduleRequest):
             ch_norm = w_data.get("channel", "UNKNOWN")
             routing = get_routing_for_part(ch_norm, pc)
             
+            # Since we STRICTLY only save the next pending stage below, 
+            # w_data will only have that singular stage. Never recreate completed ones.
             for stage in ['HT', 'FACE', 'OD']:
                 if stage not in routing: continue
                 stage_data = w_data.get(stage, {})
                 qty = float(stage_data.get("qty", 0.0))
                 rt = float(stage_data.get("rt", 0.0))
                 
-                first_stage = get_first_required_stage(routing)
-                if qty > 0 and stage != first_stage:
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
-                    wip_deductions[(disp, pc)] = wip_deductions.get((disp, pc), 0.0) + qty
+                if qty > 0:
+                    first_stage = get_first_required_stage(routing)
+                    if stage != first_stage:
+                        # Stage has moved past Heat Treatment. Tally deduction to remove from future HT.
+                        wip_deductions[(disp, pc)] = wip_deductions.get((disp, pc), 0.0) + qty
+                        work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
 
         ch_stats = {}
         for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
@@ -821,6 +828,7 @@ def generate_schedule(payload: ScheduleRequest):
                     routing = get_routing_for_part(ch_norm, p_code)
                     first_stage = get_first_required_stage(routing)
                     
+                    # Deduct completed physical inventory from incoming Heat Treatment demand.
                     if first_stage:
                         deduct = min(req, wip_deductions.get((display_name, p_code), 0.0))
                         if deduct > 0:
@@ -985,10 +993,15 @@ def generate_schedule(payload: ScheduleRequest):
             if len(item.valid_resources) > 0 and item.missing_reason == "Capacity Exceeded":
                 item.missing_reason = "Exceeds Production Window"
 
+            # ==========================================
+            # STRICT WIP SAVING LOGIC
+            # Save ONLY the next pending stage. Overwrite multiple chunks to combine them.
+            # ==========================================
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
                 if w_key not in end_state["wip"]: 
                     end_state["wip"][w_key] = {"channel": item.channel}
+                
                 if item.stage not in end_state["wip"][w_key]:
                     end_state["wip"][w_key][item.stage] = {"qty": 0.0, "rt": 0.0}
                 end_state["wip"][w_key][item.stage]["qty"] += item.qty
@@ -1056,7 +1069,3 @@ def generate_schedule(payload: ScheduleRequest):
         import traceback
         traceback.print_exc()
         return {"status": "error", "detail": str(e), "debug": debug_logs}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(router, host="0.0.0.0", port=8000)

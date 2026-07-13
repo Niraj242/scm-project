@@ -1000,3 +1000,28 @@ def generate_schedule(payload: ScheduleRequest):
     except Exception as e:
         import traceback
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
+
+@router.post("/api/save_plan")
+def save_plan(payload: SavePlanRequest):
+    try:
+        # Save the finalized plan directly to settings
+        save_setting('saved_plan', {"date": payload.date, "plan": payload.plan})
+        
+        # Retrieve the state snapshot generated during the schedule run
+        state_snapshot = get_setting("pending_state", {})
+        
+        # Lock in the daily state for tomorrow's WIP/D0 calculations
+        if state_snapshot and "plant_state" in state_snapshot:
+            save_daily_state(payload.date, state_snapshot["plant_state"])
+            
+        return {
+            "status": "success", 
+            "message": f"Plan for {payload.date} saved and WIP state locked."
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error", 
+            "message": f"Failed to save plan: {str(e)}", 
+            "detail": traceback.format_exc()
+        }

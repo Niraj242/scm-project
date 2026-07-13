@@ -7,6 +7,7 @@ import io
 import json
 import time
 import sqlite3
+import pickle
 from datetime import datetime, timedelta
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -19,7 +20,7 @@ SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 EXCEL_CACHE = {}
-CACHE_TTL = 3600  
+CACHE_TTL = 3600  # 1 hour cache
 
 PARSED_MASTER_DATA = {
     "box_matrix": ({}, 0),  
@@ -32,7 +33,7 @@ FURNACE_CACHE = {}
 FURNACE_SPECS = {}
 
 # ==========================================
-# 1. DATABASE & PERSISTENCE (Replaces JSON files)
+# DATABASE & PERSISTENCE
 # ==========================================
 DB_PATH = "sho_data.db"
 
@@ -60,7 +61,6 @@ def save_setting(key, value):
         conn.commit()
 
 def get_previous_day_state(target_date_str):
-    """Loads the strictly final state of the day BEFORE the requested schedule date."""
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
         c.execute('SELECT state_json FROM daily_state WHERE date < ? ORDER BY date DESC LIMIT 1', (target_date_str,))
@@ -77,13 +77,9 @@ def save_daily_state(date_str, state_data):
 def load_monthly_tracking(): return get_setting('monthly_tracking', {})
 def save_monthly_tracking(data): save_setting('monthly_tracking', data)
 def load_saved_plan(): return get_setting('saved_plan', {})
-def load_saved_buffers(): return get_setting('saved_buffers', {})
-def save_buffers_to_disk(entries): save_setting('saved_buffers', entries)
-def load_carryover(): return get_setting('carryover_tracking', {})
-def save_carryover(data): save_setting('carryover_tracking', data)
 
 # ==========================================
-# 2. CENTRALIZED ROUTING CONFIGURATION
+# ROUTING CONFIGURATION
 # ==========================================
 PROCESS_FLOW = {
     ("CH1", "IR"): ["HT", "CHANNEL"],
@@ -108,7 +104,6 @@ PROCESS_FLOW = {
     ("CH12", "OR"): ["CHANNEL"],
     ("CH13", "IR"): ["CHANNEL"],
     ("CH13", "OR"): ["CHANNEL"],
-    
     ("T1", "IR"): ["HT", "FACE", "CHANNEL"],
     ("T1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("T2", "IR"): ["HT", "FACE", "CHANNEL"],
@@ -131,7 +126,6 @@ PROCESS_FLOW = {
     ("T10", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("T11", "IR"): ["CHANNEL"],
     ("T11", "OR"): ["CHANNEL"],
-
     ("HUB 1.1", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("HUB 1.1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("HUB 1.2", "IR"): ["HT", "FACE", "CHANNEL"],
@@ -155,8 +149,8 @@ class ScheduleRequest(BaseModel):
     sector: str
     date: str
     unit_mode: str
-    entries: Dict[str, Any]
-    unlocked_blocks: List[str]
+    entries: Dict[str, Any] = {}
+    unlocked_blocks: List[str] = []
     machine_availability: Dict[str, Any] = {}
 
 class SavePlanRequest(BaseModel):
@@ -180,11 +174,6 @@ def save_plan(payload: SavePlanRequest):
 
         pending = get_setting('pending_state', {})
         if pending:
-            if "carryover" in pending:
-                carryover_all = load_carryover()
-                carryover_all[payload.date] = pending["carryover"]
-                save_carryover(carryover_all)
-                
             if "monthly_data" in pending:
                 month_str = payload.date[:7]
                 monthly_all = load_monthly_tracking()
@@ -206,9 +195,6 @@ def normalize_channel(ch_str):
     if ch.isdigit(): return f"CH{int(ch)}"
     return ch
 
-# ==========================================
-# CENTRALIZED ROUTING HELPERS
-# ==========================================
 def get_routing_for_part(channel_norm, p_code):
     return PROCESS_FLOW.get((channel_norm, p_code), DEFAULT_ROUTING)
 
@@ -331,22 +317,41 @@ def is_target_date(val, target_date):
         return True
     return False
 
+# Extremely Fast Local Cache to prevent waiting minutes for generation
 def get_cached_excel_sheets(url, file_label="Unknown"):
     logs = []
     if not url or url.strip() == "": return None, logs
     now = time.time()
+    
     if url in EXCEL_CACHE:
         cache_time, df_dict = EXCEL_CACHE[url]
         if now - cache_time < CACHE_TTL:
-            return df_dict, [f"Loaded {file_label} from cache."]
+            return df_dict, [f"Loaded {file_label} from Memory Cache."]
+            
+    cache_file = f"cache_{file_label}.pkl"
+    if os.path.exists(cache_file):
+        mtime = os.path.getmtime(cache_file)
+        if now - mtime < CACHE_TTL:
+            try:
+                with open(cache_file, "rb") as f:
+                    df_dict = pickle.load(f)
+                EXCEL_CACHE[url] = (mtime, df_dict)
+                return df_dict, [f"Loaded {file_label} from Disk Cache."]
+            except Exception:
+                pass 
+
     try:
-        resp = requests.get(url, timeout=180)
+        resp = requests.get(url, timeout=60)
         if resp.status_code != 200: 
             raise Exception(f"HTTP {resp.status_code}")
         content = io.BytesIO(resp.content)
         df_dict = pd.read_excel(content, sheet_name=None, header=None)
+        
+        with open(cache_file, "wb") as f:
+            pickle.dump(df_dict, f)
+            
         EXCEL_CACHE[url] = (now, df_dict)
-        return df_dict, logs
+        return df_dict, [f"Downloaded {file_label} from Network."]
     except Exception as e:
         raise Exception(f"Failed to load {file_label} Excel sheet: {str(e)}")
 
@@ -404,7 +409,7 @@ def get_furnaces_for_part(display_name, p_code, furnace_map):
     FURNACE_CACHE[key] = default_f
     return default_f
 
-def get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs=None, logged_set=None):
+def get_box_for_part_detailed(display_name, p_code, box_matrix):
     variants = get_lookup_variants(display_name, p_code)
     for var in variants:
         if var in box_matrix and p_code in box_matrix[var]: 
@@ -413,8 +418,8 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs=None,
             return qty, source, var
     return 0.0, "NONE", variants[0] if variants else display_name
 
-def get_box_for_part(display_name, p_code, box_matrix, debug_logs=None, logged_set=None):
-    qty, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix, debug_logs, logged_set)
+def get_box_for_part(display_name, p_code, box_matrix):
+    qty, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix)
     return qty
 
 def format_time(rel_hrs):
@@ -441,17 +446,28 @@ class WorkItem:
         self.merged_d2 = False
         self.rates = {}
         self.valid_resources = []
+        self.missing_reason = "Capacity Exceeded" # Exact Reason Tracking
 
 def init_item_resources(item, resources, furnace_map, weight_matrix):
     item.rates = {}
     item.valid_resources = []
+    item.missing_reason = "Capacity Exceeded"
+    
+    found_stage_machines = False
+    missing_rate_flag = False
+    missing_weight_flag = False
+    
     for res in resources:
         if res.type != item.stage: continue
+        found_stage_machines = True
+        
         if res.type == 'HT':
             valid_furnaces = get_furnaces_for_part(item.disp, item.pc, furnace_map)
             if res.id not in valid_furnaces: continue
             weight = get_weight_for_part(item.disp, item.pc, weight_matrix)
-            if not weight: continue 
+            if not weight: 
+                missing_weight_flag = True
+                continue 
             item.rates[res.id] = (res.capacity_info, weight)
             item.valid_resources.append(res)
         else:
@@ -459,6 +475,18 @@ def init_item_resources(item, resources, furnace_map, weight_matrix):
             if rate > 0:
                 item.rates[res.id] = rate
                 item.valid_resources.append(res)
+            else:
+                missing_rate_flag = True
+                
+    if not found_stage_machines:
+        item.missing_reason = f"No active machines for {item.stage}"
+    elif len(item.valid_resources) == 0:
+        if item.stage == 'HT' and missing_weight_flag:
+            item.missing_reason = "Missing Part Weight in Master Data"
+        elif missing_rate_flag:
+            item.missing_reason = f"Missing Production Rate for {item.stage}"
+        else:
+            item.missing_reason = "No Valid Routing Found"
 
 class Resource:
     def __init__(self, r_id, r_type, capacity_info):
@@ -514,31 +542,11 @@ def parse_master_production_data():
         }
     return machines_data
 
-@router.get("/api/machines")
-def get_machines_list():
-    try:
-        data = parse_master_production_data()
-        all_machines = list(data['FACE'].keys()) + list(data['OD'].keys()) + list(FURNACE_SPECS.keys())
-        seen = set()
-        unique_machines = [x for x in all_machines if not (x in seen or seen.add(x))]
-        return {"status": "success", "data": unique_machines}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []
-    logged_rpb = set()
     
-    saved_bufs = load_saved_buffers()
-    active_entries = saved_bufs.copy()
-    if payload.entries:
-        for k, v in payload.entries.items():
-            if v: active_entries[k] = v
-        save_buffers_to_disk(active_entries)
-    payload.entries = active_entries
-
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date  
@@ -633,7 +641,8 @@ def generate_schedule(payload: ScheduleRequest):
         del sheets_zero
 
         box_matrix = {}
-        sheets_box, _ = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
+        sheets_box, logs2 = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
+        debug_logs.extend(logs2)
         box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
         
         if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
@@ -796,7 +805,7 @@ def generate_schedule(payload: ScheduleRequest):
                                     if not clean_keys: continue
                                         
                                     rate_rings = 0.0
-                                    rpb = get_box_for_part(raw_t, pc, box_matrix, None, None)
+                                    rpb = get_box_for_part(raw_t, pc, box_matrix)
                                     if rpb_idx != -1 and safe_float(row_vals[rpb_idx]) > 0: rpb = safe_float(row_vals[rpb_idx])
                                     if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0: rate_rings = safe_float(row_vals[ring_hr_idx])
                                     elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
@@ -811,7 +820,7 @@ def generate_schedule(payload: ScheduleRequest):
         # ==========================================
         # DB-BACKED TIME-TRAVEL INITIALIZATION
         # ==========================================
-        # Loads ONLY the final WIP from the previous day. Avoids doubling up requirements.
+        # Strictly only loads WIP (parts mid-routing), skips unscheduled D1 duplicates
         current_state = get_previous_day_state(payload.date)
 
         work_items = []
@@ -827,7 +836,7 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = sm.get("last_fam")
                 res.last_pc = sm.get("last_pc")
 
-        # Inject existing WIP safely
+        # Inject actual WIP safely (Only parts mid-routing, avoiding pure duplicate D0 requirements)
         for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
             disp, pc = w_key.split('|')
@@ -840,7 +849,9 @@ def generate_schedule(payload: ScheduleRequest):
                 qty = float(stage_data.get("qty", 0.0))
                 rt = float(stage_data.get("rt", 0.0))
                 
-                if qty > 0:
+                # ONLY load WIP if it is NOT the very first stage of its routing
+                first_stage = get_first_required_stage(routing)
+                if qty > 0 and stage != first_stage:
                     work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
 
         ch_stats = {}
@@ -881,7 +892,6 @@ def generate_schedule(payload: ScheduleRequest):
                     d1_item.merged_d2 = True
                     d2_item.qty = 0.0 
 
-        # PRE-CACHE RATES FOR BLISTERING SPEED
         for item in work_items:
             init_item_resources(item, resources, furnace_map, weight_matrix)
 
@@ -977,11 +987,11 @@ def generate_schedule(payload: ScheduleRequest):
                     init_item_resources(new_item, resources, furnace_map, weight_matrix)
                     work_items.append(new_item)
 
-                rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
+                rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
                 can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
                 
                 if getattr(item, 'merged_d2', False): day_label = " (D1+D2)"
-                elif item.day_idx == -1: day_label = " (D0 Priority)"
+                elif item.day_idx == -1: day_label = " (WIP)"
                 else: day_label = " (D2)" if item.day_idx == 1 else " (D1)"
 
                 if can_merge:
@@ -989,7 +999,7 @@ def generate_schedule(payload: ScheduleRequest):
                     old_qty = int(float(last_row["qty"]))
                     new_qty = old_qty + int(chunk_qty)
                     last_row["qty"] = str(new_qty)
-                    if "(D1+D2)" not in last_row["part"]: last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").replace(" (D0 Priority)", "").strip() + day_label
+                    if "(D1+D2)" not in last_row["part"]: last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").replace(" (WIP)", "").strip() + day_label
                     old_start = last_row["timing"].split('-')[0]
                     new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
                     last_row["timing"] = f"{old_start}-{new_end}"
@@ -1003,7 +1013,6 @@ def generate_schedule(payload: ScheduleRequest):
                     if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
                     else: res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
 
-        unscheduled_to_carry = []
         end_state = { "machines": {}, "wip": {} }
 
         for r in resources:
@@ -1016,26 +1025,29 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             if item.qty <= 0.01: continue
             
-            w_key = f"{item.disp}|{item.pc}"
-            if w_key not in end_state["wip"]: 
-                end_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel}
+            # Save strictly what is mid-routing (WIP) so we don't carry over brand new unstarted reqs
+            if item.stage != get_first_required_stage(item.routing):
+                w_key = f"{item.disp}|{item.pc}"
+                if w_key not in end_state["wip"]: 
+                    end_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel}
 
-            end_state["wip"][w_key][item.stage]["qty"] += item.qty
-            end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
+                end_state["wip"][w_key][item.stage]["qty"] += item.qty
+                end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
 
-            rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
+            rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
             
             if getattr(item, 'merged_d2', False): day_label = "Day 1 + Day 2"
-            elif item.day_idx == -1: day_label = "D0 Priority/WIP"
+            elif item.day_idx == -1: day_label = "WIP"
             else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"
                 
-            reason = "Capacity Exceeded"
             part_display = f"{item.disp} {item.pc} ({day_label})"
-            unscheduled.append({"stage": item.stage, "part": part_display, "missed_boxes": f"{missed_val} - {reason}"})
             
-            unscheduled_to_carry.append({
-                "stage": item.stage, "part_raw": part_display, "disp": item.disp, "pc": item.pc, "qty": item.qty, "channel": item.channel
+            unscheduled.append({
+                "stage": item.stage, 
+                "part": part_display, 
+                "missed_boxes": missed_val,
+                "reason": item.missing_reason  # Added Exact Reason Parameter
             })
 
         final_face, final_od, furnaces_formatted = [], [], []
@@ -1069,7 +1081,6 @@ def generate_schedule(payload: ScheduleRequest):
             })
             
         snapshot = {
-            "carryover": unscheduled_to_carry,
             "monthly_data": monthly_data.get(month_str, {}),
             "plant_state": end_state
         }

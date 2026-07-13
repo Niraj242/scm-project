@@ -414,7 +414,7 @@ def format_time(rel_hrs):
     m = total_minutes % 60
     days_added = (base_hour + (total_minutes // 60)) // 24
     day_plus = f" (+{days_added})" if days_added > 0 else ""
-    return f"{h:02d}:{m:02d}"
+    return f"{h:02d}:{m:02d}{day_plus}"
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):

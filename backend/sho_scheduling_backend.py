@@ -891,6 +891,38 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
 
+        # ==========================================
+        # 1. LOOK-AHEAD BATCH MERGING (PRE-EVALUATION)
+        # ==========================================
+        for i in range(len(work_items)):
+            item1 = work_items[i]
+            if item1.qty <= 0.01 or item1.day_idx != 0: continue # Target D1 items
+            if not item1.valid_resources: continue
+            
+            res_dummy = item1.valid_resources[0]
+            rate_dummy = item1.rates[res_dummy.id][0] if res_dummy.type == 'HT' else item1.rates[res_dummy.id]
+            weight_dummy = item1.rates[res_dummy.id][1] if res_dummy.type == 'HT' else 1.0
+            
+            est_time1 = (item1.qty * weight_dummy) / rate_dummy if res_dummy.type == 'HT' else item1.qty / rate_dummy
+            merge_thresh = 1.0 if res_dummy.type == 'HT' else 2.0
+            
+            for j in range(i + 1, len(work_items)):
+                item2 = work_items[j]
+                if (item2.day_idx == 1 and 
+                    item2.disp == item1.disp and 
+                    item2.pc == item1.pc and 
+                    item2.stage == item1.stage and 
+                    item2.channel == item1.channel and 
+                    item2.qty > 0.01):
+                    
+                    est_time2 = (item2.qty * weight_dummy) / rate_dummy if res_dummy.type == 'HT' else item2.qty / rate_dummy
+                    
+                    # Merge if EITHER day's runtime is below the threshold
+                    if est_time1 < merge_thresh or est_time2 < merge_thresh:
+                        item1.qty += item2.qty
+                        item2.qty = 0.0
+                    break
+
         # SIMULATION LOOP
         for target_day in [-1, 0, 1]:
             current_max_time = 24.0 
@@ -933,45 +965,41 @@ def generate_schedule(payload: ScheduleRequest):
                     
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 
-                # ==========================================
-                # LOOK-AHEAD BATCH MERGING STEP
-                # ==========================================
-                if res.type == 'HT':
-                    weight = item.rates[res.id][1]
-                    est_runtime = (item.qty * weight) / rate_or_cap
-                    merge_threshold = 1.0  # Under 1 hour for Heat Treatment
-                else:
-                    est_runtime = item.qty / rate_or_cap
-                    merge_threshold = 2.0  # Under 2 hours for Face/OD Grinding
-                    
-                if item.day_idx in [-1, 0] and est_runtime < merge_threshold:
-                    for tomorrow_item in work_items:
-                        if (tomorrow_item.day_idx == 1 and 
-                            tomorrow_item.disp == item.disp and 
-                            tomorrow_item.pc == item.pc and 
-                            tomorrow_item.stage == item.stage and 
-                            tomorrow_item.channel == item.channel and 
-                            tomorrow_item.qty > 0.01):
-                            
-                            item.qty += tomorrow_item.qty
-                            tomorrow_item.qty = 0.0  # Consume tomorrow's run to avoid extra setups
-                            break
-                
                 chunk_qty = item.qty
                 
                 if res.type == 'HT':
                     weight = item.rates[res.id][1]
                     actual_time = (chunk_qty * weight) / rate_or_cap
-                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                        actual_time += (res.bd_end - max(start_time, res.bd_start))
+                else:
+                    actual_time = chunk_qty / rate_or_cap
+
+                # ==========================================
+                # 2. END-OF-DAY STOPPING LOGIC
+                # ==========================================
+                # A job crossing 10:00 AM (+1) is capped at a strict maximum 
+                # of 6 hours duration and must finish by 16:00 (+1) (Hour 30.0).
+                if start_time < 24.0 and (start_time + actual_time) > 24.0:
+                    max_allowed_time = min(6.0, 30.0 - start_time)
+                    
+                    if actual_time > max_allowed_time:
+                        actual_time = max_allowed_time
+                        # Recalculate slice quantity so the leftover falls perfectly into tomorrow's WIP
+                        if res.type == 'HT':
+                            chunk_qty = (actual_time * rate_or_cap) / weight
+                        else:
+                            chunk_qty = actual_time * rate_or_cap
+                
+                # Apply breakdown padding if applicable
+                if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
+                    actual_time += (res.bd_end - max(start_time, res.bd_start))
+
+                if res.type == 'HT':
                     res_ready_time = start_time + actual_time + 0.5
                     out_time = start_time + actual_time + 3.5
                     display_rate = f"{round((chunk_qty * weight), 1)} kg"
-                    if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
+                    if item.disp in monthly_data.get(month_str, {}): 
+                        monthly_data[month_str][item.disp]["produced"] += chunk_qty
                 else:
-                    actual_time = chunk_qty / rate_or_cap
-                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                        actual_time += (res.bd_end - max(start_time, res.bd_start))
                     res_ready_time = start_time + actual_time
                     out_time = res_ready_time
                     display_rate = rate_or_cap
@@ -981,7 +1009,10 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = item.disp
                 res.last_pc = item.pc
                 
-                if res.ready_time >= res.max_time: res.blocked = True
+                # Close machine entirely for the production day once it hits/crosses 24.0
+                if res.ready_time >= 24.0: 
+                    res.blocked = True
+                
                 item.qty -= chunk_qty
                 
                 next_stage = get_next_required_stage(res.type, item.routing)

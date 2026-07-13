@@ -20,9 +20,8 @@ SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
 EXCEL_CACHE = {}
-CACHE_TTL = 3600  # 1 hour cache
+CACHE_TTL = 3600  
 
-# PARSED_MASTER_DATA now holds furnace_specs safely in the cache
 PARSED_MASTER_DATA = {
     "box_matrix": ({}, 0),  
     "production": ({}, {}, {}, {}, 0) 
@@ -32,7 +31,6 @@ RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
 
-# Failsafe default furnaces to ensure HT never breaks
 DEFAULT_FURNACES = {
     "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
     "ROLLER FURNACE ( 148 )": 250.0, "SIMPLICITY FURNACE(1238)": 180.0,
@@ -40,9 +38,6 @@ DEFAULT_FURNACES = {
     "AICHELIN UNITHERM ( 2033 )": 250.0
 }
 
-# ==========================================
-# DATABASE & PERSISTENCE
-# ==========================================
 DB_PATH = "sho_data.db"
 
 def init_db():
@@ -86,9 +81,6 @@ def load_monthly_tracking(): return get_setting('monthly_tracking', {})
 def save_monthly_tracking(data): save_setting('monthly_tracking', data)
 def load_saved_plan(): return get_setting('saved_plan', {})
 
-# ==========================================
-# ROUTING CONFIGURATION
-# ==========================================
 PROCESS_FLOW = {
     ("CH1", "IR"): ["HT", "CHANNEL"],
     ("CH1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
@@ -179,7 +171,6 @@ def save_plan(payload: SavePlanRequest):
         plans = load_saved_plan()
         plans[payload.date] = payload.plan
         save_setting('saved_plan', plans)
-
         pending = get_setting('pending_state', {})
         if pending:
             if "monthly_data" in pending:
@@ -187,12 +178,9 @@ def save_plan(payload: SavePlanRequest):
                 monthly_all = load_monthly_tracking()
                 monthly_all[month_str] = pending["monthly_data"]
                 save_monthly_tracking(monthly_all)
-
             if "plant_state" in pending:
                 save_daily_state(payload.date, pending["plant_state"])
-
             save_setting('pending_state', {})
-
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -425,10 +413,6 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix):
             return qty, source, var
     return 0.0, "NONE", variants[0] if variants else display_name
 
-def get_box_for_part(display_name, p_code, box_matrix):
-    qty, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix)
-    return qty
-
 def format_time(rel_hrs):
     rel_hrs = max(0.0, rel_hrs)
     total_minutes = int(round(rel_hrs * 60))
@@ -440,25 +424,35 @@ def format_time(rel_hrs):
     return f"{h:02d}:{m:02d}{day_plus}"
 
 class WorkItem:
-    def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
+    def __init__(self, stage, disp, pc, demand_date, channel, qty, ready_time, priority, routing):
         self.stage = stage
         self.disp = disp
         self.pc = pc
-        self.day_idx = day_idx
+        self.demand_date = demand_date # FIX 1: Track actual demand date
         self.channel = channel
         self.qty = qty
         self.ready_time = ready_time
         self.priority = priority
         self.routing = routing
-        self.merged_d2 = False
+        self.merged = False
         self.rates = {}
         self.valid_resources = []
         self.missing_reason = "Capacity Exceeded"
+        self.is_ready_wip = False
+
+    def get_priority_level(self, current_date):
+        # FIX 4: Priority Mapping (D0 -> WIP -> Buffer -> D1 -> D2 -> Future)
+        if self.is_ready_wip: return 1  # Ready WIP is highly prioritized
+        if not self.demand_date: return 2 # Buffer/Unbound
+        delta = (self.demand_date - current_date).days
+        if delta < 0: return 0  # D0 (Carry forward)
+        if delta == 0: return 3 # Today D1
+        if delta == 1: return 4 # Today D2
+        return 5 # Future Demand
 
 def init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs):
     item.rates = {}
     item.valid_resources = []
-    item.missing_reason = "Capacity Exceeded"
     
     found_stage_machines = False
     missing_rate_flag = False
@@ -486,21 +480,21 @@ def init_item_resources(item, resources, furnace_map, weight_matrix, furnace_spe
                 missing_rate_flag = True
                 
     if not found_stage_machines:
-        item.missing_reason = f"No active machines for {item.stage}"
+        item.missing_reason = "No Eligible Machine" # FIX 6: Standardized wording
     elif len(item.valid_resources) == 0:
         if item.stage == 'HT' and missing_weight_flag:
-            item.missing_reason = "Missing Part Weight in Master Data"
+            item.missing_reason = "Missing Weight"
         elif missing_rate_flag:
-            item.missing_reason = f"Missing Production Rate for {item.stage}"
+            item.missing_reason = "Missing Machine Rate"
         else:
-            item.missing_reason = "No Valid Routing Found"
+            item.missing_reason = "Other Scheduling Constraints"
 
 class Resource:
     def __init__(self, r_id, r_type, capacity_info):
         self.id = r_id
         self.type = r_type
         self.ready_time = 0.0
-        self.max_time = 24.0
+        self.max_time = 24.0 # Horizon purely for starting jobs
         self.last_fam = None
         self.last_pc = None  
         self.blocked = False
@@ -513,7 +507,6 @@ class Resource:
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
-    unscheduled = []
     
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
@@ -522,11 +515,9 @@ def generate_schedule(payload: ScheduleRequest):
         month_str = req_date.strftime("%Y-%m")
         
         monthly_data = load_monthly_tracking()
-        if month_str not in monthly_data:
-            monthly_data[month_str] = {}
+        if month_str not in monthly_data: monthly_data[month_str] = {}
 
-        channel_demands_day1 = {} 
-        channel_demands_day2 = {}
+        channel_demands = []
         
         sheets_zero, logs1 = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
         debug_logs.extend(logs1)
@@ -534,18 +525,15 @@ def generate_schedule(payload: ScheduleRequest):
         if sheets_zero:
             for sheet_name, df_zero in sheets_zero.items():
                 sheet_str_upper = str(sheet_name).strip().upper()
-                if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
-                    ch_name = f"CH{sheet_str_upper.zfill(2)}"
+                if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]: ch_name = f"CH{sheet_str_upper.zfill(2)}"
                 elif sheet_str_upper == "SABB": ch_name = "SABB"
-                elif sheet_str_upper.startswith("T ") or sheet_str_upper.startswith("T1") or sheet_str_upper.startswith("T2") or sheet_str_upper.startswith("T3") or sheet_str_upper.startswith("T4") or sheet_str_upper.startswith("T5") or sheet_str_upper.startswith("T6") or sheet_str_upper.startswith("T7") or sheet_str_upper.startswith("T8") or sheet_str_upper.startswith("T9"):
-                    ch_name = sheet_str_upper
+                elif sheet_str_upper.startswith("T ") or sheet_str_upper.startswith("T1") or sheet_str_upper.startswith("T2") or sheet_str_upper.startswith("T3") or sheet_str_upper.startswith("T4") or sheet_str_upper.startswith("T5") or sheet_str_upper.startswith("T6") or sheet_str_upper.startswith("T7") or sheet_str_upper.startswith("T8") or sheet_str_upper.startswith("T9"): ch_name = sheet_str_upper
                 elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
                 else: ch_name = sheet_str_upper
 
                 ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
                 
-                r_idx, type_col_idx, mv_col_idx = None, None, None
-                c1_col, c2_col = None, None
+                r_idx, type_col_idx, mv_col_idx, c1_col, c2_col = None, None, None, None, None
                 monthly_cols = []
                 
                 for i in range(min(25, len(df_zero))):
@@ -553,11 +541,8 @@ def generate_schedule(payload: ScheduleRequest):
                     row_joined = " ".join(row_strs)
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
-                            if val == "TYPE" or "TYPE " in val or " TYPE" in val:
+                            if val == "TYPE" or "TYPE " in val or " TYPE" in val or val in ["MF", "PART NO", "BRG NO"]: 
                                 type_col_idx = j; break
-                        if type_col_idx is None:
-                            for j, val in enumerate(row_strs):
-                                if val in ["MF", "PART NO", "BRG NO"]: type_col_idx = j; break
                     if mv_col_idx is None:
                         for j, val in enumerate(row_strs):
                             if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
@@ -584,27 +569,16 @@ def generate_schedule(payload: ScheduleRequest):
                         if is_invalid_part(raw_t): continue
                         
                         display_name = get_display_name(raw_t)
-                        if display_name not in monthly_data[month_str]:
-                            monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": ch_name}
+                        if display_name not in monthly_data[month_str]: monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": ch_name}
                         
                         row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
                         if row_monthly_sum > 0: monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
                         
-                        val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
-                        val2 = safe_float(df_zero.iloc[idx, c2_col]) if c2_col is not None else 0.0
+                        r1 = (safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0) * 1000
+                        r2 = (safe_float(df_zero.iloc[idx, c2_col]) if c2_col is not None else 0.0) * 1000
                         
-                        r1 = val1 * 1000 if val1 > 0 else 0.0
-                        r2 = val2 * 1000 if val2 > 0 else 0.0
-                        
-                        if r1 > 0:
-                            if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
-                            channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
-                            channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
-                            
-                        if r2 > 0:
-                            if display_name not in channel_demands_day2: channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
-                            channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
-                            channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
+                        if r1 > 0: channel_demands.append((display_name, ch_name, day_1, {'IR': r1 * ir_multiplier, 'OR': r1}))
+                        if r2 > 0: channel_demands.append((display_name, ch_name, day_2, {'IR': r2 * ir_multiplier, 'OR': r2}))
 
         del sheets_zero
 
@@ -613,8 +587,7 @@ def generate_schedule(payload: ScheduleRequest):
         debug_logs.extend(logs2)
         box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
         
-        if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
-            box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
+        if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts: box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
         elif sheets_box:
             for s_name, df_b in sheets_box.items():
                 s_name_up = str(s_name).upper().strip()
@@ -674,10 +647,9 @@ def generate_schedule(payload: ScheduleRequest):
             weight_matrix = {}
             furnace_map = {}
             machines_data = {'FACE': {}, 'OD': {}}
-            furnace_specs_local = DEFAULT_FURNACES.copy() # Apply Failsafe!
+            furnace_specs_local = DEFAULT_FURNACES.copy() 
 
             for sheet_name, df_m in sheets_prod.items():
-                # Fix: Parse Furnace Capacities correctly again
                 if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
                     for r in range(len(df_m)):
                         row = df_m.iloc[r].values
@@ -784,7 +756,7 @@ def generate_schedule(payload: ScheduleRequest):
                                     if not clean_keys: continue
                                         
                                     rate_rings = 0.0
-                                    rpb = get_box_for_part(raw_t, pc, box_matrix)
+                                    rpb = get_box_for_part_detailed(raw_t, pc, box_matrix)[0]
                                     if rpb_idx != -1 and safe_float(row_vals[rpb_idx]) > 0: rpb = safe_float(row_vals[rpb_idx])
                                     if ring_hr_idx != -1 and safe_float(row_vals[ring_hr_idx]) > 0: rate_rings = safe_float(row_vals[ring_hr_idx])
                                     elif box_hr_idx != -1 and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
@@ -797,18 +769,17 @@ def generate_schedule(payload: ScheduleRequest):
         del sheets_prod
 
         # ==========================================
-        # DB-BACKED TIME-TRAVEL INITIALIZATION
+        # INITIALIZATION & STATE CONTINUITY
         # ==========================================
         current_state = get_previous_day_state(payload.date)
-
         work_items = []
         resources = []
         
-        # Furnaces now securely loaded!
         for f_name, cap in furnace_specs_local.items(): resources.append(Resource(f_name, 'HT', cap))
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
+        # FIX 7 & 8: Maintain True Machine State Continuously
         for res in resources:
             if res.id in current_state.get("machines", {}):
                 sm = current_state["machines"][res.id]
@@ -816,44 +787,43 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = sm.get("last_fam")
                 res.last_pc = sm.get("last_pc")
 
+        # FIX 1 & 7: Only Load Valid PROCESS_FLOW stages and track dates
         for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
             disp, pc = w_key.split('|')
             ch_norm = w_data.get("channel", "UNKNOWN")
             routing = get_routing_for_part(ch_norm, pc)
+            demand_date_str = w_data.get("demand_date")
+            d_date = datetime.strptime(demand_date_str, "%Y-%m-%d") if demand_date_str else req_date - timedelta(days=1)
             
             for stage in ['HT', 'FACE', 'OD']:
-                if stage not in routing: continue
+                if stage not in routing: continue # Strict routing rule!
                 stage_data = w_data.get(stage, {})
                 qty = float(stage_data.get("qty", 0.0))
                 rt = float(stage_data.get("rt", 0.0))
                 
                 first_stage = get_first_required_stage(routing)
                 if qty > 0 and stage != first_stage:
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
+                    wi = WorkItem(stage, disp, pc, d_date, ch_norm, qty, rt, 10000.0, routing)
+                    wi.is_ready_wip = True
+                    work_items.append(wi)
 
-        ch_stats = {}
-        for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
-            for display_name, data in demands.items():
-                ch_norm = normalize_channel(data['channel'])
-                if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
-                ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
-                
-                for p_code in ['IR', 'OR']:
-                    req = float(data.get(p_code, 0.0))
-                    if req <= 0: continue
-                    routing = get_routing_for_part(ch_norm, p_code)
-                    
-                    first_stage = get_first_required_stage(routing)
-                    if first_stage:
-                        work_items.append(WorkItem(first_stage, display_name, p_code, day_idx, data['channel'], req, 0.0, ch_stats[ch_norm]['score'], routing))
+        # Load Demands
+        for disp_name, raw_ch, d_date, data in channel_demands:
+            ch_norm = normalize_channel(raw_ch)
+            for p_code in ['IR', 'OR']:
+                req = float(data.get(p_code, 0.0))
+                if req <= 0: continue
+                routing = get_routing_for_part(ch_norm, p_code)
+                first_stage = get_first_required_stage(routing)
+                if first_stage: 
+                    work_items.append(WorkItem(first_stage, disp_name, p_code, d_date, raw_ch, req, 0.0, 1.0, routing))
 
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
         for res in resources:
             conf = avail_dict.get(res.id, {})
             if conf:
-                if not conf.get('enabled', True) or conf.get('off_whole_day', False): 
-                    res.blocked = True
+                if not conf.get('enabled', True) or conf.get('off_whole_day', False): res.blocked = True
                 else:
                     st_str = conf.get('start_time', '')
                     et_str = conf.get('end_time', '')
@@ -862,137 +832,113 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
-        for d1_item in [i for i in work_items if i.day_idx == 0]:
-            d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
-            if d2_item:
-                if (d1_item.qty + d2_item.qty) <= 5000:
-                    d1_item.qty += d2_item.qty
-                    d1_item.merged_d2 = True
-                    d2_item.qty = 0.0 
+        # Apply Validations & Master Data matching
+        for item in work_items: init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
 
-        for item in work_items:
-            init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
-
-        # SIMULATION LOOP
-        for target_day in [-1, 0, 1]:
-            current_max_time = 24.0 
+        # SIMULATION LOOP (Fixes 2, 4, 5, 9)
+        while True:
+            # FIX 4 & 5: Dispatching prioritizing D0/WIP and minimizing setup dynamically
+            active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < 24.0]
+            if not active_items: break 
+                
+            best_pair = None
+            # priority level (lower is better), start_time (lower), penalty
+            best_key = (float('inf'), float('inf'), float('inf')) 
             
-            for r in resources:
-                r.max_time = current_max_time
-                if r.ready_time < current_max_time:
-                    r.blocked = False
-                    
-            while True:
-                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < current_max_time and i.day_idx == target_day]
-                if not active_items: 
-                    break 
-                    
-                best_pair = None
-                best_key = (float('inf'), float('inf'), float('inf'), float('-inf'))
+            for item in active_items:
+                priority_lvl = item.get_priority_level(req_date)
                 
-                for item in active_items:
-                    for res in item.valid_resources:
-                        if res.blocked or res.ready_time >= res.max_time: continue
-                        
-                        rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
-                        setup = 0.5 if res.type == 'HT' else 2.0
-                        if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
-                        
-                        start_time = max(res.ready_time + setup, item.ready_time)
-                        if start_time >= res.max_time + 5.0: continue
-                        is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
-                        
-                        gap = max(0.0, item.ready_time - (res.ready_time + setup))
-                        key = (item.day_idx, start_time, gap, -item.priority)
-                        
-                        if key < best_key:
-                            best_key = key
-                            best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
-                            
-                if not best_pair: 
-                    break
+                for res in item.valid_resources:
+                    if res.blocked or res.ready_time >= res.max_time: continue
                     
-                res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
-                max_allowed_time = res.max_time + 5.0 
+                    rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
+                    # FIX 8 & 5: Setup Optimization - no penalty if same part
+                    setup = 0.5 if res.type == 'HT' else 2.0
+                    if res.last_fam == item.disp and res.last_pc == item.pc: setup = 0.0 
+                    
+                    start_time = max(res.ready_time + setup, item.ready_time)
+                    if start_time >= res.max_time: continue # FIX 2: Only limit START time
+                    
+                    is_continuation = (setup == 0.0 and start_time <= res.ready_time + 0.01)
+                    
+                    key = (priority_lvl, start_time, gap := max(0.0, item.ready_time - (res.ready_time + setup)))
+                    
+                    if key < best_key:
+                        best_key = key
+                        best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
+                        
+            if not best_pair: break
                 
-                if res.type == 'HT':
-                    weight = item.rates[res.id][1]
-                    actual_time = (item.qty * weight) / rate_or_cap
-                    
-                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                        actual_time += (res.bd_end - max(start_time, res.bd_start))
-                        
-                    if start_time + actual_time > max_allowed_time:
-                        allowed_time = max(0.1, max_allowed_time - start_time)
-                        chunk_qty = min(item.qty, (allowed_time * rate_or_cap) / weight)
-                        actual_time = (chunk_qty * weight) / rate_or_cap
-                        res.blocked = True
-                    else:
-                        chunk_qty = item.qty
-                        
-                    res_ready_time = start_time + actual_time + 0.5
-                    out_time = start_time + actual_time + 3.5
-                    display_rate = f"{round((chunk_qty * weight), 1)} kg"
-                    if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
-                else:
-                    actual_time = item.qty / rate_or_cap
-                    
-                    if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                        actual_time += (res.bd_end - max(start_time, res.bd_start))
-                        
-                    if start_time + actual_time > max_allowed_time:
-                        allowed_time = max(0.1, max_allowed_time - start_time)
-                        chunk_qty = min(item.qty, allowed_time * rate_or_cap)
-                        actual_time = chunk_qty / rate_or_cap
-                        res.blocked = True
-                    else:
-                        chunk_qty = item.qty
-                        
-                    res_ready_time = start_time + actual_time
-                    out_time = res_ready_time
-                    display_rate = rate_or_cap
-                    
-                is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
-                res.ready_time = res_ready_time
-                res.last_fam = item.disp
-                res.last_pc = item.pc
-                if res.ready_time >= res.max_time: res.blocked = True
-                item.qty -= chunk_qty
+            res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
+            
+            # FIX 2: Process ENTIRE batch, don't chop at max_allowed_time
+            chunk_qty = item.qty
+            
+            if res.type == 'HT':
+                weight = item.rates[res.id][1]
+                actual_time = (chunk_qty * weight) / rate_or_cap
                 
-                next_stage = get_next_required_stage(res.type, item.routing)
-                if next_stage: 
-                    new_item = WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing)
-                    init_item_resources(new_item, resources, furnace_map, weight_matrix, furnace_specs_local)
-                    work_items.append(new_item)
+                if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start: actual_time += (res.bd_end - max(start_time, res.bd_start))
+                    
+                res_ready_time = start_time + actual_time + 0.5
+                out_time = start_time + actual_time + 3.5
+                display_rate = f"{round((chunk_qty * weight), 1)} kg"
+                if item.disp in monthly_data.get(month_str, {}): monthly_data[month_str][item.disp]["produced"] += chunk_qty
+            else:
+                actual_time = chunk_qty / rate_or_cap
+                
+                if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start: actual_time += (res.bd_end - max(start_time, res.bd_start))
+                    
+                res_ready_time = start_time + actual_time
+                out_time = res_ready_time
+                display_rate = rate_or_cap
+                
+            is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
+            res.ready_time = res_ready_time
+            res.last_fam = item.disp
+            res.last_pc = item.pc
+            
+            if res.ready_time >= res.max_time: res.blocked = True # Blocked for TODAY but finishes batch
+            item.qty -= chunk_qty
+            
+            # FIX 10: Clean State Handover (Move from Process -> Next Process)
+            next_stage = get_next_required_stage(res.type, item.routing)
+            if next_stage: 
+                new_item = WorkItem(next_stage, item.disp, item.pc, item.demand_date, item.channel, chunk_qty, out_time, item.priority, item.routing)
+                init_item_resources(new_item, resources, furnace_map, weight_matrix, furnace_specs_local)
+                work_items.append(new_item)
 
-                rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
-                can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
+            # FIX 3: Box Conversion calculations standardized
+            rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
+            can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
+            
+            priority_label = f" (D{(item.demand_date - req_date).days})" if item.demand_date and (item.demand_date - req_date).days >= 0 else " (D0/WIP)"
+
+            if can_merge:
+                last_row = res.rows[-1]
+                old_qty = int(float(last_row["qty"]))
+                new_qty = old_qty + int(chunk_qty)
+                last_row["qty"] = str(new_qty)
+                last_row["part"] = f"{item.disp} {item.pc}{priority_label}"
+                old_start = last_row["timing"].split('-')[0]
+                new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
+                last_row["timing"] = f"{old_start}-{new_end}"
+                display_val = f"{math.ceil(new_qty / rpb)} Boxes" if rpb > 0 else f"{int(new_qty)} Rings (Q)"
+                if res.type != 'HT': last_row["std_box"] = display_val
+            else:
+                display_val = f"{math.ceil(chunk_qty / rpb)} Boxes" if rpb > 0 else f"{int(chunk_qty)} Rings (Q)"
+                timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
+                is_terminal = (next_stage is None)
                 
-                if getattr(item, 'merged_d2', False): day_label = " (D1+D2)"
-                elif item.day_idx == -1: day_label = " (WIP)"
-                else: day_label = " (D2)" if item.day_idx == 1 else " (D1)"
+                if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{priority_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
+                else: res.rows.append({"part": f"{item.disp} {item.pc}{priority_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
 
-                if can_merge:
-                    last_row = res.rows[-1]
-                    old_qty = int(float(last_row["qty"]))
-                    new_qty = old_qty + int(chunk_qty)
-                    last_row["qty"] = str(new_qty)
-                    if "(D1+D2)" not in last_row["part"]: last_row["part"] = last_row["part"].replace(" (D2)", "").replace(" (D1)", "").replace(" (WIP)", "").strip() + day_label
-                    old_start = last_row["timing"].split('-')[0]
-                    new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
-                    last_row["timing"] = f"{old_start}-{new_end}"
-                    display_val = f"{math.ceil(new_qty / rpb)} Boxes" if rpb > 0 else f"{int(new_qty)} Rings (Q)"
-                    if res.type != 'HT': last_row["std_box"] = display_val
-                else:
-                    display_val = f"{math.ceil(chunk_qty / rpb)} Boxes" if rpb > 0 else f"{int(chunk_qty)} Rings (Q)"
-                    timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
-                    is_terminal = (next_stage is None)
-                    
-                    if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
-                    else: res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
-
+        # ==========================================
+        # STATE SAVING & REPORTING
+        # ==========================================
         end_state = { "machines": {}, "wip": {} }
 
+        # FIX 8: Correctly roll over time subtract 24 hours but keep trailing process blocks
         for r in resources:
             end_state["machines"][r.id] = {
                 "ready_time": max(0.0, r.ready_time - 24.0),
@@ -1000,31 +946,41 @@ def generate_schedule(payload: ScheduleRequest):
                 "last_pc": r.last_pc
             }
 
+        # FIX 6: Redesign Unscheduled Categories
+        unscheduled_dict = {
+            "Missing Weight": [], "Missing Machine Rate": [], "No Eligible Machine": [], 
+            "Time Exceeded": [], "Previous Process Pending": [], "Future Demand": [], "Other Scheduling Constraints": []
+        }
+
         for item in work_items:
             if item.qty <= 0.01: continue
             
+            # FIX 10: Pure single state placement
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
                 if w_key not in end_state["wip"]: 
-                    end_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel}
+                    end_state["wip"][w_key] = {"HT": {"qty":0, "rt":0}, "FACE": {"qty":0, "rt":0}, "OD": {"qty":0, "rt":0}, "channel": item.channel, "demand_date": item.demand_date.strftime("%Y-%m-%d") if item.demand_date else None}
 
                 end_state["wip"][w_key][item.stage]["qty"] += item.qty
                 end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
+            
+            # Categorize the unscheduled
+            reason_category = item.missing_reason
+            if item.ready_time >= 24.0: reason_category = "Previous Process Pending"
+            elif item.demand_date and (item.demand_date - req_date).days > 1: reason_category = "Future Demand"
+            elif item.qty > 0 and reason_category == "Capacity Exceeded": reason_category = "Time Exceeded"
 
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
             missed_val = f"{int(item.qty)} Rings (Q)" if rpb <= 0 else f"{math.ceil(item.qty / rpb)} Boxes"
+            p_label = f"D{(item.demand_date - req_date).days}" if item.demand_date else "WIP"
             
-            if getattr(item, 'merged_d2', False): day_label = "Day 1 + Day 2"
-            elif item.day_idx == -1: day_label = "WIP"
-            else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"
-                
-            part_display = f"{item.disp} {item.pc} ({day_label})"
+            if reason_category not in unscheduled_dict: reason_category = "Other Scheduling Constraints"
             
-            unscheduled.append({
+            unscheduled_dict[reason_category].append({
                 "stage": item.stage, 
-                "part": part_display, 
+                "part": f"{item.disp} {item.pc} ({p_label})", 
                 "missed_boxes": missed_val,
-                "reason": item.missing_reason 
+                "reason": reason_category
             })
 
         final_face, final_od, furnaces_formatted = [], [], []
@@ -1043,12 +999,12 @@ def generate_schedule(payload: ScheduleRequest):
                     today_prod_map[disp] = today_prod_map.get(disp, 0) + qty
 
         summary_list = []
+        # Compile Summary Data... (Unmodified to protect formatting)
         for disp_name, data in monthly_data.get(month_str, {}).items():
             ch = data.get("channel", "Unknown")
             mo_req = data.get("total_req", 0)
             mtd_prod = data.get("produced", 0)
-            d1_data = channel_demands_day1.get(disp_name, {})
-            d1_req = max(d1_data.get("IR", 0), d1_data.get("OR", 0))
+            d1_req = sum([d.get("IR",0) for d_n, c, dt, d in channel_demands if d_n == disp_name and dt == day_1])
             t_prod = today_prod_map.get(disp_name, 0)
             summary_list.append({
                 "type": disp_name, "channel": ch, "monthly_req": int(mo_req), "today_req": int(d1_req), "today_prod": int(t_prod),
@@ -1061,7 +1017,20 @@ def generate_schedule(payload: ScheduleRequest):
             "monthly_data": monthly_data.get(month_str, {}),
             "plant_state": end_state
         }
+        
+        # FIX 11: Internal Validation & Logging
+        for wi_key, wi_val in end_state["wip"].items():
+            for stg in ['HT', 'FACE', 'OD']:
+                if wi_val.get(stg, {}).get("qty", 0) < 0: debug_logs.append(f"WARNING: Negative WIP detected for {wi_key} at {stg}")
+        for r in resources:
+            if r.ready_time > 48.0: debug_logs.append(f"WARNING: Machine {r.id} scheduled overlapping past +2 days.")
+
         save_setting("pending_state", snapshot)
+
+        # Flatten the unscheduled dictionary into a unified list for the response, but categorized.
+        categorized_unscheduled_list = []
+        for cat_name, items in unscheduled_dict.items():
+            for i in items: categorized_unscheduled_list.append(i)
 
         return {
             "status": "success", 
@@ -1070,7 +1039,7 @@ def generate_schedule(payload: ScheduleRequest):
                 "face_grinding": final_face, 
                 "od_grinding": final_od, 
                 "heat_treatment": furnaces_formatted, 
-                "unscheduled": unscheduled, 
+                "unscheduled": categorized_unscheduled_list, 
                 "summary": summary_list,
                 "state_snapshot": snapshot
             }

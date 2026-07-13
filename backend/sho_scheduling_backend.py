@@ -37,6 +37,18 @@ WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
 FURNACE_SPECS = {}
 
+# ==========================================
+# 1. CENTRALIZED ROUTING CONFIGURATION
+# ==========================================
+PROCESS_FLOW = {
+    ("CH1", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("CH1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("T4", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("T4", "OR"): ["HT", "FACE", "CHANNEL"],
+    ("CH4", "IR"): ["FACE", "CHANNEL"],
+}
+DEFAULT_ROUTING = ["HT", "FACE", "OD", "CHANNEL"]
+
 def load_json_file(filename):
     if os.path.exists(filename):
         try:
@@ -90,7 +102,6 @@ def save_plan(payload: SavePlanRequest):
         plans[payload.date] = payload.plan
         save_json_file(SAVED_PLAN_FILE, plans)
 
-        # NEW: Robust Backend State Locking (Removes dependency on UI payload)
         pending = load_json_file(PENDING_STATE_FILE)
         if pending:
             if "carryover" in pending:
@@ -107,7 +118,6 @@ def save_plan(payload: SavePlanRequest):
             if "plant_state" in pending:
                 save_plant_state(pending["plant_state"])
 
-            # Clear pending after commit
             if os.path.exists(PENDING_STATE_FILE):
                 os.remove(PENDING_STATE_FILE)
 
@@ -118,23 +128,29 @@ def save_plan(payload: SavePlanRequest):
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
+    # Normalize back to match PROCESS_FLOW keys (e.g., "CH1")
+    if ch.isdigit():
+        return f"CH{ch}"
     return ch
 
-def get_process_flexibility(channel_norm, p_code, flex_map):
-    return flex_map.get(channel_norm, {}).get(p_code, {'HT': True, 'FACE': True, 'OD': True})
+# ==========================================
+# CENTRALIZED ROUTING HELPERS
+# ==========================================
+def get_routing_for_part(channel_norm, p_code):
+    return PROCESS_FLOW.get((channel_norm, p_code), DEFAULT_ROUTING)
 
-def get_first_required_stage(flex):
-    if flex.get('HT', True): return 'HT'
-    if flex.get('FACE', True): return 'FACE'
-    if flex.get('OD', True): return 'OD'
-    return None
+def get_first_required_stage(routing):
+    if not routing: return None
+    first = routing[0]
+    return first if first != "CHANNEL" else None
 
-def get_next_required_stage(current_stage, flex):
-    if current_stage == 'HT':
-        if flex.get('FACE', True): return 'FACE'
-        if flex.get('OD', True): return 'OD'
-    elif current_stage == 'FACE':
-        if flex.get('OD', True): return 'OD'
+def get_next_required_stage(current_stage, routing):
+    if current_stage in routing:
+        idx = routing.index(current_stage)
+        if idx + 1 < len(routing):
+            next_st = routing[idx+1]
+            if next_st == "CHANNEL": return None
+            return next_st
     return None
 
 def is_invalid_part(raw_text):
@@ -339,7 +355,7 @@ def format_time(rel_hrs):
     return f"{h:02d}:{m:02d}{day_plus}"
 
 class WorkItem:
-    def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, flex):
+    def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
         self.stage = stage
         self.disp = disp
         self.pc = pc
@@ -348,7 +364,7 @@ class WorkItem:
         self.qty = qty
         self.ready_time = ready_time
         self.priority = priority
-        self.flex = flex
+        self.routing = routing
         self.merged_d2 = False
 
 class Resource:
@@ -421,6 +437,9 @@ def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []
     logged_rpb = set()
+    
+    # Track inventory precisely to avoid double counting Buffer vs WIP
+    inventory_delta = {} 
     
     saved_bufs = load_saved_buffers()
     active_entries = saved_bufs.copy()
@@ -583,47 +602,11 @@ def generate_schedule(payload: ScheduleRequest):
         prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
 
         if PARSED_MASTER_DATA["production"][4] == prod_cache_ts:
-            weight_matrix, furnace_map, machines_data, channel_flex_map, _ = PARSED_MASTER_DATA["production"]
+            weight_matrix, furnace_map, machines_data, _, _ = PARSED_MASTER_DATA["production"]
         elif sheets_prod:
             weight_matrix = {}
             furnace_map = {}
             machines_data = {'FACE': {}, 'OD': {}}
-            channel_flex_map = {} 
-
-            flex_sheet_key = next((k for k in sheets_prod.keys() if 'PROCESS' in str(k).upper() and 'FLEX' in str(k).upper()), None)
-            if flex_sheet_key:
-                df_flex = sheets_prod[flex_sheet_key].fillna('')
-                header_idx = -1
-                for i in range(min(10, len(df_flex))):
-                    row_strs = [str(x).upper().strip() for x in df_flex.iloc[i].values]
-                    if any("CH" in x or "CHANNEL" in x for x in row_strs) and any("FACE" in x for x in row_strs):
-                        header_idx = i; break
-                if header_idx != -1:
-                    headers = [str(x).upper().strip() for x in df_flex.iloc[header_idx].values]
-                    ch_col = next((j for j, h in enumerate(headers) if 'CH' in h or 'CHANNEL' in h), -1)
-                    ring_col = next((j for j, h in enumerate(headers) if 'RING' in h or 'IR/OR' in h), -1)
-                    ht_col = next((j for j, h in enumerate(headers) if 'HEAT' in h or 'HT' in h), -1)
-                    face_col = next((j for j, h in enumerate(headers) if 'FACE' in h), -1)
-                    od_col = next((j for j, h in enumerate(headers) if 'OD' in h), -1)
-                    
-                    if ch_col != -1 and ring_col != -1:
-                        for idx in range(header_idx + 1, len(df_flex)):
-                            ch_raw = str(df_flex.iloc[idx, ch_col]).strip()
-                            if not ch_raw or is_invalid_part(ch_raw): continue
-                            c_norm = normalize_channel(ch_raw)
-                            r_raw = str(df_flex.iloc[idx, ring_col]).strip().upper()
-                            p_code = 'OR' if 'OR' in r_raw or '100' in r_raw else ('IR' if 'IR' in r_raw or '010' in r_raw or '120' in r_raw else None)
-                            
-                            if p_code:
-                                if c_norm not in channel_flex_map: channel_flex_map[c_norm] = {}
-                                ht_val = str(df_flex.iloc[idx, ht_col]).strip().upper() if ht_col != -1 else ""
-                                face_val = str(df_flex.iloc[idx, face_col]).strip().upper() if face_col != -1 else ""
-                                od_val = str(df_flex.iloc[idx, od_col]).strip().upper() if od_col != -1 else ""
-                                channel_flex_map[c_norm][p_code] = {
-                                    'HT': False if ht_val == "NO" else True,
-                                    'FACE': False if face_val == "NO" else True, 
-                                    'OD': False if od_val == "NO" else True
-                                }
 
             if 'WEIGHTS' in sheets_prod:
                 df_w = sheets_prod['WEIGHTS'].fillna('')
@@ -732,16 +715,17 @@ def generate_schedule(payload: ScheduleRequest):
                                     if rate_rings > 0:
                                         for ck in set(clean_keys): machines_data[current_m_type][current_m_num]['rates'][f"{ck}_{pc}"] = rate_rings
                                             
-            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, channel_flex_map, prod_cache_ts)
+            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, {}, prod_cache_ts)
         del sheets_prod
 
-        # NEW CONTINUOUS STATE INITIALIZATION
+        # ==========================================
+        # CONTINUOUS STATE INITIALIZATION (MES)
+        # ==========================================
         current_state = load_plant_state()
         if "wip" not in current_state: current_state["wip"] = {}
         if "machines" not in current_state: current_state["machines"] = {}
         if "inventory" not in current_state: current_state["inventory"] = {}
 
-        # NEW: Dynamic time differencing (Ensures perfect continuity across days or within same day)
         last_date_str = current_state.get("last_date", payload.date)
         days_diff = 0
         try:
@@ -766,13 +750,15 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = sm.get("last_fam")
                 res.last_pc = sm.get("last_pc")
 
-        # Process WIP Queues - Inject existing WIP FIRST with correct time delays if it finished late yesterday
+        # Process WIP Queues - Inject existing WIP FIRST with correct time delays
         for w_key, w_data in current_state["wip"].items():
+            if "|" not in w_key: continue
             disp, pc = w_key.split('|')
             ch_norm = w_data.get("channel", "UNKNOWN")
-            flex = get_process_flexibility(ch_norm, pc, channel_flex_map)
+            routing = get_routing_for_part(ch_norm, pc)
             
             for stage in ['HT', 'FACE', 'OD']:
+                if stage not in routing: continue # SKIP entirely if not in routing
                 stage_data = w_data.get(stage, {})
                 if isinstance(stage_data, (int, float)):
                     qty, rt = float(stage_data), 0.0
@@ -782,7 +768,8 @@ def generate_schedule(payload: ScheduleRequest):
                 
                 if qty > 0:
                     shifted_rt = max(0.0, rt - time_shift)
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, shifted_rt, 10000.0, flex))
+                    # Priority 10000 ensures WIP finishes before new demand
+                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, shifted_rt, 10000.0, routing))
                     current_state["wip"][w_key][stage] = {"qty": 0.0, "rt": 0.0}
 
         # Append new daily requirements at their purely FIRST REQUIRED PROCESS
@@ -797,11 +784,11 @@ def generate_schedule(payload: ScheduleRequest):
                 for p_code in ['IR', 'OR']:
                     req = float(data.get(p_code, 0.0))
                     if req <= 0: continue
-                    flex = get_process_flexibility(ch_norm, p_code, channel_flex_map)
+                    routing = get_routing_for_part(ch_norm, p_code)
                     
-                    first_stage = get_first_required_stage(flex)
+                    first_stage = get_first_required_stage(routing)
                     if first_stage:
-                        work_items.append(WorkItem(first_stage, display_name, p_code, day_idx, data['channel'], req, 0.0, ch_stats[ch_norm]['score'], flex))
+                        work_items.append(WorkItem(first_stage, display_name, p_code, day_idx, data['channel'], req, 0.0, ch_stats[ch_norm]['score'], routing))
 
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
         for res in resources:
@@ -817,12 +804,15 @@ def generate_schedule(payload: ScheduleRequest):
                         res.bd_start = time_str_to_float(st_str)
                         res.bd_end = time_str_to_float(et_str)
 
+        # Intelligent Batch Merging (Constraint 10)
         for d1_item in [i for i in work_items if i.day_idx == 0]:
             d2_item = next((i for i in work_items if i.day_idx == 1 and i.stage == d1_item.stage and i.disp == d1_item.disp and i.pc == d1_item.pc and i.qty > 0.01), None)
-            if d2_item and (d1_item.qty + d2_item.qty) <= 5000:
-                d1_item.qty += d2_item.qty
-                d1_item.merged_d2 = True
-                d2_item.qty = 0.0 
+            if d2_item:
+                # Merge small jobs to reduce setups if routing/part matches
+                if (d1_item.qty + d2_item.qty) <= 5000:
+                    d1_item.qty += d2_item.qty
+                    d1_item.merged_d2 = True
+                    d2_item.qty = 0.0 
 
         # SIMULATION LOOP (With Auto WIP Cascade)
         for target_day in [-1, 0, 1]:
@@ -916,13 +906,14 @@ def generate_schedule(payload: ScheduleRequest):
                 if res.ready_time >= res.max_time: res.blocked = True
                 item.qty -= chunk_qty
                 
-                # WIP SPAWNING: Send completed material to the next required stage queue immediately 
-                next_stage = get_next_required_stage(res.type, item.flex)
+                # WIP SPAWNING: Cascade to ONLY processes in PROCESS_FLOW
+                next_stage = get_next_required_stage(res.type, item.routing)
                 if next_stage: 
-                    work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.flex))
+                    work_items.append(WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing))
                 else:
+                    # Final stage hit (Channel reached)
                     inv_key = f"{item.disp}|{item.pc}"
-                    current_state["inventory"][inv_key] = current_state["inventory"].get(inv_key, 0.0) + chunk_qty
+                    inventory_delta[inv_key] = inventory_delta.get(inv_key, 0.0) + chunk_qty
 
                 rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix, debug_logs, logged_rpb)
                 can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
@@ -1011,8 +1002,11 @@ def generate_schedule(payload: ScheduleRequest):
                 "difference": int(t_prod - d1_req)
             })
 
-        # Save all simulation updates perfectly on the backend so no UI drop can corrupt it
+        # Save COMPLETE production state for continuity
         current_state["last_date"] = payload.date
+        for k, v in inventory_delta.items():
+            current_state["inventory"][k] = current_state["inventory"].get(k, 0.0) + v
+            
         snapshot = {
             "carryover": unscheduled_to_carry,
             "monthly_data": monthly_data.get(month_str, {}),

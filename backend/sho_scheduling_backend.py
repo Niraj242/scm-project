@@ -87,11 +87,25 @@ PROCESS_FLOW = {
     ("T11", "IR"): ["CHANNEL"],
     ("T11", "OR"): ["CHANNEL"],
 
-    ("HUB", "IR"): ["HT", "FACE", "CHANNEL"],
-    ("T1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
-    ("T4", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
-    ("T4", "OR"): ["HT", "FACE", "CHANNEL"],
-    ("CH4", "IR"): ["FACE", "CHANNEL"],
+    'HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
+
+    ("HUB 1.1", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("HUB 1.1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("HUB 1.2", "IR"): ["HT", "FACE", "CHANNEL"],
+    ("HUB 1.2", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("HUB 1.3", "IR"): ["HT", "FACE", "CHANNEL"],
+    ("HUB 1.3", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("HUB 1.4", "IR"): ["HT", "FACE", "CHANNEL"],
+    ("HUB 1.4", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("HUB 3", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("HUB 3", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("THUB 1.1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("THUB 1.1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("THUB 1.2", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("THUB 1.2", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("THUB 1.3", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
+    ("THUB 1.3", "OR"): ["HT", "FACE", "OD", "CHANNEL"],
+
 }
 DEFAULT_ROUTING = ["HT", "FACE", "OD", "CHANNEL"]
 

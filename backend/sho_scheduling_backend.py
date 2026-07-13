@@ -87,7 +87,6 @@ PROCESS_FLOW = {
     ("T11", "IR"): ["CHANNEL"],
     ("T11", "OR"): ["CHANNEL"],
 
-    'HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
 
     ("HUB 1.1", "IR"): ["HT", "FACE", "OD", "CHANNEL"],
     ("HUB 1.1", "OR"): ["HT", "FACE", "OD", "CHANNEL"],

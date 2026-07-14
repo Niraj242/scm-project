@@ -1131,10 +1131,14 @@ def generate_schedule(payload: ScheduleRequest):
                 
             part_display = f"{item.disp} {item.pc} ({day_label})"
             
+            # --- THE FIX ---
+            # Appending BOTH "status" and "reason" keys to guarantee compatibility 
+            # with any frontend table mapping without mutating the core structure.
             unscheduled.append({
                 "stage": item.stage, 
                 "part": part_display, 
                 "missed_boxes": missed_val,
+                "status": assigned_reason, 
                 "reason": assigned_reason 
             })
 

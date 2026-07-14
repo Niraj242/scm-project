@@ -1693,17 +1693,20 @@ def get_data_availability(date: str):
                         m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
                         if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
                             current_m_num = m_cand
-                            if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): current_m_type = "FACE"
-                            elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: current_m_type = "OD"
+                            if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): 
+                                current_m_type = "FACE"
+                            elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: 
+                                current_m_type = "OD"
+                    
                     if current_m_num and current_m_type in ['FACE', 'OD']:
                         h_row = [c.strip().upper() for c in str_matrix[r]]
                         if any('TYPE' in h or 'PART' in h for h in h_row) and any('HR' in h for h in h_row):
                             if current_m_num not in machines_data[current_m_type]:
                                 machines_data[current_m_type][current_m_num] = {'name': current_m_num, 'rates': {}}
+                            
                             norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in h_row]
                             std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
                             box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
                             ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
                             rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h), None)
-                        except Exception as e:
-                            print(f"An error occurred: {e}")
+        

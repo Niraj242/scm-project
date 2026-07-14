@@ -518,17 +518,14 @@ def get_machines():
     try:
         res = get_all_resources()
         machines_dict = {}
-        
-        # Rebuilding the exact dictionary structure from the original code
         for f in res["furnaces"]: machines_dict[f] = {"type": "Furnace"}
         for m in res["face"]: machines_dict[m] = {"type": "Face Grinding"}
         for m in res["od"]: machines_dict[m] = {"type": "OD Grinding"}
         for c in res["channels"]: machines_dict[c] = {"type": "Channel"}
-        
-        # Returning it with the status wrapper, but keeping the data as a dict
-        return {"status": "success", "data": machines_dict}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
+        return machines_dict
+    except Exception:
+        return {}
+
 
 @router.get("/api/get_plan")
 def get_plan(date: str):

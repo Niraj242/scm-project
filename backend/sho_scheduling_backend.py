@@ -517,14 +517,21 @@ def get_monthly_tracking_api():
 def get_machines():
     try:
         res = get_all_resources()
-        machines_dict = {}
-        for f in res["furnaces"]: machines_dict[f] = {"type": "Furnace"}
-        for m in res["face"]: machines_dict[m] = {"type": "Face Grinding"}
-        for m in res["od"]: machines_dict[m] = {"type": "OD Grinding"}
-        for c in res["channels"]: machines_dict[c] = {"type": "Channel"}
-        return machines_dict
-    except Exception:
-        return {}
+        machine_list = []
+        
+        for f in res["furnaces"]: 
+            machine_list.append({"name": f, "type": "Furnace"})
+        for m in res["face"]: 
+            machine_list.append({"name": m, "type": "Face Grinding"})
+        for m in res["od"]: 
+            machine_list.append({"name": m, "type": "OD Grinding"})
+        for c in res["channels"]: 
+            machine_list.append({"name": c, "type": "Channel"})
+            
+        return {"status": "success", "data": machine_list}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 
 @router.get("/api/get_plan")
 def get_plan(date: str):
@@ -552,6 +559,27 @@ def save_plan(payload: SavePlanRequest):
                 save_daily_state(payload.date, pending["plant_state"])
             save_setting('pending_state', {})
         return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@router.post("/api/summary")
+def get_summary(payload: dict):
+    """
+    Restored endpoint to satisfy frontend POST /api/summary calls.
+    Accepts a generic dict to prevent 422 Unprocessable Entity errors.
+    """
+    try:
+        # Default to today if date isn't provided in the payload
+        date = payload.get("date", datetime.now().strftime("%Y-%m-%d"))
+        
+        # Fetch the plan and return just the summary portion
+        plans = load_saved_plan()
+        plan_data = plans.get(date, {})
+        
+        return {
+            "status": "success", 
+            "data": plan_data.get("summary", [])
+        }
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 

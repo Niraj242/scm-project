@@ -1474,9 +1474,14 @@ def get_data_availability(date: str):
     WEIGHT_CACHE.clear()
     FURNACE_CACHE.clear()
     VARIANTS_CACHE.clear()
+    import gc
     gc.collect()
     
     try:
+        from datetime import datetime
+        import re
+        import pandas as pd
+        
         req_date = datetime.strptime(date, "%Y-%m-%d")
         channel_demands_day1 = {}
         
@@ -1709,4 +1714,26 @@ def get_data_availability(date: str):
                             box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
                             ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
                             rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h), None)
+                            
+        # ==========================================
+        # RETURN SUCCESS RESPONSE
+        # ==========================================
+        return {
+            "status": "success",
+            "date_requested": date,
+            "data": {
+                "channel_demands_day1": channel_demands_day1,
+                "box_matrix_rpb": box_matrix_rpb,
+                "box_matrix_rbd": box_matrix_rbd,
+                "weight_matrix": weight_matrix,
+                "furnace_map": furnace_map,
+                "machines_data": machines_data
+            }
+        }
         
+    # ==========================================
+    # CLOSE THE MAIN TRY BLOCK HERE
+    # ==========================================
+    except Exception as e:
+        print(f"Data availability error: {e}")
+        return {"status": "error", "message": str(e)}

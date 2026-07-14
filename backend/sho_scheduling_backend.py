@@ -392,7 +392,6 @@ def get_box_for_part_detailed(display_name, p_code, box_matrix):
             source = box_matrix[var][p_code]['source']
             return qty, source, var
             
-    # Fuzzy Fallback Fallthrough for Ring to Box Mismatches
     norm_disp = re.sub(r'[\s./_\-]', '', str(display_name).upper())
     for b_key, b_val in box_matrix.items():
         norm_bkey = re.sub(r'[\s./_\-]', '', str(b_key).upper())
@@ -779,7 +778,6 @@ def generate_schedule(payload: ScheduleRequest):
         for m_num, m_info in machines_data.get('FACE', {}).items(): resources.append(Resource(m_num, 'FACE', m_info.get('rates', {})))
         for m_num, m_info in machines_data.get('OD', {}).items(): resources.append(Resource(m_num, 'OD', m_info.get('rates', {})))
 
-        # Deep Normalized Rollover Mapping (Fixes Furnace starting timeline mismatches)
         for res in resources:
             norm_res_id = normalize_resource_name(res.id)
             matched_state = None
@@ -806,8 +804,6 @@ def generate_schedule(payload: ScheduleRequest):
             
             for stage in ['HT', 'FACE', 'OD']:
                 if stage not in routing: continue
-                
-                # Rule 5: Only restore stages that actually exist in the saved state (the pending stage)
                 if stage not in w_data: continue
                 
                 stage_data = w_data.get(stage, {})
@@ -818,14 +814,12 @@ def generate_schedule(payload: ScheduleRequest):
                     work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
 
         ch_stats = {}
-        # Pre-calculate priorities to match original logic
         for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
                 if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
-        # Apply HT balances and schedule
         tracker_ht = {}
         for display_name, data in channel_demands_day1.items():
             for p_code in ['IR', 'OR']:
@@ -896,7 +890,7 @@ def generate_schedule(payload: ScheduleRequest):
         # ==========================================
         for i in range(len(work_items)):
             item1 = work_items[i]
-            if item1.qty <= 0.01 or item1.day_idx != 0: continue # Target D1 items
+            if item1.qty <= 0.01 or item1.day_idx != 0: continue
             if not item1.valid_resources: continue
             
             res_dummy = item1.valid_resources[0]
@@ -917,7 +911,6 @@ def generate_schedule(payload: ScheduleRequest):
                     
                     est_time2 = (item2.qty * weight_dummy) / rate_dummy if res_dummy.type == 'HT' else item2.qty / rate_dummy
                     
-                    # Merge if EITHER day's runtime is below the threshold
                     if est_time1 < merge_thresh or est_time2 < merge_thresh:
                         item1.qty += item2.qty
                         item2.qty = 0.0
@@ -964,7 +957,6 @@ def generate_schedule(payload: ScheduleRequest):
                     break
                     
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
-                
                 chunk_qty = item.qty
                 
                 if res.type == 'HT':
@@ -976,20 +968,15 @@ def generate_schedule(payload: ScheduleRequest):
                 # ==========================================
                 # 2. END-OF-DAY STOPPING LOGIC
                 # ==========================================
-                # A job crossing 10:00 AM (+1) is capped at a strict maximum 
-                # of 6 hours duration and must finish by 16:00 (+1) (Hour 30.0).
                 if start_time < 24.0 and (start_time + actual_time) > 24.0:
                     max_allowed_time = min(6.0, 30.0 - start_time)
-                    
                     if actual_time > max_allowed_time:
                         actual_time = max_allowed_time
-                        # Recalculate slice quantity so the leftover falls perfectly into tomorrow's WIP
                         if res.type == 'HT':
                             chunk_qty = (actual_time * rate_or_cap) / weight
                         else:
                             chunk_qty = actual_time * rate_or_cap
                 
-                # Apply breakdown padding if applicable
                 if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
                     actual_time += (res.bd_end - max(start_time, res.bd_start))
 
@@ -1009,7 +996,6 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = item.disp
                 res.last_pc = item.pc
                 
-                # Close machine entirely for the production day once it hits/crosses 24.0
                 if res.ready_time >= 24.0: 
                     res.blocked = True
                 
@@ -1056,7 +1042,6 @@ def generate_schedule(payload: ScheduleRequest):
                 "last_pc": r.last_pc
             }
 
-        # Calculate Pending HT per part for balance tracking
         pending_ht = {}
         for item in work_items:
             if item.qty <= 0.01: continue
@@ -1083,14 +1068,50 @@ def generate_schedule(payload: ScheduleRequest):
             if key not in tracker_ht and bal > 0:
                 new_ht_balances[key] = bal
 
-        # Clear Unscheduled Reason Separations and Save WIP
+        # ==========================================
+        # 3. UNSCHEDULED PARTS REASON GENERATION
+        # ==========================================
         for item in work_items:
             if item.qty <= 0.01: continue
             
-            if len(item.valid_resources) > 0 and item.missing_reason == "Capacity Exceeded":
-                item.missing_reason = "Exceeds Production Window"
+            # 1. Missing Weight
+            if item.stage == 'HT' and get_weight_for_part(item.disp, item.pc, weight_matrix) is None:
+                assigned_reason = "Missing Weight"
+                
+            # 2. Machine Rate Not Available
+            elif any(r.type == item.stage for r in resources) and len(item.valid_resources) == 0 and not (not item.routing or item.stage not in item.routing):
+                assigned_reason = "Machine Rate Not Available"
+                
+            # 3. Missing Routing
+            elif not item.routing or item.stage not in item.routing:
+                assigned_reason = "Missing Routing"
+                
+            # 4. No Compatible Machine
+            elif not any(r.type == item.stage for r in resources):
+                assigned_reason = "No Compatible Machine"
+                
+            # 5. Insufficient Capacity (Ready within scheduling window but machines maxed out)
+            elif item.ready_time < 24.0 and len(item.valid_resources) > 0:
+                assigned_reason = "Insufficient Capacity"
+                
+            # 6. Previous Process Pending
+            elif (item.routing and item.stage in item.routing and 
+                  any(u.disp == item.disp and u.pc == item.pc and u.day_idx == item.day_idx and 
+                      u.stage in item.routing[:item.routing.index(item.stage)] and u.qty > 0.01 for u in work_items)):
+                assigned_reason = "Previous Process Pending"
+                
+            # 7. Material waiting in WIP for next process
+            elif item.day_idx == -1:
+                assigned_reason = "Waiting for Next Process"
+                
+            # 8. Scheduling day finished before job could start
+            elif item.ready_time >= 24.0:
+                assigned_reason = "Scheduling Window Exhausted"
+                
+            # 9. Fallback Default
+            else:
+                assigned_reason = "Not Scheduled"
 
-            # Requirement 1 & 5: Save only the pending stage, never recreate empty completed stages
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
                 if w_key not in end_state["wip"]: 
@@ -1114,10 +1135,9 @@ def generate_schedule(payload: ScheduleRequest):
                 "stage": item.stage, 
                 "part": part_display, 
                 "missed_boxes": missed_val,
-                "reason": item.missing_reason 
+                "reason": assigned_reason 
             })
 
-        # Inject HT Balances into end_state
         for key, bal in new_ht_balances.items():
             if bal > 0:
                 w_key = f"{key[0]}|{key[1]}"

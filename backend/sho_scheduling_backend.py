@@ -517,15 +517,27 @@ def get_monthly_tracking_api():
 def get_machines():
     try:
         res = get_all_resources()
-        machines_dict = {}
-        for f in res["furnaces"]: machines_dict[f] = {"type": "Furnace"}
-        for m in res["face"]: machines_dict[m] = {"type": "Face Grinding"}
-        for m in res["od"]: machines_dict[m] = {"type": "OD Grinding"}
-        for c in res["channels"]: machines_dict[c] = {"type": "Channel"}
-        return machines_dict
-    except Exception:
-        return {}
+        
+        # If res is somehow None, default to an empty dictionary to prevent crashes
+        if not res:
+            res = {}
 
+        machines_dict = {}
+        
+        # Using .get() ensures we don't get a KeyError if a category is missing
+        for f in res.get("furnaces", []): machines_dict[f] = {"type": "Furnace"}
+        for m in res.get("face", []): machines_dict[m] = {"type": "Face Grinding"}
+        for m in res.get("od", []): machines_dict[m] = {"type": "OD Grinding"}
+        for c in res.get("channels", []): machines_dict[c] = {"type": "Channel"}
+        
+        return {"status": "success", "data": machines_dict}
+        
+    except Exception as e:
+        # Print the exact error to your Python terminal so we can debug it
+        print(f"BACKEND ERROR in /api/machines: {str(e)}")
+        
+        # Return 'message' so the frontend console logs the actual error instead of 'undefined'
+        return {"status": "error", "message": str(e), "data": {}}
 
 @router.get("/api/get_plan")
 def get_plan(date: str):

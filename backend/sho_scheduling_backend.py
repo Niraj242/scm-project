@@ -1705,3 +1705,5 @@ def get_data_availability(date: str):
                             box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
                             ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
                             rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h), None)
+                        except Exception as e:
+                            print(f"An error occurred: {e}")

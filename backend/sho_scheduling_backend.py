@@ -1670,3 +1670,5 @@ def get_data_availability(date: str):
         return {"status": "success", "data": records}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+

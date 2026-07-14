@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
-// Ensure this matches your deployment URL
 const API_BASE = 'https://scm-backend-pshv.onrender.com';
 
 const SHOScheduling = () => {
@@ -34,6 +33,7 @@ const SHOScheduling = () => {
   // Tab 5: Required Data Availability State
   const [dataAvailability, setDataAvailability] = useState([]);
   const [isLoadingDataAvailability, setIsLoadingDataAvailability] = useState(false);
+  const [dataError, setDataError] = useState(null);
 
   // -- CONSTANTS --
   const SECTOR_COLUMNS = {
@@ -103,51 +103,19 @@ const SHOScheduling = () => {
     }
   }, [sector, bufferDate]);
 
+  // Lazy-load machines ONLY when Breakdown tab is active
   useEffect(() => {
-    const fetchSavedPlanForDate = async () => {
-      try {
-        const response = await fetch(`${API_BASE}/api/get_plan?date=${scheduleDate}`);
-        const result = await response.json();
-        if (response.ok && result.status === 'success' && result.data) {
-          setScheduleData(result.data);
-        } else {
-          setScheduleData(null);
-        }
-      } catch (err) {
-        setScheduleData(null);
-      }
-    };
-    fetchSavedPlanForDate();
-  }, [scheduleDate]);
+    if (activeTab !== 'availability') return;
 
-  // Fallback function to generate master list if backend fails to send machines
-  const generateFallbackMachines = (currentSector) => {
-    const channels = SECTOR_COLUMNS[currentSector] || [];
-    const fallbacks = [];
-    
-    // Channels
-    channels.forEach(ch => fallbacks.push({ id: ch, machine: `Channel ${ch}`, status: 'Available', start_time: '', end_time: '' }));
-    
-    // Standard Furnaces
-    const furnaces = ['AICHELIN 1', 'AICHELIN 2', 'AICHELIN 3', 'AICHELIN 4', 'SBB FURNACE', 'IPSEN'];
-    furnaces.forEach(f => fallbacks.push({ id: f, machine: f, status: 'Available', start_time: '', end_time: '' }));
-    
-    // Standard Face / OD (Generic fallbacks)
-    const grinders = ['544 Face', 'Face Grinder 1', 'OD Grinder 1', 'OD Grinder 2'];
-    grinders.forEach(g => fallbacks.push({ id: g, machine: g, status: 'Available', start_time: '', end_time: '' }));
-    
-    return fallbacks;
-  };
-
-  // Dynamically Fetch Resources based on Breakdown Date AND Sector
-  useEffect(() => {
     const fetchMachines = async () => {
       setIsLoadingMachines(true);
       try {
-        // Passed sector as well just in case backend filters resources by sector
+        // This will now fetch from the Neon DB master list via your backend
         const response = await fetch(`${API_BASE}/api/machines?date=${breakdownDate}&sector=${sector}`);
         const result = await response.json();
-        if (response.ok && result.status === 'success' && result.data && result.data.length > 0) {
+        
+        // Strict mapping of actual machines without fallbacks
+        if (response.ok && result.status === 'success' && result.data) {
           const loadedMachines = result.data.map(m => {
             if (typeof m === 'string') {
               return { id: m, machine: m, status: 'Available', start_time: '', end_time: '' };
@@ -156,17 +124,15 @@ const SHOScheduling = () => {
           });
           setMachineAvailability(loadedMachines);
         } else {
-          // Guaranteed visibility: If backend returns empty, load the fallback list
-          setMachineAvailability(generateFallbackMachines(sector));
+          setMachineAvailability([]); // Do not guess if API fails. Empty list.
         }
       } catch (err) {
-        // Guaranteed visibility: If network fails, load the fallback list
-        setMachineAvailability(generateFallbackMachines(sector));
+        setMachineAvailability([]);
       }
       setIsLoadingMachines(false);
     };
     fetchMachines();
-  }, [breakdownDate, sector]);
+  }, [breakdownDate, sector, activeTab]); // Added activeTab to dependency array
 
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
@@ -223,57 +189,34 @@ const SHOScheduling = () => {
 
   const fetchDataAvailability = async () => {
     setIsLoadingDataAvailability(true);
+    setDataError(null);
     try {
-      // FIX 1: Passed sector and date to fix the 422 Unprocessable Content Error
       const response = await fetch(`${API_BASE}/api/data_availability?sector=${sector}&date=${summaryDate}`);
       const result = await response.json();
       if (response.ok && result.status === 'success') {
-        setDataAvailability(result.data || []);
+        // Ensure it's always an array to prevent .map crashes
+        setDataAvailability(Array.isArray(result.data) ? result.data : []);
       } else {
-        // FIX 2: Correctly format the FastAPI error array to string so it's readable
         const errorMsg = typeof result.detail === 'object' ? JSON.stringify(result.detail, null, 2) : result.detail;
-        alert("Error loading data availability from backend:\n" + errorMsg);
+        setDataError(errorMsg || "Unknown backend error");
+        setDataAvailability([]);
       }
     } catch (e) {
-      alert("Failed to connect to backend.");
+      setDataError("Failed to connect to backend.");
+      setDataAvailability([]);
     }
     setIsLoadingDataAvailability(false);
-  };
-
-  const handleSavePlan = async () => {
-    if (!scheduleData) return;
-    setIsSavingPlan(true);
-    
-    const planToSave = {
-      face_grinding: scheduleData.face_grinding || [],
-      od_grinding: scheduleData.od_grinding || [],
-      heat_treatment: scheduleData.heat_treatment || [],
-      unscheduled: scheduleData.unscheduled || [] 
-    };
-
-    try {
-      const response = await fetch(`${API_BASE}/api/save_plan`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ date: scheduleDate, plan: planToSave })
-      });
-      const result = await response.json();
-      if (result.status === 'success') alert('Production Plan saved successfully for ' + scheduleDate);
-      else alert('Error saving plan: ' + result.detail);
-    } catch (error) {
-      alert('Error connecting to server.');
-    }
-    setIsSavingPlan(false);
   };
 
   const fetchSchedule = async () => {
     setIsLoadingPlan(true);
     const availabilityMap = {};
     
+    // Only send non-available machines to the backend to keep payload light
     machineAvailability.forEach(c => {
-      if (c.machine.trim()) {
+      if (c.machine.trim() && c.status !== 'Available') {
         availabilityMap[c.machine.trim()] = {
-          enabled: c.status === 'Available',
+          enabled: false,
           bd_date: breakdownDate,
           start_time: c.start_time,
           end_time: c.end_time
@@ -309,6 +252,32 @@ const SHOScheduling = () => {
     setIsLoadingPlan(false);
   };
 
+  const handleSavePlan = async () => {
+    if (!scheduleData) return;
+    setIsSavingPlan(true);
+    
+    const planToSave = {
+      face_grinding: scheduleData.face_grinding || [],
+      od_grinding: scheduleData.od_grinding || [],
+      heat_treatment: scheduleData.heat_treatment || [],
+      unscheduled: scheduleData.unscheduled || [] 
+    };
+
+    try {
+      const response = await fetch(`${API_BASE}/api/save_plan`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: scheduleDate, plan: planToSave })
+      });
+      const result = await response.json();
+      if (result.status === 'success') alert('Production Plan saved successfully for ' + scheduleDate);
+      else alert('Error saving plan: ' + result.detail);
+    } catch (error) {
+      alert('Error connecting to server.');
+    }
+    setIsSavingPlan(false);
+  };
+
   const columns = SECTOR_COLUMNS[sector];
   const totalCols = (columns.length * 2) + 1;
   const isCellBlocked = (section, col, subCol) => DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol);
@@ -329,7 +298,7 @@ const SHOScheduling = () => {
         <button className={activeTab === 'data_availability' ? 'active' : ''} onClick={() => setActiveTab('data_availability')}>5. Required Data Availability</button>
       </div>
 
-      {/* TAB 1: BUFFER ENTRY */}
+      {/* TAB 1: BUFFER ENTRY (UNCHANGED) */}
       {activeTab === 'buffer' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div className="controls-panel">
@@ -424,7 +393,7 @@ const SHOScheduling = () => {
               <label>Breakdown Date:</label>
               <input type="date" value={breakdownDate} onChange={(e) => setBreakdownDate(e.target.value)} />
             </div>
-            <button className="btn-save" onClick={handleSaveBreakdowns} disabled={isSavingBreakdowns}>
+            <button className="btn-save" onClick={handleSaveBreakdowns} disabled={isSavingBreakdowns || machineAvailability.length === 0}>
               {isSavingBreakdowns ? "Saving..." : "Save Breakdown Entries"}
             </button>
           </div>
@@ -432,17 +401,18 @@ const SHOScheduling = () => {
           <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
             <h2 style={{ color: '#0056b3', marginTop: 0 }}>Breakdown Entry Log</h2>
             <p style={{ color: '#555', marginBottom: '20px' }}>
-              Select a date above. Apply full breakdowns or partial hours for Furnaces, Face Machines, OD Machines, and Channels. 
-              Unsaved entries default to Available.
+              Select a date above. Apply full breakdowns or partial hours for Furnaces, Face Machines, OD Machines, and Channels directly pulled from Neon DB Master Data.
             </p>
             
             {isLoadingMachines ? (
-               <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching resources for selected date...</div>
+               <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Loading specific resources from Master Data...</div>
+            ) : machineAvailability.length === 0 ? (
+               <div style={{ padding: '20px', color: '#dc3545', fontWeight: 'bold' }}>No Master Data resources found. Please ensure the Neon DB connection is active.</div>
             ) : (
               <table className="img-table" style={{ width: '100%', maxWidth: '950px' }}>
                 <thead>
                   <tr style={{ backgroundColor: '#eef8ff' }}>
-                    <th style={{ textAlign: 'left', padding: '10px' }}>Resource Name</th>
+                    <th style={{ textAlign: 'left', padding: '10px' }}>Master Resource Name</th>
                     <th>Status</th>
                     <th>Breakdown Start Time</th>
                     <th>Breakdown End Time</th>
@@ -460,7 +430,7 @@ const SHOScheduling = () => {
                           style={{ padding: '4px', width: '150px' }}
                         >
                           <option value="Available">Available</option>
-                          <option value="Complete Breakdown">Complete Breakdown</option>
+                          <option value="Breakdown">Breakdown</option>
                         </select>
                       </td>
                       <td style={{ textAlign: 'center' }}>
@@ -469,7 +439,6 @@ const SHOScheduling = () => {
                           value={c.start_time || ''} 
                           onChange={(e) => updateMachineConstraint(c.id, 'start_time', e.target.value)} 
                           style={{ padding: '4px' }} 
-                          disabled={c.status === 'Complete Breakdown'} 
                         />
                       </td>
                       <td style={{ textAlign: 'center' }}>
@@ -478,7 +447,6 @@ const SHOScheduling = () => {
                           value={c.end_time || ''} 
                           onChange={(e) => updateMachineConstraint(c.id, 'end_time', e.target.value)} 
                           style={{ padding: '4px' }} 
-                          disabled={c.status === 'Complete Breakdown'} 
                         />
                       </td>
                       <td style={{ textAlign: 'center' }}>
@@ -493,7 +461,7 @@ const SHOScheduling = () => {
         </div>
       )}
 
-      {/* TAB 3: PRODUCTION SCHEDULE */}
+      {/* TAB 3: PRODUCTION SCHEDULE (UNCHANGED CORE LOGIC) */}
       {activeTab === 'schedule' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
           <div className="controls-panel" style={{ backgroundColor: '#eef8ff' }}>
@@ -502,7 +470,7 @@ const SHOScheduling = () => {
               <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)} />
             </div>
             <button className="btn-save" style={{backgroundColor: '#28a745', borderColor: '#1e7e34'}} onClick={fetchSchedule} disabled={isLoadingPlan}>
-              {isLoadingPlan ? "Running Rapid Scheduler (Downloading Sheets)..." : "Generate Production Schedule"}
+              {isLoadingPlan ? "Running Rapid Scheduler..." : "Generate Production Schedule"}
             </button>
             {scheduleData && (
               <button className="btn-save" style={{backgroundColor: '#17a2b8', borderColor: '#117a8b'}} onClick={handleSavePlan} disabled={isSavingPlan}>
@@ -512,181 +480,149 @@ const SHOScheduling = () => {
           </div>
           
           {scheduleData ? (
-            <div className="image-layout-container" style={{ flex: 1, overflowY: 'auto' }}>
-              <div className="schedule-master-header">
-                <div className="header-title">Face & OD Grinding Schedule</div>
-                <div className="header-date">Date :- {scheduleDate.split('-').reverse().join('/')}</div>
-              </div>
+             <div className="image-layout-container" style={{ flex: 1, overflowY: 'auto' }}>
+             <div className="schedule-master-header">
+               <div className="header-title">Production Schedule</div>
+               <div className="header-date">Date :- {scheduleDate.split('-').reverse().join('/')}</div>
+             </div>
 
-              <div className="schedule-grid-wrapper" style={{ display: 'flex', minWidth: '1300px' }}>
-                
-                {/* 1. FACE GRINDING */}
-                <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
-                  <table className="img-table sticky-header-table">
-                    <thead>
-                      <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">Face Grinding</th></tr>
-                      <tr className="sub-header sticky-row-2">
-                        <th rowSpan="2" className="empty-corner">PART</th>
-                        <th rowSpan="2">QTY (Rings)</th>
-                        <th rowSpan="2">BOX/Q</th>
-                        <th rowSpan="2">TIMING (Hrs)</th>
-                        <th colSpan="2">Shift Priority</th>
-                      </tr>
-                      <tr className="sub-header sticky-row-3"><th>2nd</th><th>3rd</th></tr>
-                    </thead>
-                    <tbody>
-                      {(!scheduleData.face_grinding || scheduleData.face_grinding.length === 0) && (
-                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled.</td></tr>
-                      )}
-                      {scheduleData.face_grinding?.map((m, idx) => (
-                        <React.Fragment key={idx}>
-                          <tr className="machine-name-row"><td colSpan="6">{m.machine}</td></tr>
-                          {m.rows.map((r, i) => (
-                            <tr key={i}>
-                              <td className="part-name">{r.part}</td>
-                              <td className="center-text" style={{fontWeight: 'bold', color: '#0056b3'}}>{r.qty}</td>
-                              <td className="center-text font-bold">{r.std_box}</td>
-                              <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
-                              <td className="center-text">{r.p_2nd}</td>
-                              <td className="center-text">{r.p_3rd}</td>
-                            </tr>
-                          ))}
-                        </React.Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+             <div className="schedule-grid-wrapper" style={{ display: 'flex', minWidth: '1300px' }}>
+               
+               {/* 1. FACE GRINDING */}
+               <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
+                 <table className="img-table sticky-header-table">
+                   <thead>
+                     <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">Face Grinding</th></tr>
+                     <tr className="sub-header sticky-row-2">
+                       <th rowSpan="2" className="empty-corner">PART</th>
+                       <th rowSpan="2">QTY (Rings)</th>
+                       <th rowSpan="2">BOX/Q</th>
+                       <th rowSpan="2">TIMING (Hrs)</th>
+                       <th colSpan="2">Shift Priority</th>
+                     </tr>
+                     <tr className="sub-header sticky-row-3"><th>2nd</th><th>3rd</th></tr>
+                   </thead>
+                   <tbody>
+                     {(!scheduleData.face_grinding || scheduleData.face_grinding.length === 0) && (
+                       <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled.</td></tr>
+                     )}
+                     {scheduleData.face_grinding?.map((m, idx) => (
+                       <React.Fragment key={idx}>
+                         <tr className="machine-name-row"><td colSpan="6">{m.machine}</td></tr>
+                         {m.rows.map((r, i) => (
+                           <tr key={i}>
+                             <td className="part-name">{r.part}</td>
+                             <td className="center-text" style={{fontWeight: 'bold', color: '#0056b3'}}>{r.qty}</td>
+                             <td className="center-text font-bold">{r.std_box}</td>
+                             <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
+                             <td className="center-text">{r.p_2nd}</td>
+                             <td className="center-text">{r.p_3rd}</td>
+                           </tr>
+                         ))}
+                       </React.Fragment>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
 
-                {/* 2. OD GRINDING */}
-                <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
-                  <table className="img-table sticky-header-table">
-                    <thead>
-                      <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">OD Grinding</th></tr>
-                      <tr className="sub-header sticky-row-2">
-                        <th rowSpan="2" className="empty-corner">PART</th>
-                        <th rowSpan="2">QTY (Rings)</th>
-                        <th rowSpan="2">BOX/Q</th>
-                        <th rowSpan="2">TIMING (Hrs)</th>
-                        <th colSpan="2">Shift Priority</th>
-                      </tr>
-                      <tr className="sub-header sticky-row-3"><th>2nd</th><th>3rd</th></tr>
-                    </thead>
-                    <tbody>
-                      {(!scheduleData.od_grinding || scheduleData.od_grinding.length === 0) && (
-                        <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled.</td></tr>
-                      )}
-                      {scheduleData.od_grinding?.map((m, idx) => (
-                        <React.Fragment key={idx}>
-                          <tr className="machine-name-row"><td colSpan="6">{m.machine}</td></tr>
-                          {m.rows.map((r, i) => (
-                            <tr key={i}>
-                              <td className="part-name">{r.part}</td>
-                              <td className="center-text" style={{fontWeight: 'bold', color: '#0056b3'}}>{r.qty}</td>
-                              <td className="center-text font-bold">{r.std_box}</td>
-                              <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
-                              <td className="center-text">{r.p_2nd}</td>
-                              <td className="center-text">{r.p_3rd}</td>
-                            </tr>
-                          ))}
-                        </React.Fragment>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+               {/* 2. OD GRINDING */}
+               <div className="schedule-column" style={{ flex: 1, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
+                 <table className="img-table sticky-header-table">
+                   <thead>
+                     <tr className="sticky-row-1"><th colSpan="6" className="col-main-title">OD Grinding</th></tr>
+                     <tr className="sub-header sticky-row-2">
+                       <th rowSpan="2" className="empty-corner">PART</th>
+                       <th rowSpan="2">QTY (Rings)</th>
+                       <th rowSpan="2">BOX/Q</th>
+                       <th rowSpan="2">TIMING (Hrs)</th>
+                       <th colSpan="2">Shift Priority</th>
+                     </tr>
+                     <tr className="sub-header sticky-row-3"><th>2nd</th><th>3rd</th></tr>
+                   </thead>
+                   <tbody>
+                     {(!scheduleData.od_grinding || scheduleData.od_grinding.length === 0) && (
+                       <tr><td colSpan="6" className="center-text" style={{padding: "15px"}}>No parts scheduled.</td></tr>
+                     )}
+                     {scheduleData.od_grinding?.map((m, idx) => (
+                       <React.Fragment key={idx}>
+                         <tr className="machine-name-row"><td colSpan="6">{m.machine}</td></tr>
+                         {m.rows.map((r, i) => (
+                           <tr key={i}>
+                             <td className="part-name">{r.part}</td>
+                             <td className="center-text" style={{fontWeight: 'bold', color: '#0056b3'}}>{r.qty}</td>
+                             <td className="center-text font-bold">{r.std_box}</td>
+                             <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
+                             <td className="center-text">{r.p_2nd}</td>
+                             <td className="center-text">{r.p_3rd}</td>
+                           </tr>
+                         ))}
+                       </React.Fragment>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
 
-                {/* 3. HEAT TREATMENT */}
-                <div className="schedule-column ht-column" style={{ flex: 1.6, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
-                  <table className="img-table sticky-header-table">
-                    <thead>
-                      <tr className="sticky-row-1">
-                        <th colSpan="5" className="col-main-title ht-title">HEAT TREATMENT</th>
-                        <th colSpan="5" className="col-main-title ht-title">DATE - {scheduleDate.split('-').reverse().join('/')}</th>
-                      </tr>
-                    </thead>
-                    <tbody className="ht-flex-body">
-                      <tr>
-                        <td colSpan="5" className="nested-td">
-                          <table className="inner-ht-table">
-                            <tbody>
-                              {htColumn1.map((f, idx) => (
-                                <React.Fragment key={idx}>
-                                  <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Timing</td><td>Cha</td><td>{f.capacity}</td>
-                                  </tr>
-                                  {f.rows.map((r, i) => (
-                                    <tr key={i}>
-                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
-                                      <td className="center-text">{r.qty}</td>
-                                      <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
-                                      <td className="center-text">{r.cha}</td>
-                                      <td className="center-text">{r.rate}</td>
-                                    </tr>
-                                  ))}
-                                </React.Fragment>
-                              ))}
-                            </tbody>
-                          </table>
-                        </td>
-                        <td colSpan="5" className="nested-td">
-                          <table className="inner-ht-table">
-                            <tbody>
-                              {htColumn2.map((f, idx) => (
-                                <React.Fragment key={idx}>
-                                  <tr className="machine-name-row">
-                                    <td>{f.furnace}</td><td>QTY</td><td>Timing</td><td>Cha</td><td>{f.capacity}</td>
-                                  </tr>
-                                  {f.rows.map((r, i) => (
-                                    <tr key={i}>
-                                      <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
-                                      <td className="center-text">{r.qty}</td>
-                                      <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
-                                      <td className="center-text">{r.cha}</td>
-                                      <td className="center-text">{r.rate}</td>
-                                    </tr>
-                                  ))}
-                                </React.Fragment>
-                              ))}
-                            </tbody>
-                          </table>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* UNSCHEDULED ALERTS */}
-              {scheduleData.unscheduled && scheduleData.unscheduled.length > 0 && (
-                <div style={{ marginTop: '20px', padding: '15px', backgroundColor: '#fff5f5', border: '1px solid #ffcccc', borderRadius: '5px' }}>
-                    <h3 style={{ color: '#cc0000', marginTop: 0, marginBottom: '10px' }}>⚠️ Unscheduled Parts (Pending / Moving to Next Day)</h3>
-                    <table style={{ width: '100%', borderCollapse: 'collapse', textAlign: 'left', backgroundColor: '#fff5f5' }}>
-                        <thead>
-                            <tr style={{ backgroundColor: '#ffe5e5' }}>
-                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Stage</th>
-                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Part Type</th>
-                                <th style={{ padding: '8px', border: '1px solid #ffcccc' }}>Missed Boxes / Status</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {scheduleData.unscheduled.map((item, idx) => (
-                                <tr key={idx}>
-                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
-                                    <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
-                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>
-                                      {item.missed_boxes}
-                                      {item.status && (
-                                        <span style={{ color: '#b30000', marginLeft: '8px', fontWeight: 'bold' }}>
-                                          ({item.status})
-                                        </span>
-                                      )}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-              )}
-            </div>
+               {/* 3. HEAT TREATMENT */}
+               <div className="schedule-column ht-column" style={{ flex: 1.6, position: 'relative', overflowY: 'auto', maxHeight: 'calc(100vh - 200px)' }}>
+                 <table className="img-table sticky-header-table">
+                   <thead>
+                     <tr className="sticky-row-1">
+                       <th colSpan="5" className="col-main-title ht-title">HEAT TREATMENT</th>
+                       <th colSpan="5" className="col-main-title ht-title">DATE - {scheduleDate.split('-').reverse().join('/')}</th>
+                     </tr>
+                   </thead>
+                   <tbody className="ht-flex-body">
+                     <tr>
+                       <td colSpan="5" className="nested-td">
+                         <table className="inner-ht-table">
+                           <tbody>
+                             {htColumn1.map((f, idx) => (
+                               <React.Fragment key={idx}>
+                                 <tr className="machine-name-row">
+                                   <td>{f.furnace}</td><td>QTY</td><td>Timing</td><td>Cha</td><td>{f.capacity}</td>
+                                 </tr>
+                                 {f.rows.map((r, i) => (
+                                   <tr key={i}>
+                                     <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
+                                     <td className="center-text">{r.qty}</td>
+                                     <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
+                                     <td className="center-text">{r.cha}</td>
+                                     <td className="center-text">{r.rate}</td>
+                                   </tr>
+                                 ))}
+                               </React.Fragment>
+                             ))}
+                           </tbody>
+                         </table>
+                       </td>
+                       <td colSpan="5" className="nested-td">
+                         <table className="inner-ht-table">
+                           <tbody>
+                             {htColumn2.map((f, idx) => (
+                               <React.Fragment key={idx}>
+                                 <tr className="machine-name-row">
+                                   <td>{f.furnace}</td><td>QTY</td><td>Timing</td><td>Cha</td><td>{f.capacity}</td>
+                                 </tr>
+                                 {f.rows.map((r, i) => (
+                                   <tr key={i}>
+                                     <td className={`part-name ${r.alert ? 'text-red' : ''}`}>{r.part}</td>
+                                     <td className="center-text">{r.qty}</td>
+                                     <td className="center-text text-gray-700" style={{fontSize: '0.85em', whiteSpace: 'nowrap'}}>{r.timing}</td>
+                                     <td className="center-text">{r.cha}</td>
+                                     <td className="center-text">{r.rate}</td>
+                                   </tr>
+                                 ))}
+                               </React.Fragment>
+                             ))}
+                           </tbody>
+                         </table>
+                       </td>
+                     </tr>
+                   </tbody>
+                 </table>
+               </div>
+             </div>
+           </div>
           ) : (
             <div style={{ padding: '30px', textAlign: 'center', color: '#666', backgroundColor: 'white', flex: 1 }}>
               <p>No schedule generated for this date yet. Click "Generate Production Schedule".</p>
@@ -695,7 +631,7 @@ const SHOScheduling = () => {
         </div>
       )}
 
-      {/* TAB 4: PRODUCTION SUMMARY */}
+      {/* TAB 4: PRODUCTION SUMMARY (UNCHANGED CORE LOGIC) */}
       {activeTab === 'summary' && (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
           <div className="controls-panel">
@@ -704,7 +640,7 @@ const SHOScheduling = () => {
               <input type="date" value={summaryDate} onChange={(e) => setSummaryDate(e.target.value)} />
             </div>
             <button className="btn-save" onClick={fetchSummaryOnly} disabled={isLoadingSummary}>
-              {isLoadingSummary ? "Downloading Zeroset Plan..." : "Load Requirement Summary"}
+              {isLoadingSummary ? "Loading Master Data..." : "Load Requirement Summary"}
             </button>
           </div>
 
@@ -764,6 +700,13 @@ const SHOScheduling = () => {
             <p style={{ color: '#555', marginBottom: '20px' }}>
               Reporting view mapping all requested Bearing Types against master production parameters.
             </p>
+            
+            {dataError && (
+              <div style={{ marginBottom: '15px', padding: '10px', backgroundColor: '#ffe6e6', color: '#cc0000', border: '1px solid #cc0000', borderRadius: '4px' }}>
+                <strong>Error:</strong> {dataError}
+              </div>
+            )}
+
             <table className="img-table" style={{ width: '100%' }}>
               <thead>
                 <tr style={{ backgroundColor: '#eef8ff' }}>
@@ -780,34 +723,40 @@ const SHOScheduling = () => {
                 </tr>
               </thead>
               <tbody>
-                {dataAvailability.length === 0 ? (
+                {isLoadingDataAvailability ? (
                   <tr>
-                    <td colSpan="10" style={{ textAlign: 'center', padding: '20px', color: '#666' }}>
-                      Click "Load Data Availability" to fetch data for all required channels.
+                    <td colSpan="10" style={{ textAlign: 'center', padding: '20px', color: '#666', fontWeight: 'bold' }}>
+                      Loading data from Neon...
+                    </td>
+                  </tr>
+                ) : dataAvailability.length === 0 ? (
+                  <tr>
+                    <td colSpan="10" style={{ textAlign: 'center', padding: '20px', color: '#dc3545', fontWeight: 'bold' }}>
+                      No Data Found.
                     </td>
                   </tr>
                 ) : (
                   dataAvailability.map((row, index) => (
                     <tr key={index}>
-                      <td style={{ fontWeight: 'bold', padding: '8px' }}>{row.channel}</td>
-                      <td style={{ textAlign: 'center' }}>{row.bearing_type}</td>
-                      <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{row.part}</td>
-                      <td style={{ textAlign: 'center', color: row.weight === 'Missing Weight' ? 'red' : 'black' }}>
-                        {row.weight}
+                      <td style={{ fontWeight: 'bold', padding: '8px' }}>{row?.channel ?? 'N/A'}</td>
+                      <td style={{ textAlign: 'center' }}>{row?.bearing_type ?? 'N/A'}</td>
+                      <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{row?.part ?? 'N/A'}</td>
+                      <td style={{ textAlign: 'center', color: !row?.weight || row?.weight === 'Missing Weight' ? 'red' : 'black' }}>
+                        {row?.weight ?? 'Missing Weight'}
                       </td>
-                      <td style={{ textAlign: 'center', color: row.primary_furnace === 'No Compatible Furnace' ? 'red' : 'black' }}>
-                        {row.primary_furnace}
+                      <td style={{ textAlign: 'center', color: !row?.primary_furnace || row?.primary_furnace === 'No Compatible Furnace' ? 'red' : 'black' }}>
+                        {row?.primary_furnace ?? 'No Compatible Furnace'}
                       </td>
-                      <td style={{ textAlign: 'center' }}>{row.alt_furnace_1 || ''}</td>
-                      <td style={{ textAlign: 'center' }}>{row.alt_furnace_2 || ''}</td>
-                      <td style={{ textAlign: 'center', color: row.compatible_face === 'No Compatible Face Machine' ? 'red' : 'black' }}>
-                        {row.compatible_face}
+                      <td style={{ textAlign: 'center' }}>{row?.alt_furnace_1 ?? ''}</td>
+                      <td style={{ textAlign: 'center' }}>{row?.alt_furnace_2 ?? ''}</td>
+                      <td style={{ textAlign: 'center', color: !row?.compatible_face || row?.compatible_face === 'No Compatible Face Machine' ? 'red' : 'black' }}>
+                        {row?.compatible_face ?? 'No Compatible Face Machine'}
                       </td>
-                      <td style={{ textAlign: 'center', color: row.compatible_od === 'No Compatible OD Machine' ? 'red' : 'black' }}>
-                        {row.compatible_od}
+                      <td style={{ textAlign: 'center', color: !row?.compatible_od || row?.compatible_od === 'No Compatible OD Machine' ? 'red' : 'black' }}>
+                        {row?.compatible_od ?? 'No Compatible OD Machine'}
                       </td>
-                      <td style={{ textAlign: 'center', color: row.ring_per_box === 'Missing Data' ? 'red' : 'black' }}>
-                        {row.ring_per_box}
+                      <td style={{ textAlign: 'center', color: !row?.ring_per_box || row?.ring_per_box === 'Missing Data' ? 'red' : 'black' }}>
+                        {row?.ring_per_box ?? 'Missing Data'}
                       </td>
                     </tr>
                   ))

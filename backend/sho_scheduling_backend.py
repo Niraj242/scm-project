@@ -517,21 +517,18 @@ def get_monthly_tracking_api():
 def get_machines():
     try:
         res = get_all_resources()
-        machine_list = []
+        machines_dict = {}
         
-        for f in res["furnaces"]: 
-            machine_list.append({"name": f, "type": "Furnace"})
-        for m in res["face"]: 
-            machine_list.append({"name": m, "type": "Face Grinding"})
-        for m in res["od"]: 
-            machine_list.append({"name": m, "type": "OD Grinding"})
-        for c in res["channels"]: 
-            machine_list.append({"name": c, "type": "Channel"})
-            
-        return {"status": "success", "data": machine_list}
+        # Rebuilding the exact dictionary structure from the original code
+        for f in res["furnaces"]: machines_dict[f] = {"type": "Furnace"}
+        for m in res["face"]: machines_dict[m] = {"type": "Face Grinding"}
+        for m in res["od"]: machines_dict[m] = {"type": "OD Grinding"}
+        for c in res["channels"]: machines_dict[c] = {"type": "Channel"}
+        
+        # Returning it with the status wrapper, but keeping the data as a dict
+        return {"status": "success", "data": machines_dict}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
 
 @router.get("/api/get_plan")
 def get_plan(date: str):

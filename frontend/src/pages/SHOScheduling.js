@@ -120,34 +120,53 @@ const SHOScheduling = () => {
     fetchSavedPlanForDate();
   }, [scheduleDate]);
 
-  // Dynamically Fetch Resources (Furnaces, Face, OD, Channels) based on Breakdown Date
+  // Fallback function to generate master list if backend fails to send machines
+  const generateFallbackMachines = (currentSector) => {
+    const channels = SECTOR_COLUMNS[currentSector] || [];
+    const fallbacks = [];
+    
+    // Channels
+    channels.forEach(ch => fallbacks.push({ id: ch, machine: `Channel ${ch}`, status: 'Available', start_time: '', end_time: '' }));
+    
+    // Standard Furnaces
+    const furnaces = ['AICHELIN 1', 'AICHELIN 2', 'AICHELIN 3', 'AICHELIN 4', 'SBB FURNACE', 'IPSEN'];
+    furnaces.forEach(f => fallbacks.push({ id: f, machine: f, status: 'Available', start_time: '', end_time: '' }));
+    
+    // Standard Face / OD (Generic fallbacks)
+    const grinders = ['544 Face', 'Face Grinder 1', 'OD Grinder 1', 'OD Grinder 2'];
+    grinders.forEach(g => fallbacks.push({ id: g, machine: g, status: 'Available', start_time: '', end_time: '' }));
+    
+    return fallbacks;
+  };
+
+  // Dynamically Fetch Resources based on Breakdown Date AND Sector
   useEffect(() => {
     const fetchMachines = async () => {
       setIsLoadingMachines(true);
       try {
-        // Backend should support fetching breakdown state for the selected date
-        // If no records exist in DB for this date, backend returns master list with 'Available' defaults
-        const response = await fetch(`${API_BASE}/api/machines?date=${breakdownDate}`);
+        // Passed sector as well just in case backend filters resources by sector
+        const response = await fetch(`${API_BASE}/api/machines?date=${breakdownDate}&sector=${sector}`);
         const result = await response.json();
-        if (response.ok && result.status === 'success') {
-          // Backend now expected to send an array of objects or just string array fallback
+        if (response.ok && result.status === 'success' && result.data && result.data.length > 0) {
           const loadedMachines = result.data.map(m => {
             if (typeof m === 'string') {
               return { id: m, machine: m, status: 'Available', start_time: '', end_time: '' };
             }
-            return { id: m.machine, ...m }; // If already formatted object
+            return { id: m.machine, ...m, status: m.status || 'Available' };
           });
           setMachineAvailability(loadedMachines);
         } else {
-          console.warn("Failed to load machine list: " + result.detail);
+          // Guaranteed visibility: If backend returns empty, load the fallback list
+          setMachineAvailability(generateFallbackMachines(sector));
         }
       } catch (err) {
-        console.warn("Could not connect to backend to fetch machines.");
+        // Guaranteed visibility: If network fails, load the fallback list
+        setMachineAvailability(generateFallbackMachines(sector));
       }
       setIsLoadingMachines(false);
     };
     fetchMachines();
-  }, [breakdownDate]);
+  }, [breakdownDate, sector]);
 
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
@@ -205,12 +224,15 @@ const SHOScheduling = () => {
   const fetchDataAvailability = async () => {
     setIsLoadingDataAvailability(true);
     try {
-      const response = await fetch(`${API_BASE}/api/data_availability`);
+      // FIX 1: Passed sector and date to fix the 422 Unprocessable Content Error
+      const response = await fetch(`${API_BASE}/api/data_availability?sector=${sector}&date=${summaryDate}`);
       const result = await response.json();
       if (response.ok && result.status === 'success') {
         setDataAvailability(result.data || []);
       } else {
-        alert("Error loading data availability: " + result.detail);
+        // FIX 2: Correctly format the FastAPI [object Object] error array to string so it's readable
+        const errorMsg = typeof result.detail === 'object' ? JSON.stringify(result.detail, null, 2) : result.detail;
+        alert("Error loading data availability from backend:\n" + errorMsg);
       }
     } catch (e) {
       alert("Failed to connect to backend.");
@@ -248,12 +270,11 @@ const SHOScheduling = () => {
     setIsLoadingPlan(true);
     const availabilityMap = {};
     
-    // Adapted mapping to handle the new text-based status for backwards compatibility with scheduler
     machineAvailability.forEach(c => {
       if (c.machine.trim()) {
         availabilityMap[c.machine.trim()] = {
           enabled: c.status === 'Available',
-          bd_date: breakdownDate, // Scheduler takes the global breakdown date now
+          bd_date: breakdownDate,
           start_time: c.start_time,
           end_time: c.end_time
         };

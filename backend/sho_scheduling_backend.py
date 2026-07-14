@@ -6,42 +6,27 @@ import requests
 import io
 import json
 import time
+import sqlite3
 import gc
-import psycopg2
-from psycopg2.extras import execute_values
+import threading
 from datetime import datetime, timedelta
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter
 from pydantic import BaseModel
 from typing import Dict, Any, List
+import psycopg2
 
 router = APIRouter()
 
-# Environment Configurations
 ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/sho_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "") # Standard Neon connection string
 
-# In-Memory Cache for Neon Master Data (Refreshed hourly)
-MASTER_CACHE = {
-    "last_updated": 0,
-    "weights": {},
-    "furnace_flexibility": {},
-    "face_compatibility": {},
-    "od_compatibility": {},
-    "ring_per_box": {},
-    "box_per_day_dgbb": {},
-    "box_per_day_trb": {},
-    "setup_chart": {},
-    "machine_master": [],
-    "channel_master": []
-}
-
-# Dynamic Scheduler Caches (Lifecycle of a single request)
+# Cache tables limited to the lifecycle of a single request
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
-VARIANTS_CACHE = {}
+VARIANTS_CACHE = {}  # OPTIMIZATION: Cache variants to prevent heavy nested regex operations
 
 DEFAULT_FURNACES = {
     "AICHELIN.(896)": 350.0, 
@@ -53,90 +38,66 @@ DEFAULT_FURNACES = {
     "AICHELIN UNITHERM ( 2033 )": 250.0
 }
 
-# Dynamic ZeroSet Plan In-Memory Cache (Refreshed every 1 hour)
-ZEROSET_CACHE = {
-    "last_updated": 0,
-    "sheets": {}
+# ==========================================
+# IN-MEMORY CACHE FOR STATIC MASTER DATA
+# ==========================================
+GLOBAL_PART_TO_CHANNEL = {}
+
+MASTER_DATA_CACHE = {
+    "weights": {},
+    "furnace_type_flexibility": {},
+    "face_machine_compatibility": {},
+    "od_machine_compatibility": {},
+    "ring_per_box": {},
+    "box_per_day_dgbb": {},
+    "box_per_day_trb": {},
+    "setup_chart": {},
+    "machine_master": {},
+    "channels": [],
+    "furnaces_specs": DEFAULT_FURNACES.copy(),
+    "box_matrix": {}
 }
 
 # ==========================================
-# NEON POSTGRESQL INITIALIZATION & SYNC
+# CACHING & MEMORY OPTIMIZATION (RENDER FIX)
 # ==========================================
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
-def init_neon_tables():
-    """Initializes the Neon Master Data and Dynamic Operational Tables."""
-    with get_db_connection() as conn:
-        with conn.cursor() as c:
-            # Master Data Tables
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS machine_master (
-                    resource_name TEXT PRIMARY KEY,
-                    resource_type TEXT NOT NULL,
-                    capacity_info TEXT
-                )
-            """)
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS channel_master (
-                    channel_name TEXT PRIMARY KEY
-                )
-            """)
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS weights (
-                    part_key TEXT PRIMARY KEY,
-                    weight NUMERIC NOT NULL
-                )
-            """)
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS setup_chart (
-                    part_variant TEXT,
-                    part_code TEXT,
-                    temperature NUMERIC,
-                    PRIMARY KEY (part_variant, part_code)
-                )
-            """)
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS ring_per_box (
-                    part_variant TEXT,
-                    part_code TEXT,
-                    qty NUMERIC,
-                    source TEXT,
-                    PRIMARY KEY (part_variant, part_code)
-                )
-            """)
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS furnace_flexibility (
-                    part_variant TEXT,
-                    part_code TEXT,
-                    furnaces TEXT,
-                    PRIMARY KEY (part_variant, part_code)
-                )
-            """)
-            # Dynamic Storage Tables
-            c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
-            c.execute("CREATE TABLE IF NOT EXISTS daily_state (date TEXT PRIMARY KEY, state_json TEXT)")
-            c.execute("""
-                CREATE TABLE IF NOT EXISTS breakdowns (
-                    date TEXT, 
-                    resource TEXT, 
-                    status TEXT, 
-                    start_time TEXT, 
-                    end_time TEXT, 
-                    PRIMARY KEY(date, resource)
-                )
-            """)
-            conn.commit()
-
-init_neon_tables()
+GLOBAL_EXCEL_CACHE = {}
+CACHE_TTL = 180  # 3 minutes
 
 def zeroset_sheet_filter(sheet_name: str) -> bool:
     s = str(sheet_name).strip().upper()
-    return s in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "SABB"] or s.startswith("T") or "HUB" in s
+    if s in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
+        return True
+    if s == "SABB":
+        return True
+    if s.startswith("T") or "HUB" in s:
+        return True
+    return False
 
-def parse_excel_to_df_dict(url: str, sheet_filter_fn=None):
-    if not url or url.strip() == "":
-        return {}
+def box_ring_sheet_filter(sheet_name: str) -> bool:
+    s = str(sheet_name).strip().upper()
+    return "RING" in s or "BOX" in s or "SETUP" in s or "CHART" in s
+
+def prod_master_sheet_filter(sheet_name: str) -> bool:
+    s = str(sheet_name).strip().upper()
+    if any(k in s for k in ["INDEX", "README", "INSTRUCTION", "DASHBOARD", "SUMMARY", "TEMPLATE"]):
+        return False
+    return True
+
+def get_excel_sheets_cached(url: str, sheet_filter_fn=None):
+    if not url or url.strip() == "": 
+        return
+    now = time.time()
+    
+    if url in GLOBAL_EXCEL_CACHE:
+        cache_entry = GLOBAL_EXCEL_CACHE[url]
+        if now - cache_entry["timestamp"] < CACHE_TTL:
+            for sheet, data in cache_entry["sheets"].items():
+                if sheet_filter_fn and not sheet_filter_fn(sheet):
+                    continue
+                yield sheet, pd.DataFrame(data)
+            return
+
     sheets_data = {}
     try:
         resp = requests.get(url, timeout=60)
@@ -151,239 +112,695 @@ def parse_excel_to_df_dict(url: str, sheet_filter_fn=None):
                     if sheet_filter_fn and not sheet_filter_fn(sheet):
                         continue
                     df = pd.read_excel(xls, sheet_name=sheet, header=None)
-                    sheets_data[sheet] = df.fillna('')
-            gc.collect()
+                    df_clean = df.fillna('')
+                    sheets_data[sheet] = df_clean.values.tolist()
+                    del df
+                    del df_clean
+                    gc.collect()
+                del xls
+            
+            GLOBAL_EXCEL_CACHE[url] = {
+                "timestamp": now,
+                "sheets": sheets_data
+            }
+        del resp
+        gc.collect()
     except Exception as e:
-        print(f"Error parsing sync excel from {url}: {e}")
-    return sheets_data
+        print(f"Error caching excel from {url}: {e}")
+        
+    if url in GLOBAL_EXCEL_CACHE:
+        for sheet, data in GLOBAL_EXCEL_CACHE[url]["sheets"].items():
+            if sheet_filter_fn and not sheet_filter_fn(sheet):
+                continue
+            yield sheet, pd.DataFrame(data)
 
-def sync_excel_to_neon():
-    """Background task executing hourly UPSERT operations from Excel targets into Neon."""
-    print("Starting hourly Master Data Synchronization with Neon PostgreSQL...")
-    
-    prod_sheets = parse_excel_to_df_dict(SHO_PRODUCTION_URL)
-    box_sheets = parse_excel_to_df_dict(BOX_RING_DATA_URL)
-    
-    with get_db_connection() as conn:
-        with conn.cursor() as c:
-            # 1. Sync Machine Master & Capacity Information
-            machines_found = []
-            for f_name, cap in DEFAULT_FURNACES.items():
-                machines_found.append((f_name, 'HT', json.dumps(cap)))
-            
-            for sheet_name, df_m in prod_sheets.items():
-                sheet_up = sheet_name.upper().strip()
-                if sheet_up not in ['WEIGHTS', 'FURNACE TYPE FLEXIBILITY', 'RING PER BOX.', 'CHANNEL PROCESS FLEXIBILITY'] and 'FLEX' not in sheet_up:
-                    str_matrix = df_m.astype(str).values
-                    current_m_num = None
-                    current_m_type = "UNKNOWN"
-                    for r in range(str_matrix.shape[0]):
-                        row_text = " ".join(str_matrix[r]).upper()
-                        if 'MACHINE' in row_text or 'M/C' in row_text:
-                            cells = [c.strip() for c in str_matrix[r] if c.strip()]
-                            m_cand = cells[1] if len(cells) > 1 else None
-                            if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
-                                current_m_num = m_cand
-                                if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): 
-                                    current_m_type = "FACE"
-                                else: 
-                                    current_m_type = "OD"
-                        
-                        if current_m_num and current_m_type in ['FACE', 'OD']:
-                            h_row = [c.strip().upper() for c in str_matrix[r]]
-                            if any('TYPE' in h or 'PART' in h for h in h_row) and any('HR' in h for h in h_row):
-                                norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in h_row]
-                                std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
-                                box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
-                                ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
-                                type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h or 'PART' in h), -1)
-                                
-                                rates_dict = {}
-                                for offset2 in range(1, 200):
-                                    if r + offset2 >= str_matrix.shape[0]: break
-                                    row_vals = str_matrix[r + offset2]
-                                    if "MACHINE" in " ".join(row_vals).upper() or "M/C" in " ".join(row_vals).upper(): break
-                                    raw_t = str(row_vals[type_idx]).strip() if (type_idx != -1 and type_idx < len(row_vals)) else ""
-                                    if is_invalid_part(raw_t): continue
-                                    
-                                    rate_rings = 0.0
-                                    if ring_hr_idx != -1 and ring_hr_idx < len(row_vals): rate_rings = safe_float(row_vals[ring_hr_idx])
-                                    elif box_hr_idx != -1 and box_hr_idx < len(row_vals): rate_rings = safe_float(row_vals[box_hr_idx]) * 50.0 
-                                    elif std_hr_idx != -1 and std_hr_idx < len(row_vals): rate_rings = safe_float(row_vals[std_hr_idx]) * 50.0
-                                    
-                                    if rate_rings > 0:
-                                        for pc in ['IR', 'OR']:
-                                            for var in get_lookup_variants(raw_t, pc):
-                                                rates_dict[f"{var}_{pc}"] = rate_rings
-                                                
-                                machines_found.append((current_m_num, current_m_type, json.dumps(rates_dict)))
+# ==========================================
+# NEON POSTGRESQL & LOCAL SQLITE PERSISTENCE
+# ==========================================
+DB_PATH = "sho_data.db"
 
-            if machines_found:
-                execute_values(c, """
-                    INSERT INTO machine_master (resource_name, resource_type, capacity_info) 
-                    VALUES %s ON CONFLICT (resource_name) DO UPDATE SET 
-                    resource_type = EXCLUDED.resource_type, capacity_info = EXCLUDED.capacity_info
-                """, machines_found)
+def get_neon_conn():
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL environment variable is not set! Please configure Neon database connection.")
+    return psycopg2.connect(DATABASE_URL)
 
-            # 2. Sync Channel Master
-            channels_list = [
-                ("CH01",), ("CH02",), ("CH03",), ("CH04",), ("CH05",), ("SABB",), ("CH07",), ("CH08",), ("CH11",), ("CH12",), ("CH13",),
-                ("T1",), ("T2",), ("T3",), ("T4",), ("T5",), ("T6",), ("T7",), ("T8",), ("T9",), ("T10",), ("T11",),
-                ("HUB 1.1",), ("HUB 1.2",), ("HUB 1.3",), ("HUB 1.4",), ("HUB 3",), ("THUB 1.1",), ("THUB 1.2",), ("THUB 1.3",)
-            ]
-            execute_values(c, "INSERT INTO channel_master (channel_name) VALUES %s ON CONFLICT DO NOTHING", channels_list)
-
-            # 3. Sync Weights Table
-            weight_df = prod_sheets.get('WEIGHTS')
-            if weight_df is not None:
-                weight_rows = []
-                for idx, row in weight_df.iterrows():
-                    if idx < 3 or is_invalid_part(row.iloc[0]): continue
-                    raw_fam = str(row.iloc[0]).strip()
-                    ir_or_val = str(row.iloc[1]).strip() if len(row) > 1 else ""
-                    part_code = 'OR' if '100' in ir_or_val else ('IR' if ('120' in ir_or_val or '010' in ir_or_val) else None)
-                    wt_val = safe_float(row.iloc[2]) if len(row) > 2 else 0.0
-                    if part_code and wt_val > 0:
-                        for ck in get_lookup_variants(raw_fam, part_code):
-                            weight_rows.append((f"{ck}_{part_code}", wt_val))
-                if weight_rows:
-                    execute_values(c, "INSERT INTO weights (part_key, weight) VALUES %s ON CONFLICT (part_key) DO UPDATE SET weight = EXCLUDED.weight", weight_rows)
-
-            # 4. Sync Setup Charts Table
-            for s_name, df_b in box_sheets.items():
-                if 'SETUP' in s_name.upper() and 'CHART' in s_name.upper():
-                    setup_rows = []
-                    for idx, row in df_b.iterrows():
-                        if idx < 2: continue
-                        t_val = str(row.iloc[0]).strip()
-                        p_val = str(row.iloc[1]).strip().upper()
-                        temp_val = safe_float(row.iloc[2]) if len(row) > 2 else 0.0
-                        if not t_val or is_invalid_part(t_val) or not temp_val: continue
-                        pc = 'IR' if 'IR' in p_val else ('OR' if 'OR' in p_val else None)
-                        if pc:
-                            for var in get_lookup_variants(t_val, pc):
-                                setup_rows.append((var, pc, temp_val))
-                    if setup_rows:
-                        execute_values(c, "INSERT INTO setup_chart (part_variant, part_code, temperature) VALUES %s ON CONFLICT (part_variant, part_code) DO UPDATE SET temperature = EXCLUDED.temperature", setup_rows)
-
-            # 5. Sync Ring Per Box & Box Matrices
-            box_rows = []
-            for s_name, df_b in box_sheets.items():
-                s_name_up = s_name.upper().strip()
-                if 'RING' in s_name_up and 'BOX' in s_name_up:
-                    for idx, row in df_b.iterrows():
-                        if idx == 0: continue
-                        for i in range(0, len(row) - 2, 3):
-                            fam_raw = str(row.iloc[i]).strip()
-                            if not fam_raw or is_invalid_part(fam_raw): continue
-                            for f_raw in (fam_raw.split("/") if "/" in fam_raw else [fam_raw]):
-                                for p_c in ['IR', 'OR']:
-                                    or_qty = safe_float(row.iloc[i+1])
-                                    ir_qty = safe_float(row.iloc[i+2])
-                                    qty_to_save = or_qty if p_c == 'OR' else ir_qty
-                                    if qty_to_save > 0:
-                                        for ck in get_lookup_variants(f_raw, p_c):
-                                            box_rows.append((ck, p_c, qty_to_save, s_name))
-            if box_rows:
-                execute_values(c, "INSERT INTO ring_per_box (part_variant, part_code, qty, source) VALUES %s ON CONFLICT (part_variant, part_code) DO UPDATE SET qty = EXCLUDED.qty, source = EXCLUDED.source", box_rows)
-            
-            conn.commit()
-    print("Master Data Sync Completed Successfully.")
-    refresh_memory_cache()
-
-def refresh_memory_cache():
-    """Pulls all tracking metadata from Neon directly into RAM to allow instantaneous lookup transactions."""
-    global MASTER_CACHE
-    print("Refreshing application memory cache from Neon...")
+def init_neon_tables():
+    conn = None
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as c:
-                # Machine Master Lookup
-                c.execute("SELECT resource_name, resource_type, capacity_info FROM machine_master")
-                MASTER_CACHE["machine_master"] = [{"name": r[0], "type": r[1], "capacity": json.loads(r[2] or '{}')} for r in c.fetchall()]
-                
-                # Channel Master Lookup
-                c.execute("SELECT channel_name FROM channel_master")
-                MASTER_CACHE["channel_master"] = [r[0] for r in c.fetchall()]
-                
-                # Weights Lookup
-                c.execute("SELECT part_key, weight FROM weights")
-                MASTER_CACHE["weights"] = {r[0]: float(r[1]) for r in c.fetchall()}
-                
-                # Setup Chart Lookup
-                c.execute("SELECT part_variant, part_code, temperature FROM setup_chart")
-                MASTER_CACHE["setup_chart"] = {(r[0], r[1]): float(r[2]) for r in c.fetchall()}
-                
-                # Ring Per Box Lookup
-                c.execute("SELECT part_variant, part_code, qty, source FROM ring_per_box")
-                MASTER_CACHE["ring_per_box"] = {}
-                for var, pc, qty, src in c.fetchall():
-                    if var not in MASTER_CACHE["ring_per_box"]: MASTER_CACHE["ring_per_box"][var] = {}
-                    MASTER_CACHE["ring_per_box"][var][pc] = {"qty": float(qty), "source": src}
-                    
-        MASTER_CACHE["last_updated"] = time.time()
-        print("In-Memory Master Cache updated successfully.")
+        conn = get_neon_conn()
+        with conn.cursor() as cursor:
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS weights (
+                part_type TEXT,
+                part_code TEXT,
+                weight NUMERIC,
+                PRIMARY KEY (part_type, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS furnace_type_flexibility (
+                comp_level TEXT,
+                part_code TEXT,
+                furnaces TEXT,
+                PRIMARY KEY (comp_level, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS face_machine_compatibility (
+                machine_name TEXT,
+                part_type TEXT,
+                part_code TEXT,
+                rate NUMERIC,
+                PRIMARY KEY (machine_name, part_type, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS od_machine_compatibility (
+                machine_name TEXT,
+                part_type TEXT,
+                part_code TEXT,
+                rate NUMERIC,
+                PRIMARY KEY (machine_name, part_type, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ring_per_box (
+                part_type TEXT,
+                part_code TEXT,
+                qty NUMERIC,
+                source TEXT,
+                PRIMARY KEY (part_type, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS box_per_day_dgbb (
+                part_type TEXT,
+                part_code TEXT,
+                qty NUMERIC,
+                source TEXT,
+                PRIMARY KEY (part_type, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS box_per_day_trb (
+                part_type TEXT,
+                part_code TEXT,
+                qty NUMERIC,
+                source TEXT,
+                PRIMARY KEY (part_type, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS setup_chart (
+                part_type TEXT,
+                part_code TEXT,
+                temp NUMERIC,
+                PRIMARY KEY (part_type, part_code)
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS machine_master (
+                machine_name TEXT PRIMARY KEY,
+                machine_type TEXT
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS channel_master (
+                channel_name TEXT PRIMARY KEY
+            );
+            """)
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS breakdowns (
+                date TEXT,
+                resource TEXT,
+                status TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                PRIMARY KEY (date, resource)
+            );
+            """)
+            conn.commit()
     except Exception as e:
-        print(f"Error refreshing cache from Neon database: {e}")
+        if conn:
+            conn.rollback()
+        print(f"Error initializing Neon tables: {e}")
+        raise e
+    finally:
+        if conn:
+            conn.close()
 
-def update_dynamic_zeroset_plan_cache():
-    """Maintains an isolated in-memory lifecycle for the high-priority dynamic Zeroset layout."""
-    global ZEROSET_CACHE
-    now = time.time()
-    if now - ZEROSET_CACHE["last_updated"] < 3600 and ZEROSET_CACHE["sheets"]:
-        return
-    print("Refreshing Dynamic Zero Set Plan entries from Google Sheets...")
-    fresh_sheets = parse_excel_to_df_dict(ZEROSET_URL, zeroset_sheet_filter)
-    if fresh_sheets:
-        ZEROSET_CACHE["sheets"] = {sheet: df.values.tolist() for sheet, df in fresh_sheets.items()}
-        ZEROSET_CACHE["last_updated"] = now
+def init_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)')
+        c.execute('CREATE TABLE IF NOT EXISTS daily_state (date TEXT PRIMARY KEY, state_json TEXT)')
+        conn.commit()
 
-# Cache Verification Guards
-def ensure_caches_are_valid():
-    if time.time() - MASTER_CACHE["last_updated"] > 3600 or not MASTER_CACHE["machine_master"]:
-        refresh_memory_cache()
-    update_dynamic_zeroset_plan_cache()
+init_db()
 
-# ==========================================
-# DATABASE OPERATION WRAPPERS (DYNAMIC DATA)
-# ==========================================
 def get_setting(key, default=None):
     if default is None: default = {}
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as c:
-                c.execute('SELECT value FROM settings WHERE key=%s', (key,))
-                row = c.fetchone()
-                return json.loads(row[0]) if row else default
-    except Exception:
-        return default
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('SELECT value FROM settings WHERE key=?', (key,))
+        row = c.fetchone()
+        return json.loads(row[0]) if row else default
 
 def save_setting(key, value):
-    with get_db_connection() as conn:
-        with conn.cursor() as c:
-            c.execute('INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value', (key, json.dumps(value)))
-            conn.commit()
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('REPLACE INTO settings (key, value) VALUES (?, ?)', (key, json.dumps(value)))
+        conn.commit()
 
 def get_previous_day_state(target_date_str):
-    try:
-        with get_db_connection() as conn:
-            with conn.cursor() as c:
-                c.execute('SELECT state_json FROM daily_state WHERE date < %s ORDER BY date DESC LIMIT 1', (target_date_str,))
-                row = c.fetchone()
-                if row: return json.loads(row[0])
-    except Exception:
-        pass
-    return {"machines": {}, "wip": {}}
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('SELECT state_json FROM daily_state WHERE date < ? ORDER BY date DESC LIMIT 1', (target_date_str,))
+        row = c.fetchone()
+        if row: return json.loads(row[0])
+        return {"machines": {}, "wip": {}}
 
 def save_daily_state(date_str, state_data):
-    with get_db_connection() as conn:
-        with conn.cursor() as c:
-            c.execute('INSERT INTO daily_state (date, state_json) VALUES (%s, %s) ON CONFLICT (date) DO UPDATE SET state_json = EXCLUDED.state_json', (date_str, json.dumps(state_data)))
-            conn.commit()
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('REPLACE INTO daily_state (date, state_json) VALUES (?, ?)', (date_str, json.dumps(state_data)))
+        conn.commit()
 
 def load_monthly_tracking(): return get_setting('monthly_tracking', {})
 def save_monthly_tracking(data): save_setting('monthly_tracking', data)
 def load_saved_plan(): return get_setting('saved_plan', {})
+
+# ==========================================
+# NEON IN-MEMORY CACHE LOADING ENGINE
+# ==========================================
+def load_master_data_from_neon():
+    conn = None
+    try:
+        conn = get_neon_conn()
+        with conn.cursor() as cursor:
+            # 1. Weights
+            cursor.execute("SELECT part_type, part_code, weight FROM weights")
+            weights = {}
+            for r in cursor.fetchall():
+                weights[f"{r[0]}_{r[1]}"] = float(r[2])
+            MASTER_DATA_CACHE["weights"] = weights
+            
+            # 2. Furnace flexibility
+            cursor.execute("SELECT comp_level, part_code, furnaces FROM furnace_type_flexibility")
+            furnace_map = {}
+            for r in cursor.fetchall():
+                furnaces_list = [f.strip() for f in r[2].split(",") if f.strip()]
+                furnace_map[f"{r[0]}_{r[1]}"] = furnaces_list
+            MASTER_DATA_CACHE["furnace_type_flexibility"] = furnace_map
+            
+            # 3. Face Grinding compatibilities
+            cursor.execute("SELECT machine_name, part_type, part_code, rate FROM face_machine_compatibility")
+            face_rates = {}
+            for r in cursor.fetchall():
+                m_name, part, pc, rate = r[0], r[1], r[2], float(r[3])
+                if m_name not in face_rates:
+                    face_rates[m_name] = {}
+                face_rates[m_name][f"{part}_{pc}"] = rate
+            MASTER_DATA_CACHE["face_machine_compatibility"] = face_rates
+            
+            # 4. OD Grinding compatibilities
+            cursor.execute("SELECT machine_name, part_type, part_code, rate FROM od_machine_compatibility")
+            od_rates = {}
+            for r in cursor.fetchall():
+                m_name, part, pc, rate = r[0], r[1], r[2], float(r[3])
+                if m_name not in od_rates:
+                    od_rates[m_name] = {}
+                od_rates[m_name][f"{part}_{pc}"] = rate
+            MASTER_DATA_CACHE["od_machine_compatibility"] = od_rates
+            
+            # 5. Ring per box
+            cursor.execute("SELECT part_type, part_code, qty, source FROM ring_per_box")
+            rpb_data = {}
+            for r in cursor.fetchall():
+                part, pc, qty, src = r[0], r[1], float(r[2]), r[3]
+                if part not in rpb_data: rpb_data[part] = {}
+                rpb_data[part][pc] = {'qty': qty, 'source': src}
+            MASTER_DATA_CACHE["ring_per_box"] = rpb_data
+            
+            # 6. Box per day DGBB
+            cursor.execute("SELECT part_type, part_code, qty, source FROM box_per_day_dgbb")
+            dgbb_data = {}
+            for r in cursor.fetchall():
+                part, pc, qty, src = r[0], r[1], float(r[2]), r[3]
+                if part not in dgbb_data: dgbb_data[part] = {}
+                dgbb_data[part][pc] = {'qty': qty, 'source': src}
+            MASTER_DATA_CACHE["box_per_day_dgbb"] = dgbb_data
+            
+            # 7. Box per day TRB
+            cursor.execute("SELECT part_type, part_code, qty, source FROM box_per_day_trb")
+            trb_data = {}
+            for r in cursor.fetchall():
+                part, pc, qty, src = r[0], r[1], float(r[2]), r[3]
+                if part not in trb_data: trb_data[part] = {}
+                trb_data[part][pc] = {'qty': qty, 'source': src}
+            MASTER_DATA_CACHE["box_per_day_trb"] = trb_data
+            
+            # Compile box matrix matching order
+            box_matrix = {}
+            for data_dict in [rpb_data, dgbb_data, trb_data]:
+                for part_key, part_data in data_dict.items():
+                    if part_key not in box_matrix: box_matrix[part_key] = {}
+                    for p_code, details in part_data.items():
+                        if details.get('qty', 0.0) > 0:
+                            box_matrix[part_key][p_code] = details
+            MASTER_DATA_CACHE["box_matrix"] = box_matrix
+            
+            # 8. Setup chart
+            cursor.execute("SELECT part_type, part_code, temp FROM setup_chart")
+            setup_chart = {}
+            for r in cursor.fetchall():
+                setup_chart[(r[0], r[1])] = float(r[2])
+            MASTER_DATA_CACHE["setup_chart"] = setup_chart
+            
+            # 9. Machine master
+            cursor.execute("SELECT machine_name, machine_type FROM machine_master")
+            machines = {}
+            for r in cursor.fetchall():
+                machines[r[0]] = r[1]
+            MASTER_DATA_CACHE["machine_master"] = machines
+            
+            # 10. Channel master
+            cursor.execute("SELECT channel_name FROM channel_master")
+            channels = [r[0] for r in cursor.fetchall()]
+            MASTER_DATA_CACHE["channels"] = channels
+            
+            # Furnace specification capacities
+            furnaces_specs = DEFAULT_FURNACES.copy()
+            for m_name, m_type in machines.items():
+                if m_type == "HT":
+                    if m_name in DEFAULT_FURNACES:
+                        furnaces_specs[m_name] = DEFAULT_FURNACES[m_name]
+                    else:
+                        furnaces_specs[m_name] = 250.0
+            MASTER_DATA_CACHE["furnaces_specs"] = furnaces_specs
+            
+        print("Successfully loaded master data cache from Neon!")
+    except Exception as e:
+        print(f"Error loading master data cache from Neon: {e}")
+    finally:
+        if conn:
+            conn.close()
+
+# ==========================================
+# BACKGROUND SYNCHRONIZER (HOURLY)
+# ==========================================
+def upsert_rows(conn, table_name, columns, conflict_cols, rows):
+    if not rows: return
+    col_str = ", ".join(columns)
+    placeholders = ", ".join(["%s"] * len(columns))
+    conflict_str = ", ".join(conflict_cols)
+    update_str = ", ".join([f"{c} = EXCLUDED.{c}" for c in columns if c not in conflict_cols])
+    
+    if update_str:
+        query = f"INSERT INTO {table_name} ({col_str}) VALUES ({placeholders}) ON CONFLICT ({conflict_str}) DO UPDATE SET {update_str};"
+    else:
+        query = f"INSERT INTO {table_name} ({col_str}) VALUES ({placeholders}) ON CONFLICT ({conflict_str}) DO NOTHING;"
+        
+    with conn.cursor() as cursor:
+        cursor.executemany(query, rows)
+
+def parse_weights_sheet(df_m):
+    rows = []
+    df_w = df_m.fillna('')
+    header_idx = -1
+    for r_idx in range(min(10, len(df_w))):
+        h_row = [str(x).strip().upper() for x in df_w.iloc[r_idx].values]
+        if any('TYPE' in h for h in h_row) and any('IR/OR' in h or 'WEIGHT' in h or 'IR' in h for h in h_row):
+            header_idx = r_idx; break
+    
+    if header_idx != -1:
+        norm_w_headers = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_w.iloc[header_idx].values]
+        type_idx = next((j for j, h in enumerate(norm_w_headers) if 'TYPE' in h), -1)
+        ir_or_idx = next((j for j, h in enumerate(norm_w_headers) if 'IROR' in h or 'IR' in h), -1)
+        wt_idx = next((j for j, h in enumerate(norm_w_headers) if 'WEIGHT' in h), -1)
+
+        if type_idx != -1:
+            for offset in range(1, len(df_w) - header_idx):
+                row_vals = list(df_w.iloc[header_idx + offset].values)
+                raw_fam = str(row_vals[type_idx]).strip() if (type_idx != -1 and type_idx < len(row_vals)) else ""
+                if is_invalid_part(raw_fam): continue
+                ir_or_val = str(row_vals[ir_or_idx]).strip() if (ir_or_idx != -1 and ir_or_idx < len(row_vals)) else ""
+                part_code = 'OR' if '100' in ir_or_val else ('IR' if ('120' in ir_or_val or '010' in ir_or_val) else None)
+                if part_code and wt_idx != -1 and wt_idx < len(row_vals):
+                    wt_val = safe_float(row_vals[wt_idx])
+                    if wt_val > 0:
+                        clean_keys = get_lookup_variants(raw_fam, part_code)
+                        for ck in clean_keys:
+                            rows.append((ck, part_code, wt_val))
+    return rows
+
+def parse_furnace_flex_sheet(df_f, furnace_specs_local):
+    rows = []
+    if len(df_f) > 0:
+        headers = [str(x).strip().upper() for x in df_f.iloc[0]]
+        for idx, r_row in df_f.iloc[1:].iterrows():
+            r = pd.Series(r_row.values, index=headers)
+            comp_level = str(r_row.iloc[0]).strip() if len(r_row) > 0 else ""
+            if is_invalid_part(comp_level): continue
+            p_code = 'IR' if comp_level.startswith('IM') else ('OR' if comp_level.startswith('OM') else None)
+            if p_code:
+                clean_keys = get_lookup_variants(comp_level, p_code)
+                valid_furnaces = []
+                for fn_key in ['PRIMARY FURNA', 'PRIMARY FURNACE', 'ALTERNATIVE 1', 'ALTERNATIVE 2']:
+                    fn = str(r.get(fn_key, '')).strip().upper() if fn_key in r else ""
+                    if not fn or fn == 'NAN': continue
+                    matched_fn = None
+                    if fn == "AU" or "UNITHERM" in fn: matched_fn = "AICHELIN UNITHERM ( 2033 )"
+                    elif "AICHELIN" in fn: matched_fn = "AICHELIN.(896)"
+                    else: matched_fn = next((k for k in furnace_specs_local.keys() if fn[:4] in k.upper()), None)
+                    if matched_fn and matched_fn not in valid_furnaces: valid_furnaces.append(matched_fn)
+                if valid_furnaces:
+                    furnaces_str = ",".join(valid_furnaces)
+                    for ck in clean_keys:
+                        rows.append((ck, p_code, furnaces_str))
+    return rows
+
+def parse_machine_comp_sheets(sheet_name, df_m, box_matrix):
+    face_rows, od_rows, machine_master_rows = [], [], []
+    str_matrix = df_m.fillna('').astype(str).values
+    current_m_num = None
+    current_m_type = "UNKNOWN"
+    for r in range(str_matrix.shape[0]):
+        row_text = " ".join(str_matrix[r]).upper()
+        if 'MACHINE' in row_text or 'M/C' in row_text:
+            cells = [c.strip() for c in str_matrix[r] if c.strip()]
+            m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
+            if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
+                current_m_num = m_cand
+                if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): current_m_type = "FACE"
+                elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: current_m_type = "OD"
+                
+                if current_m_num:
+                    machine_master_rows.append((current_m_num, current_m_type))
+        
+        if current_m_num and current_m_type in ['FACE', 'OD']:
+            h_row = [c.strip().upper() for c in str_matrix[r]]
+            if any('TYPE' in h or 'PART' in h for h in h_row) and any('HR' in h for h in h_row):
+                norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in h_row]
+                std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
+                box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
+                ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
+                rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'BOX' in h and 'HR' not in h), -1)
+                type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h or 'PART' in h), -1)
+                part_idx = next((j for j, h in enumerate(norm_headers) if 'PART' in h and 'NO' not in h), -1)
+                comb_idx = next((j for j, h in enumerate(norm_headers) if 'COMBINED' in h), -1)
+                
+                for offset2 in range(1, 200):
+                    if r + offset2 >= str_matrix.shape[0]: break
+                    row_vals = str_matrix[r + offset2]
+                    inner_row_text = " ".join(row_vals).upper()
+                    if "MACHINE" in inner_row_text or "M/C" in inner_row_text: break 
+                    raw_t = str(row_vals[type_idx]).strip() if (type_idx != -1 and type_idx < len(row_vals)) else ""
+                    if is_invalid_part(raw_t): continue
+                    part_val = str(row_vals[part_idx]).strip().upper() if (part_idx != -1 and part_idx < len(row_vals)) else ""
+                    p_codes = []
+                    if '100' in part_val or 'OR' in part_val: p_codes.append('OR')
+                    if '120' in part_val or 'IR' in part_val or '010' in part_val: p_codes.append('IR')
+                    if not p_codes: p_codes = ['IR', 'OR']
+                    for pc in p_codes:
+                        clean_keys = get_lookup_variants(raw_t, pc)
+                        comb_val = str(row_vals[comb_idx]).strip() if (comb_idx != -1 and comb_idx < len(row_vals)) else ""
+                        if comb_val and not is_invalid_part(comb_val): clean_keys.extend(get_lookup_variants(comb_val, pc))
+                        if not clean_keys: continue
+                            
+                        rate_rings = 0.0
+                        rpb = get_box_for_part(raw_t, pc, box_matrix)
+                        if rpb_idx != -1 and rpb_idx < len(row_vals) and safe_float(row_vals[rpb_idx]) > 0: rpb = safe_float(row_vals[rpb_idx])
+                        if ring_hr_idx != -1 and ring_hr_idx < len(row_vals) and safe_float(row_vals[ring_hr_idx]) > 0: rate_rings = safe_float(row_vals[ring_hr_idx])
+                        elif box_hr_idx != -1 and box_hr_idx < len(row_vals) and safe_float(row_vals[box_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[box_hr_idx]) * rpb
+                        elif std_hr_idx != -1 and std_hr_idx < len(row_vals) and safe_float(row_vals[std_hr_idx]) > 0 and rpb > 0: rate_rings = safe_float(row_vals[std_hr_idx]) * rpb
+                            
+                        if rate_rings > 0:
+                            for ck in set(clean_keys):
+                                if current_m_type == "FACE": face_rows.append((current_m_num, ck, pc, rate_rings))
+                                elif current_m_type == "OD": od_rows.append((current_m_num, ck, pc, rate_rings))
+                                    
+    return face_rows, od_rows, machine_master_rows
+
+def parse_box_ring_sheets(s_name, df_b):
+    s_name_up = str(s_name).upper().strip()
+    df_box = df_b.fillna('')
+    ring_per_box_rows, box_day_dgbb_rows, box_day_trb_rows, setup_chart_rows = [], [], [], []
+    
+    if 'SETUP' in s_name_up and 'CHART' in s_name_up:
+        type_col, part_col, temp_col = -1, -1, -1
+        for r_idx in range(min(5, len(df_box))):
+            row_strs = [str(x).strip().upper() for x in df_box.iloc[r_idx].values]
+            if any('TYPE' in x for x in row_strs) or any('PART' in x for x in row_strs):
+                type_col = next((j for j, x in enumerate(row_strs) if 'TYPE' in x), -1)
+                part_col = next((j for j, x in enumerate(row_strs) if 'PART' in x), -1)
+                temp_col = next((j for j, x in enumerate(row_strs) if 'TEMP' in x or 'AVERAGE' in x), -1)
+                break
+        if type_col != -1 and part_col != -1 and temp_col != -1:
+            for idx in range(r_idx + 1, len(df_box)):
+                row_vals = list(df_box.iloc[idx].values)
+                if type_col < len(row_vals) and part_col < len(row_vals) and temp_col < len(row_vals):
+                    t_val = str(row_vals[type_col]).strip()
+                    p_val = str(row_vals[part_col]).strip().upper()
+                    temp_val = safe_float(row_vals[temp_col])
+                    if not t_val or is_invalid_part(t_val) or not temp_val: continue
+                    pc = 'IR' if 'IR' in p_val else ('OR' if 'OR' in p_val else None)
+                    if pc:
+                        variants = get_lookup_variants(t_val, pc)
+                        for var in variants:
+                            setup_chart_rows.append((var, pc, temp_val))
+
+    elif 'RING' in s_name_up and 'BOX' in s_name_up:
+        for idx in range(1, len(df_box)):
+            row_vals = list(df_box.iloc[idx])
+            for i in range(0, len(row_vals) - 2, 3):
+                fam_raw = str(row_vals[i]).strip() if i < len(row_vals) else ""
+                if not fam_raw or is_invalid_part(fam_raw): continue
+                fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
+                for f_raw in fams_to_process:
+                    for p_c in ['IR', 'OR']:
+                        clean_keys = get_lookup_variants(f_raw, p_c)
+                        for ck in clean_keys:
+                            or_qty = safe_float(row_vals[i+1]) if (i+1 < len(row_vals)) else 0.0
+                            ir_qty = safe_float(row_vals[i+2]) if (i+2 < len(row_vals)) else 0.0
+                            if or_qty > 0 and p_c == 'OR': ring_per_box_rows.append((ck, 'OR', or_qty, s_name))
+                            if ir_qty > 0 and p_c == 'IR': ring_per_box_rows.append((ck, 'IR', ir_qty, s_name))
+                                    
+    elif 'BOX' in s_name_up and 'DAY' in s_name_up:
+        target_rows = box_day_dgbb_rows if "DGBB" in s_name_up else box_day_trb_rows
+        if not ("DGBB" in s_name_up or "TRB" in s_name_up): target_rows = box_day_dgbb_rows
+            
+        for r_idx in range(len(df_box)):
+            for c_idx in range(len(df_box.columns)):
+                cell_val = str(df_box.iloc[r_idx, c_idx]).strip()
+                match = re.search(r'([A-Z0-9/]+)\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)\s*(\d+)\s*K?', cell_val, re.IGNORECASE)
+                if match:
+                    part_type = match.group(1).strip()
+                    ir_boxes, or_boxes = int(match.group(2)), int(match.group(3))
+                    ref_qty = int(match.group(4)) * 1000 if 'K' in cell_val.upper() else int(match.group(4))
+                    ir_rpb = ref_qty / ir_boxes if ir_boxes > 0 else 0
+                    or_rpb = ref_qty / or_boxes if or_boxes > 0 else 0
+                    for p_c in ['IR', 'OR']:
+                        clean_keys = get_lookup_variants(part_type, p_c)
+                        for ck in clean_keys:
+                            if p_c == 'IR' and ir_rpb > 0: target_rows.append((ck, 'IR', ir_rpb, s_name))
+                            if p_c == 'OR' and or_rpb > 0: target_rows.append((ck, 'OR', or_rpb, s_name))
+
+        type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
+        for r_idx in range(min(20, len(df_box))):
+            norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_box.iloc[r_idx]]
+            t_c = next((j for j, h in enumerate(norm_strs) if 'TYPE' in h or 'BEARING' in h), -1)
+            i_c = next((j for j, h in enumerate(norm_strs) if 'IR' in h and 'BOX' in h), -1)
+            o_c = next((j for j, h in enumerate(norm_strs) if 'OR' in h and 'BOX' in h), -1)
+            s_c = next((j for j, h in enumerate(norm_strs) if 'RING' in h and 'BOX' in h and 'IR' not in h and 'OR' not in h), -1)
+            if t_c != -1 and (i_c != -1 or o_c != -1 or s_c != -1):
+                type_col, ir_col, or_col, single_rpb_col = t_c, i_c, o_c, s_c; break
+        if type_col != -1:
+            for idx in range(r_idx + 1, len(df_box)):
+                row_vals = list(df_box.iloc[idx])
+                raw_t = str(row_vals[type_col]).strip() if type_col < len(row_vals) else ""
+                if not raw_t or is_invalid_part(raw_t): continue
+                for p_c in ['IR', 'OR']:
+                    clean_keys = get_lookup_variants(raw_t, p_c)
+                    for ck in clean_keys:
+                        if p_c == 'IR':
+                            fq = safe_float(row_vals[ir_col]) if (ir_col != -1 and ir_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
+                            if fq > 0: target_rows.append((ck, 'IR', fq, s_name))
+                        if p_c == 'OR':
+                            fq = safe_float(row_vals[or_col]) if (or_col != -1 and or_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
+                            if fq > 0: target_rows.append((ck, 'OR', fq, s_name))
+                            
+    return ring_per_box_rows, box_day_dgbb_rows, box_day_trb_rows, setup_chart_rows
+
+def sync_master_data():
+    conn = None
+    try:
+        init_neon_tables()
+        conn = get_neon_conn()
+        
+        # 1. Fetch Box Ring Matrix data first to build temp rate conversions
+        temp_box_matrix = {}
+        all_ring_box, all_box_dgbb, all_box_trb, all_setup_chart = [], [], [], []
+        for s_name, df_b in get_excel_sheets_cached(BOX_RING_DATA_URL, box_ring_sheet_filter):
+            r_rows, d_rows, t_rows, s_rows = parse_box_ring_sheets(s_name, df_b)
+            all_ring_box.extend(r_rows)
+            all_box_dgbb.extend(d_rows)
+            all_box_trb.extend(t_rows)
+            all_setup_chart.extend(s_rows)
+            
+        for ck, pc, qty, src in all_ring_box:
+            if ck not in temp_box_matrix: temp_box_matrix[ck] = {}
+            temp_box_matrix[ck][pc] = {'qty': qty, 'source': src}
+        for ck, pc, qty, src in (all_box_dgbb + all_box_trb):
+            if ck not in temp_box_matrix: temp_box_matrix[ck] = {}
+            temp_box_matrix[ck][pc] = {'qty': qty, 'source': src}
+            
+        # 2. Parse Production Master Sheets
+        all_weights, all_furnace_flex, all_face_comp, all_od_comp, all_machine_master = [], [], [], [], []
+        furnace_specs_local = DEFAULT_FURNACES.copy()
+        
+        for s_name, df_m in get_excel_sheets_cached(SHO_PRODUCTION_URL, prod_master_sheet_filter):
+            s_name_up = str(s_name).upper().strip()
+            if 'FURNACE' in s_name_up or 'AICHELIN' in s_name_up:
+                if 'FLEX' not in s_name_up:
+                    for r in range(len(df_m)):
+                        row = df_m.iloc[r].values
+                        f_name = str(row[0]).strip().upper() if len(row) > 0 else ""
+                        cap = safe_float(row[1]) if len(row) > 1 else 0.0
+                        if f_name and cap > 0 and ('FURNACE' in f_name or 'AICHELIN' in f_name or 'UNITHERM' in f_name):
+                            furnace_specs_local[f_name] = cap
+                            all_machine_master.append((f_name, "HT"))
+
+        for s_name, df_m in get_excel_sheets_cached(SHO_PRODUCTION_URL, prod_master_sheet_filter):
+            s_name_up = str(s_name).upper().strip()
+            if s_name_up == 'WEIGHTS': all_weights.extend(parse_weights_sheet(df_m))
+            elif 'FURNACE' in s_name_up and 'FLEX' in s_name_up: all_furnace_flex.extend(parse_furnace_flex_sheet(df_m, furnace_specs_local))
+            elif s_name_up not in ['WEIGHTS', 'FURNACE TYPE FLEXIBILITY', 'RING PER BOX.', 'CHANNEL PROCESS FLEXIBILITY']:
+                face_rows, od_rows, m_rows = parse_machine_comp_sheets(s_name, df_m, temp_box_matrix)
+                all_face_comp.extend(face_rows)
+                all_od_comp.extend(od_rows)
+                all_machine_master.extend(m_rows)
+
+        static_channels = [
+            "CH1", "CH2", "CH3", "CH4", "CH5", "SABB", "CH7", "CH8", "CH11", "CH12", "CH13",
+            "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
+            "HUB 1.1", "HUB 1.2", "HUB 1.3", "HUB 1.4", "HUB 3", "THUB 1.1", "THUB 1.2", "THUB 1.3"
+        ]
+        all_channel_master = [(ch,) for ch in static_channels]
+
+        def dedup(rows, keys_count):
+            seen = {}
+            for row in rows:
+                key = tuple(row[:keys_count])
+                seen[key] = row[keys_count:]
+            return [key + val for key, val in seen.items()]
+
+        all_ring_box = dedup(all_ring_box, 2)
+        all_box_dgbb = dedup(all_box_dgbb, 2)
+        all_box_trb = dedup(all_box_trb, 2)
+        all_setup_chart = dedup(all_setup_chart, 2)
+        all_weights = dedup(all_weights, 2)
+        all_furnace_flex = dedup(all_furnace_flex, 2)
+        all_face_comp = dedup(all_face_comp, 3)
+        all_od_comp = dedup(all_od_comp, 3)
+        all_machine_master = dedup(all_machine_master, 1)
+        
+        # Bulk database inserts using Neon connection
+        upsert_rows(conn, "weights", ["part_type", "part_code", "weight"], ["part_type", "part_code"], all_weights)
+        upsert_rows(conn, "furnace_type_flexibility", ["comp_level", "part_code", "furnaces"], ["comp_level", "part_code"], all_furnace_flex)
+        upsert_rows(conn, "face_machine_compatibility", ["machine_name", "part_type", "part_code", "rate"], ["machine_name", "part_type", "part_code"], all_face_comp)
+        upsert_rows(conn, "od_machine_compatibility", ["machine_name", "part_type", "part_code", "rate"], ["machine_name", "part_type", "part_code"], all_od_comp)
+        upsert_rows(conn, "ring_per_box", ["part_type", "part_code", "qty", "source"], ["part_type", "part_code"], all_ring_box)
+        upsert_rows(conn, "box_per_day_dgbb", ["part_type", "part_code", "qty", "source"], ["part_type", "part_code"], all_box_dgbb)
+        upsert_rows(conn, "box_per_day_trb", ["part_type", "part_code", "qty", "source"], ["part_type", "part_code"], all_box_trb)
+        upsert_rows(conn, "setup_chart", ["part_type", "part_code", "temp"], ["part_type", "part_code"], all_setup_chart)
+        upsert_rows(conn, "machine_master", ["machine_name", "machine_type"], ["machine_name"], all_machine_master)
+        upsert_rows(conn, "channel_master", ["channel_name"], ["channel_name"], all_channel_master)
+        
+        # Populate GLOBAL_PART_TO_CHANNEL from Zeroset Demands
+        for sheet_name, df_zero in get_excel_sheets_cached(ZEROSET_URL, zeroset_sheet_filter):
+            sheet_str_upper = str(sheet_name).strip().upper()
+            if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
+                ch_name = f"CH{sheet_str_upper.zfill(2)}"
+            elif sheet_str_upper == "SABB": ch_name = "SABB"
+            elif sheet_str_upper.startswith("T ") or any(sheet_str_upper.startswith(f"T{k}") for k in range(1, 12)):
+                ch_name = sheet_str_upper
+            elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
+            else: ch_name = sheet_str_upper
+
+            r_idx, type_col_idx, mv_col_idx = None, None, None
+            for i in range(min(25, len(df_zero))):
+                row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
+                row_joined = " ".join(row_strs)
+                if type_col_idx is None:
+                    for j, val in enumerate(row_strs):
+                        if val == "TYPE" or "TYPE " in val or " TYPE" in val:
+                            type_col_idx = j; break
+                    if type_col_idx is None:
+                        for j, val in enumerate(row_strs):
+                            if val in ["MF", "PART NO", "BRG NO"]: type_col_idx = j; break
+                if mv_col_idx is None:
+                    for j, val in enumerate(row_strs):
+                        if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
+                if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
+                    r_idx = i
+                if r_idx is not None and type_col_idx is not None: break
+
+            col_to_use = type_col_idx if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "SABB"] else mv_col_idx
+            if col_to_use is None: col_to_use = mv_col_idx if mv_col_idx is not None else type_col_idx
+
+            if r_idx is not None and type_col_idx is not None:
+                last_mf = ""
+                for idx in range(r_idx + 1, len(df_zero)):
+                    row_vals_zero = list(df_zero.iloc[idx].values)
+                    mf_val = str(row_vals_zero[type_col_idx]).strip() if (type_col_idx is not None and type_col_idx < len(row_vals_zero)) else ""
+                    if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
+                    raw_t = str(row_vals_zero[col_to_use]).strip() if (col_to_use is not None and col_to_use < len(row_vals_zero)) else ""
+                    if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
+                    if is_invalid_part(raw_t): continue
+                    
+                    display_name = get_display_name(raw_t)
+                    GLOBAL_PART_TO_CHANNEL[display_name] = ch_name
+
+        conn.commit()
+        print("Master data synchronized to Neon successfully!")
+        load_master_data_from_neon()
+    except Exception as e:
+        if conn: conn.rollback()
+        print(f"Error syncing master data to Neon: {e}")
+    finally:
+        if conn: conn.close()
+
+def start_sync_thread():
+    def run_sync():
+        while True:
+            time.sleep(3600)  # Sleep exactly 1 hour
+            try:
+                print("Starting hourly synchronization task...")
+                sync_master_data()
+            except Exception as e:
+                print(f"Sync execution thread error: {e}")
+    t = threading.Thread(target=run_sync, daemon=True)
+    t.start()
+
+@router.on_event("startup")
+def startup_event():
+    try:
+        init_neon_tables()
+        conn = get_neon_conn()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM machine_master")
+            count = cursor.fetchone()[0]
+        conn.close()
+        
+        if count == 0:
+            print("Neon schema is empty. Starting background sync thread immediately...")
+            threading.Thread(target=sync_master_data, daemon=True).start()
+        else:
+            load_master_data_from_neon()
+        start_sync_thread()
+    except Exception as e:
+        print(f"Startup warning initialization: {e}")
 
 # ==========================================
 # ROUTING CONFIGURATION
@@ -428,7 +845,7 @@ class ScheduleRequest(BaseModel):
     unit_mode: str
     entries: Dict[str, Any] = {}
     unlocked_blocks: List[str] = []
-    machine_availability: List[Any] = []
+    machine_availability: Dict[str, Any] = {}
 
 class SavePlanRequest(BaseModel):
     date: str
@@ -446,12 +863,7 @@ class SaveBreakdownsRequest(BaseModel):
 
 @router.get("/api/health")
 def health_check():
-    return {"status": "ok", "cache_ready": MASTER_CACHE["last_updated"] > 0}
-
-@router.post("/api/trigger_sync")
-def trigger_sync(background_tasks: BackgroundTasks):
-    background_tasks.add_task(sync_excel_to_neon)
-    return {"status": "sync_triggered", "message": "Background sync processing safely initiated."}
+    return {"status": "ok"}
 
 @router.get("/api/monthly_tracking")
 def get_monthly_tracking_api():
@@ -459,20 +871,19 @@ def get_monthly_tracking_api():
 
 @router.get("/api/machines")
 def get_machines():
-    """Populates the system endpoints with precise resource nomenclature directly from Neon master definitions."""
-    ensure_caches_are_valid()
-    resource_list = []
-    for m in MASTER_CACHE["machine_master"]:
-        resource_list.append({"machine": m["name"], "type": m["type"], "status": "Available"})
-    for c in MASTER_CACHE["channel_master"]:
-        resource_list.append({"machine": c, "type": "Channel", "status": "Available"})
-    return {"status": "success", "data": resource_list}
+    furnaces, face_mcs, od_mcs, channels = get_all_resources_dynamic()
+    res = {}
+    for f in furnaces: res[f] = {"type": "HT", "ready_time": 0.0, "last_fam": None, "last_pc": None}
+    for m in face_mcs: res[m] = {"type": "FACE", "ready_time": 0.0, "last_fam": None, "last_pc": None}
+    for m in od_mcs: res[m] = {"type": "OD", "ready_time": 0.0, "last_fam": None, "last_pc": None}
+    for c in channels: res[c] = {"type": "Channel", "ready_time": 0.0, "last_fam": None, "last_pc": None}
+    return res
 
 @router.get("/api/get_plan")
 def get_plan(date: str):
     try:
         plans = load_saved_plan()
-        return {"status": "success", "data": plans.get(date, {})}
+        return plans.get(date, {})
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -497,43 +908,97 @@ def save_plan(payload: SavePlanRequest):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+# ==========================================
+# BREAKDOWN ENDPOINTS & RESOURCE MATCHING
+# ==========================================
+def get_all_resources_dynamic():
+    """Returns dynamic furnaces, face grinding, OD grinding and channels exact names from cached master data."""
+    furnaces = sorted([name for name, mtype in MASTER_DATA_CACHE.get("machine_master", {}).items() if mtype == "HT"])
+    if not furnaces: furnaces = sorted(list(DEFAULT_FURNACES.keys()))
+        
+    face_mcs = sorted([name for name, mtype in MASTER_DATA_CACHE.get("machine_master", {}).items() if mtype == "FACE"])
+    if not face_mcs: face_mcs = ["DDS 1", "DDS 2", "BG 1"]
+        
+    od_mcs = sorted([name for name, mtype in MASTER_DATA_CACHE.get("machine_master", {}).items() if mtype == "OD"])
+    if not od_mcs: od_mcs = ["CL 1", "CL 2", "CELL 1"]
+        
+    channels = MASTER_DATA_CACHE.get("channels")
+    if not channels:
+        channels = [
+            "CH1", "CH2", "CH3", "CH4", "CH5", "SABB", "CH7", "CH8", "CH11", "CH12", "CH13",
+            "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
+            "HUB 1.1", "HUB 1.2", "HUB 1.3", "HUB 1.4", "HUB 3", "THUB 1.1", "THUB 1.2", "THUB 1.3"
+        ]
+    return furnaces, face_mcs, od_mcs, channels
+
 @router.get("/api/breakdowns")
 def get_breakdowns(date: str):
-    ensure_caches_are_valid()
     saved = {}
+    conn = None
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as c:
-                c.execute("SELECT resource, status, start_time, end_time FROM breakdowns WHERE date=%s", (date,))
-                for row in c.fetchall():
-                    saved[row[0]] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
-    except Exception:
-        pass
+        conn = get_neon_conn()
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT resource, status, start_time, end_time FROM breakdowns WHERE date=%s", (date,))
+            for row in cursor.fetchall():
+                saved[row[0]] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
+    except Exception as e:
+        print(f"Error reading breakdowns from Neon: {e}")
+    finally:
+        if conn: conn.close()
+
+    furnaces, face_mcs, od_mcs, channels = get_all_resources_dynamic()
 
     res_list = []
-    for m in MASTER_CACHE["machine_master"]:
-        m_name = m["name"]
-        t_label = "Furnace" if m["type"] == "HT" else ("Face Grinding" if m["type"] == "FACE" else "OD Grinding")
-        res_list.append({"resource": m_name, "type": t_label, **saved.get(m_name, {"status": "Available", "start_time": "", "end_time": ""})})
-        
-    for ch in MASTER_CACHE["channel_master"]:
-        res_list.append({"resource": ch, "type": "Channel", **saved.get(ch, {"status": "Available", "start_time": "", "end_time": ""})})
+    for f in furnaces:
+        res_list.append({"resource": f, "type": "Furnace", **saved.get(f, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in face_mcs:
+        res_list.append({"resource": m, "type": "Face Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in od_mcs:
+        res_list.append({"resource": m, "type": "OD Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for c in channels:
+        res_list.append({"resource": c, "type": "Channel", **saved.get(c, {"status": "Available", "start_time": "", "end_time": ""})})
 
     return {"status": "success", "data": res_list}
 
 @router.post("/api/save_breakdowns")
 def save_breakdowns(payload: SaveBreakdownsRequest):
+    conn = None
     try:
-        with get_db_connection() as conn:
-            with conn.cursor() as c:
-                c.execute("DELETE FROM breakdowns WHERE date=%s", (payload.date,))
-                for ent in payload.entries:
-                    c.execute("INSERT INTO breakdowns (date, resource, status, start_time, end_time) VALUES (%s, %s, %s, %s, %s)",
+        # Validate breakdown resource names
+        furnaces, face_mcs, od_mcs, channels = get_all_resources_dynamic()
+        valid_resources = set(furnaces + face_mcs + od_mcs + channels)
+        for ent in payload.entries:
+            if ent.resource not in valid_resources:
+                return {"status": "error", "detail": f"Invalid resource name: '{ent.resource}' in breakdown entry."}
+
+        conn = get_neon_conn()
+        with conn.cursor() as cursor:
+            cursor.execute("DELETE FROM breakdowns WHERE date=%s", (payload.date,))
+            for ent in payload.entries:
+                cursor.execute("INSERT INTO breakdowns (date, resource, status, start_time, end_time) VALUES (%s, %s, %s, %s, %s)",
                               (payload.date, ent.resource, ent.status, ent.start_time, ent.end_time))
-                conn.commit()
+            conn.commit()
         return {"status": "success"}
     except Exception as e:
+        if conn: conn.rollback()
         return {"status": "error", "detail": str(e)}
+    finally:
+        if conn: conn.close()
+
+@router.post("/api/clear_cache")
+def clear_cache():
+    GLOBAL_EXCEL_CACHE.clear()
+    RATE_CACHE.clear()
+    WEIGHT_CACHE.clear()
+    FURNACE_CACHE.clear()
+    VARIANTS_CACHE.clear()
+    GLOBAL_PART_TO_CHANNEL.clear()
+    gc.collect()
+    try:
+        load_master_data_from_neon()
+        return {"status": "success", "message": "All parsed excel and Neon cached databases reloaded successfully!"}
+    except Exception as e:
+        return {"status": "error", "message": f"Caches cleared, reload Neon configuration failing: {e}"}
 
 # ==========================================
 # UTIL FUNCTIONS
@@ -541,7 +1006,7 @@ def save_breakdowns(payload: SaveBreakdownsRequest):
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
-    if ch.isdigit(): return f"CH{int(ch):02d}"
+    if ch.isdigit(): return f"CH{int(ch)}"
     return ch
 
 def normalize_resource_name(name):
@@ -568,7 +1033,9 @@ def is_invalid_part(raw_text):
     if pd.isna(raw_text) or not raw_text: return True
     t = str(raw_text).upper()
     invalid_keywords = ["PROJECTED", "PLAN", "QTY", "HRS", "DAY", "NAN", "NONE", "UNKNOWN", "TYPE", "WIP", "MTD", "ASKING", "TOTAL"]
-    return any(k in t for k in invalid_keywords)
+    for k in invalid_keywords:
+        if k in t: return True
+    return False
 
 def get_lookup_variants(raw_text, p_code=None):
     cache_key = (raw_text, p_code)
@@ -684,12 +1151,12 @@ def get_rate_for_part(display_name, p_code, rates, res_id=""):
         exact_key = f"{var}_{p_code}"
         if exact_key in rates:
             RATE_CACHE[key] = rates[exact_key]
-            return rates[exact_key]
+            return RATE_CACHE[key]
             
         robust_key = exact_key.replace(" ", "").upper()
         if robust_key in robust_rates:
             RATE_CACHE[key] = robust_rates[robust_key]
-            return robust_rates[robust_key]
+            return RATE_CACHE[key]
             
     for var in variants:
         for rk, rv in robust_rates.items():
@@ -705,10 +1172,12 @@ def get_weight_for_part(display_name, p_code, weights):
     if key in WEIGHT_CACHE: return WEIGHT_CACHE[key]
     
     variants = get_lookup_variants(display_name, p_code)
+    weights_dict = MASTER_DATA_CACHE.get("weights") or {}
     for var in variants:
-        if f"{var}_{p_code}" in weights: 
-            WEIGHT_CACHE[key] = weights[f"{var}_{p_code}"]
-            return weights[f"{var}_{p_code}"]
+        k = f"{var}_{p_code}"
+        if k in weights_dict: 
+            WEIGHT_CACHE[key] = weights_dict[k]
+            return WEIGHT_CACHE[key]
             
     WEIGHT_CACHE[key] = None
     return None
@@ -718,10 +1187,12 @@ def get_furnaces_for_part(display_name, p_code, furnace_map, furnace_specs):
     if key in FURNACE_CACHE: return FURNACE_CACHE[key]
     
     variants = get_lookup_variants(display_name, p_code)
+    flex_dict = MASTER_DATA_CACHE.get("furnace_type_flexibility") or {}
     for var in variants:
-        if f"{var}_{p_code}" in furnace_map: 
-            FURNACE_CACHE[key] = furnace_map[f"{var}_{p_code}"]
-            return furnace_map[f"{var}_{p_code}"]
+        k = f"{var}_{p_code}"
+        if k in flex_dict: 
+            FURNACE_CACHE[key] = flex_dict[k]
+            return FURNACE_CACHE[key]
             
     default_f = list(furnace_specs.keys())
     FURNACE_CACHE[key] = default_f
@@ -729,12 +1200,15 @@ def get_furnaces_for_part(display_name, p_code, furnace_map, furnace_specs):
 
 def get_box_for_part_detailed(display_name, p_code, box_matrix):
     variants = get_lookup_variants(display_name, p_code)
+    box_matrix_cached = MASTER_DATA_CACHE.get("box_matrix") or {}
     for var in variants:
-        if var in box_matrix and p_code in box_matrix[var]: 
-            return box_matrix[var][p_code]['qty'], box_matrix[var][p_code]['source'], var
+        if var in box_matrix_cached and p_code in box_matrix_cached[var]: 
+            qty = box_matrix_cached[var][p_code]['qty']
+            source = box_matrix_cached[var][p_code]['source']
+            return qty, source, var
             
     norm_disp = re.sub(r'[\s./_\-]', '', str(display_name).upper())
-    for b_key, b_val in box_matrix.items():
+    for b_key, b_val in box_matrix_cached.items():
         norm_bkey = re.sub(r'[\s./_\-]', '', str(b_key).upper())
         if norm_bkey in norm_disp or norm_disp in norm_bkey:
             if p_code in b_val:
@@ -758,9 +1232,10 @@ def format_time(rel_hrs):
 
 def get_tempering_temp(display_name, p_code, setup_chart_matrix):
     variants = get_lookup_variants(display_name, p_code)
+    setup_cached = MASTER_DATA_CACHE.get("setup_chart") or {}
     for var in variants:
-        if (var, p_code) in setup_chart_matrix:
-            return setup_chart_matrix[(var, p_code)]
+        if (var, p_code) in setup_cached:
+            return setup_cached[(var, p_code)]
     return None
 
 class WorkItem:
@@ -784,8 +1259,7 @@ def init_item_resources(item, resources, furnace_map, weight_matrix, furnace_spe
     item.missing_reason = "Capacity Exceeded"
     
     found_stage_machines = False
-    missing_rate_flag = False
-    missing_weight_flag = False
+    missing_rate_flag, missing_weight_flag = False, False
     
     for res in resources:
         if res.type != item.stage: continue
@@ -838,14 +1312,12 @@ class Resource:
 # ==========================================
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest):
-    ensure_caches_are_valid()
-    debug_logs = []
-    unscheduled = []
-    
+    debug_logs, unscheduled = [], []
     RATE_CACHE.clear()
     WEIGHT_CACHE.clear()
     FURNACE_CACHE.clear()
     VARIANTS_CACHE.clear()
+    gc.collect()
     
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
@@ -854,20 +1326,19 @@ def generate_schedule(payload: ScheduleRequest):
         month_str = req_date.strftime("%Y-%m")
         
         monthly_data = load_monthly_tracking()
-        if month_str not in monthly_data:
-            monthly_data[month_str] = {}
+        if month_str not in monthly_data: monthly_data[month_str] = {}
 
-        channel_demands_day1 = {} 
-        channel_demands_day2 = {}
+        channel_demands_day1, channel_demands_day2 = {}, {}
         
-        # Pull dynamic hourly structured data from ZeroSet cache without hit penalties
-        for sheet_name, sheet_matrix in ZEROSET_CACHE["sheets"].items():
+        # 1. LOAD ONLY DAILY TRANSACTIONAL ZEROSET FROM EXCEL (Cached dynamically)
+        for sheet_name, df_zero in get_excel_sheets_cached(ZEROSET_URL, zeroset_sheet_filter):
             sheet_str_upper = str(sheet_name).strip().upper()
             if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
                 ch_name = f"CH{sheet_str_upper.zfill(2)}"
             elif sheet_str_upper == "SABB": ch_name = "SABB"
             elif sheet_str_upper.startswith("T ") or any(sheet_str_upper.startswith(f"T{k}") for k in range(1, 12)):
                 ch_name = sheet_str_upper
+            elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
             else: ch_name = sheet_str_upper
 
             ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
@@ -876,8 +1347,8 @@ def generate_schedule(payload: ScheduleRequest):
             c1_col, c2_col = None, None
             monthly_cols = []
             
-            for i in range(min(25, len(sheet_matrix))):
-                row_strs = [str(x).strip().upper() for x in sheet_matrix[i]]
+            for i in range(min(25, len(df_zero))):
+                row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
                 row_joined = " ".join(row_strs)
                 if type_col_idx is None:
                     for j, val in enumerate(row_strs):
@@ -892,7 +1363,7 @@ def generate_schedule(payload: ScheduleRequest):
                         
                 if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
                     r_idx = i
-                    for j, val in enumerate(sheet_matrix[i]):
+                    for j, val in enumerate(df_zero.iloc[i].values):
                         if is_target_date(val, day_1): c1_col = j
                         if is_target_date(val, day_2): c2_col = j
                         s_val = str(val).strip()
@@ -904,8 +1375,8 @@ def generate_schedule(payload: ScheduleRequest):
 
             if r_idx is not None and type_col_idx is not None:
                 last_mf = ""
-                for idx in range(r_idx + 1, len(sheet_matrix)):
-                    row_vals_zero = sheet_matrix[idx]
+                for idx in range(r_idx + 1, len(df_zero)):
+                    row_vals_zero = list(df_zero.iloc[idx].values)
                     
                     mf_val = str(row_vals_zero[type_col_idx]).strip() if (type_col_idx is not None and type_col_idx < len(row_vals_zero)) else ""
                     if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
@@ -914,6 +1385,7 @@ def generate_schedule(payload: ScheduleRequest):
                     if is_invalid_part(raw_t): continue
                     
                     display_name = get_display_name(raw_t)
+                    GLOBAL_PART_TO_CHANNEL[display_name] = ch_name
                     if display_name not in monthly_data[month_str]:
                         monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": ch_name}
                     
@@ -936,21 +1408,27 @@ def generate_schedule(payload: ScheduleRequest):
                         channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
                         channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
 
-        # Map RAM Caches into exact local algorithm placeholders
-        box_matrix = MASTER_CACHE["ring_per_box"]
-        weight_matrix = MASTER_CACHE["weights"]
-        setup_chart_matrix = MASTER_CACHE["setup_chart"]
-        
-        furnace_specs_local = DEFAULT_FURNACES.copy()
-        furnace_map = {} # Loaded fallbacks handled dynamically inside caching structures
-        
-        resources = []
-        for m in MASTER_CACHE["machine_master"]:
-            resources.append(Resource(m["name"], m["type"], m["capacity"]))
+        # 2. LOAD STATIC LOOKUPS FROM IN-MEMORY CACHE (NO EXCEL RUNTIME PARSING)
+        weight_matrix = MASTER_DATA_CACHE.get("weights") or {}
+        furnace_map = MASTER_DATA_CACHE.get("furnace_type_flexibility") or {}
+        box_matrix = MASTER_DATA_CACHE.get("box_matrix") or {}
+        setup_chart_matrix = MASTER_DATA_CACHE.get("setup_chart") or {}
+        furnace_specs_local = MASTER_DATA_CACHE.get("furnaces_specs") or DEFAULT_FURNACES.copy()
 
         current_state = get_previous_day_state(payload.date)
-        work_items = []
+        work_items, resources = [], []
         
+        for f_name, cap in furnace_specs_local.items(): 
+            resources.append(Resource(f_name, 'HT', cap))
+        
+        face_mcs = MASTER_DATA_CACHE.get("face_machine_compatibility") or {}
+        for m_num, rates in face_mcs.items(): 
+            resources.append(Resource(m_num, 'FACE', rates))
+            
+        od_mcs = MASTER_DATA_CACHE.get("od_machine_compatibility") or {}
+        for m_num, rates in od_mcs.items(): 
+            resources.append(Resource(m_num, 'OD', rates))
+
         for res in resources:
             norm_res_id = normalize_resource_name(res.id)
             matched_state = None
@@ -971,463 +1449,4 @@ def generate_schedule(payload: ScheduleRequest):
             
             if "ht_balance" in w_data: ht_balances[(disp, pc)] = float(w_data["ht_balance"])
                 
-            routing = get_routing_for_part(ch_norm, pc)
-            first_stage = get_first_required_stage(routing)
-            
-            for stage in ['HT', 'FACE', 'OD']:
-                if stage not in routing: continue
-                if stage not in w_data: continue
-                
-                stage_data = w_data.get(stage, {})
-                qty = float(stage_data.get("qty", 0.0))
-                rt = float(stage_data.get("rt", 0.0))
-                
-                if qty > 0 and stage != first_stage:
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
-
-        ch_stats = {}
-        for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
-            for display_name, data in demands.items():
-                ch_norm = normalize_channel(data['channel'])
-                if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
-                ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
-
-        tracker_ht = {}
-        for display_name, data in channel_demands_day1.items():
-            for p_code in ['IR', 'OR']:
-                raw_d1 = float(data.get(p_code, 0.0))
-                if raw_d1 > 0:
-                    key = (display_name, p_code)
-                    if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
-                    tracker_ht[key]['raw_d1'] = raw_d1
-                    
-        for display_name, data in channel_demands_day2.items():
-            for p_code in ['IR', 'OR']:
-                raw_d2 = float(data.get(p_code, 0.0))
-                if raw_d2 > 0:
-                    key = (display_name, p_code)
-                    if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
-                    tracker_ht[key]['raw_d2'] = raw_d2
-
-        for key, reqs in tracker_ht.items():
-            disp, pc = key
-            ch_norm = normalize_channel(reqs['channel'])
-            routing = get_routing_for_part(ch_norm, pc)
-            first_stage = get_first_required_stage(routing)
-            
-            if not first_stage: continue
-            
-            raw_d1 = reqs['raw_d1']
-            raw_d2 = reqs['raw_d2']
-            bal = ht_balances.get(key, 0.0)
-            
-            d1_sat = min(raw_d1, bal)
-            bal -= d1_sat
-            net_d1 = raw_d1 - d1_sat
-            
-            d2_sat = min(raw_d2, bal)
-            bal -= d2_sat
-            net_d2 = raw_d2 - d2_sat
-            
-            reqs['net_d1'] = net_d1
-            reqs['net_d2'] = net_d2
-            reqs['d2_satisfied'] = d2_sat
-            reqs['leftover_bal'] = bal
-            reqs['first_stage'] = first_stage
-            
-            if net_d1 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, ch_stats[ch_norm]['score'], routing))
-            if net_d2 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, ch_stats[ch_norm]['score'], routing))
-
-        # Enforce Saved Core & Channel Breakdowns accurately during execution blocks
-        db_breakdowns = {}
-        try:
-            with get_db_connection() as conn:
-                with conn.cursor() as c:
-                    c.execute("SELECT resource, status, start_time, end_time FROM breakdowns WHERE date=%s", (payload.date,))
-                    for row in c.fetchall():
-                        db_breakdowns[row[0]] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
-        except Exception:
-            pass
-
-        for res in resources:
-            bd_info = db_breakdowns.get(res.id)
-            if bd_info:
-                if bd_info["status"] == "Complete Breakdown": res.blocked = True
-                elif bd_info["status"] == "Available":
-                    st_str = bd_info.get('start_time', '')
-                    et_str = bd_info.get('end_time', '')
-                    if st_str and et_str:
-                        res.has_bd = True
-                        res.bd_start = time_str_to_float(st_str)
-                        res.bd_end = time_str_to_float(et_str)
-
-        for item in work_items:
-            init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
-
-        for i in range(len(work_items)):
-            item1 = work_items[i]
-            if item1.qty <= 0.01 or item1.day_idx != 0: continue
-            if not item1.valid_resources: continue
-            
-            res_dummy = item1.valid_resources[0]
-            rate_dummy = item1.rates[res_dummy.id][0] if res_dummy.type == 'HT' else item1.rates[res_dummy.id]
-            weight_dummy = item1.rates[res_dummy.id][1] if res_dummy.type == 'HT' else 1.0
-            
-            est_time1 = (item1.qty * weight_dummy) / rate_dummy if res_dummy.type == 'HT' else item1.qty / rate_dummy
-            merge_thresh = 1.0 if res_dummy.type == 'HT' else 2.0
-            
-            for j in range(i + 1, len(work_items)):
-                item2 = work_items[j]
-                if (item2.day_idx == 1 and 
-                    item2.disp == item1.disp and 
-                    item2.pc == item1.pc and 
-                    item2.stage == item1.stage and 
-                    item2.channel == item1.channel and 
-                    item2.qty > 0.01):
-                    
-                    est_time2 = (item2.qty * weight_dummy) / rate_dummy if res_dummy.type == 'HT' else item2.qty / rate_dummy
-                    if est_time1 < merge_thresh or est_time2 < merge_thresh:
-                        item1.qty += item2.qty
-                        item2.qty = 0.0
-                    break
-
-        for target_day in [-1, 0, 1]:
-            current_max_time = 24.0 
-            for r in resources:
-                r.max_time = current_max_time
-                if r.ready_time < current_max_time: r.blocked = False
-                    
-            while True:
-                active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < current_max_time and i.day_idx == target_day]
-                
-                filtered_active_items = []
-                for i in active_items:
-                    ch_info = None
-                    for k, v in db_breakdowns.items():
-                        if normalize_channel(k) == normalize_channel(i.channel):
-                            ch_info = v; break
-                    if ch_info and ch_info["status"] == "Complete Breakdown":
-                        i.missing_reason = "Channel Complete Breakdown"
-                        continue
-                    filtered_active_items.append(i)
-                active_items = filtered_active_items
-                
-                if not active_items: break 
-                    
-                best_pair = None
-                best_key = (float('inf'), float('inf'), float('inf'), float('inf'), float('-inf'))
-                
-                for item in active_items:
-                    for res in item.valid_resources:
-                        if res.blocked or res.ready_time >= res.max_time: continue
-                        
-                        rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
-                        
-                        if res.type == 'HT':
-                            if res.last_fam is None: setup = 0.5
-                            elif res.last_fam == item.disp and res.last_pc == item.pc: setup = 0.0
-                            else:
-                                prev_temp = get_tempering_temp(res.last_fam, res.last_pc, setup_chart_matrix)
-                                curr_temp = get_tempering_temp(item.disp, item.pc, setup_chart_matrix)
-                                setup = 1.5 if (prev_temp is not None and curr_temp is not None and prev_temp != curr_temp) else 0.5
-                        else:
-                            setup = 2.0
-                            if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
-                        
-                        start_time = max(res.ready_time + setup, item.ready_time)
-                        if start_time >= res.max_time: continue
-                        
-                        is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
-                        gap = max(0.0, item.ready_time - (res.ready_time + setup))
-                        
-                        if res.type == 'HT':
-                            weight = item.rates[res.id][1]
-                            req_time = (item.qty * weight) / rate_or_cap
-                        else:
-                            req_time = item.qty / rate_or_cap
-                            
-                        available_time_limit = min(res.max_time, res.bd_start if (res.has_bd and start_time < res.bd_start) else res.max_time)
-                        time_available = available_time_limit - start_time
-                        
-                        needs_split = 1 if req_time > time_available else 0
-                        key = (needs_split, start_time, item.day_idx, gap, -item.priority)
-                        
-                        if key < best_key:
-                            best_key = key
-                            best_pair = (res, item, start_time, setup, rate_or_cap, is_continuation)
-                            
-                if not best_pair: break
-                    
-                res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
-                chunk_qty = item.qty
-                
-                if res.type == 'HT':
-                    weight = item.rates[res.id][1]
-                    actual_time = (chunk_qty * weight) / rate_or_cap
-                else:
-                    actual_time = chunk_qty / rate_or_cap
-
-                if start_time < 24.0 and (start_time + actual_time) > 24.0:
-                    max_allowed_time = min(6.0, 30.0 - start_time)
-                    if actual_time > max_allowed_time:
-                        actual_time = max_allowed_time
-                        if res.type == 'HT': chunk_qty = (actual_time * rate_or_cap) / weight
-                        else: chunk_qty = actual_time * rate_or_cap
-                
-                if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                    actual_time += (res.bd_end - max(start_time, res.bd_start))
-
-                ch_info_active = None
-                for k, v in db_breakdowns.items():
-                    if normalize_channel(k) == normalize_channel(item.channel):
-                        ch_info_active = v; break
-                if ch_info_active and ch_info_active["status"] == "Available":
-                    c_st = ch_info_active.get('start_time', '')
-                    c_et = ch_info_active.get('end_time', '')
-                    if c_st and c_et:
-                        ch_bds = time_str_to_float(c_st)
-                        ch_bde = time_str_to_float(c_et)
-                        if start_time < ch_bde and (start_time + actual_time) > ch_bds:
-                            actual_time += (ch_bde - max(start_time, ch_bds))
-
-                if res.type == 'HT':
-                    res_ready_time = start_time + actual_time + 0.5
-                    out_time = start_time + actual_time + 3.5
-                    display_rate = f"{round((chunk_qty * weight), 1)} kg"
-                    if item.disp in monthly_data.get(month_str, {}): 
-                        monthly_data[month_str][item.disp]["produced"] += chunk_qty
-                else:
-                    res_ready_time = start_time + actual_time
-                    out_time = res_ready_time
-                    display_rate = rate_or_cap
-                    
-                is_same_item = (res.last_fam == item.disp and res.last_pc == item.pc)
-                res.ready_time = res_ready_time
-                res.last_fam = item.disp
-                res.last_pc = item.pc
-                
-                if res.ready_time >= 24.0: res.blocked = True
-                item.qty -= chunk_qty
-                
-                next_stage = get_next_required_stage(res.type, item.routing)
-                if next_stage: 
-                    new_item = WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing)
-                    init_item_resources(new_item, resources, furnace_map, weight_matrix, furnace_specs_local)
-                    work_items.append(new_item)
-
-                rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
-                can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
-                
-                day_label = " (WIP)" if item.day_idx == -1 else (" (D2)" if item.day_idx == 1 else " (D1)")
-
-                if can_merge:
-                    last_row = res.rows[-1]
-                    old_qty = int(float(last_row["qty"]))
-                    new_qty = old_qty + int(chunk_qty)
-                    last_row["qty"] = str(new_qty)
-                    old_start = last_row["timing"].split('-')[0]
-                    new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
-                    last_row["timing"] = f"{old_start}-{new_end}"
-                    if res.type != 'HT':
-                        last_row["std_box"] = str(math.ceil(new_qty / rpb)) if rpb > 0 else f"{int(new_qty)}(Q)"
-                else:
-                    timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
-                    is_terminal = (next_stage is None)
-                    if res.type == 'HT':
-                        res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
-                    else:
-                        display_val = str(math.ceil(chunk_qty / rpb)) if rpb > 0 else f"{int(chunk_qty)}(Q)"
-                        res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
-
-        end_state = { "machines": {}, "wip": {} }
-        for r in resources:
-            end_state["machines"][r.id] = {
-                "ready_time": r.ready_time - 24.0,
-                "last_fam": r.last_fam,
-                "last_pc": r.last_pc
-            }
-
-        pending_ht = {}
-        for item in work_items:
-            if item.qty <= 0.01: continue
-            key = (item.disp, item.pc)
-            if item.stage == get_first_required_stage(item.routing):
-                pending_ht[key] = pending_ht.get(key, 0.0) + item.qty
-
-        new_ht_balances = {}
-        for key, reqs in tracker_ht.items():
-            fs = reqs.get('first_stage')
-            if not fs: continue
-            p_ht = pending_ht.get(key, 0.0)
-            sched_ht = reqs['net_d1'] + reqs['net_d2']
-            completed_ht = max(0.0, sched_ht - p_ht)
-            completed_d2 = max(0.0, completed_ht - reqs['net_d1'])
-            new_bal = reqs['d2_satisfied'] + completed_d2 + reqs['leftover_bal']
-            if new_bal > 0: new_ht_balances[key] = new_bal
-                
-        for key, bal in ht_balances.items():
-            if key not in tracker_ht and bal > 0: new_ht_balances[key] = bal
-
-        for item in work_items:
-            if item.qty <= 0.01: continue
-            if item.stage == 'HT' and get_weight_for_part(item.disp, item.pc, weight_matrix) is None: assigned_reason = "Missing Weight"
-            elif any(r.type == item.stage for r in resources) and len(item.valid_resources) == 0: assigned_reason = "Machine Rate Not Available"
-            elif not item.routing or item.stage not in item.routing: assigned_reason = "Missing Routing"
-            elif not any(r.type == item.stage for r in resources): assigned_reason = "No Compatible Machine"
-            elif item.ready_time < 24.0 and len(item.valid_resources) > 0: assigned_reason = "Insufficient Capacity"
-            elif item.day_idx == -1: assigned_reason = "Waiting for Next Process"
-            elif item.ready_time >= 24.0: assigned_reason = "Scheduling Window Exhausted"
-            else: assigned_reason = "Not Scheduled"
-
-            if item.stage != get_first_required_stage(item.routing):
-                w_key = f"{item.disp}|{item.pc}"
-                if w_key not in end_state["wip"]: end_state["wip"][w_key] = {"channel": item.channel}
-                if item.stage not in end_state["wip"][w_key]: end_state["wip"][w_key][item.stage] = {"qty": 0, "rt": 0}
-                end_state["wip"][w_key][item.stage]["qty"] += item.qty
-                end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
-
-            rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
-            missed_val = f"{int(item.qty)}(Q)" if rpb <= 0 else str(math.ceil(item.qty / rpb))
-            day_label = "WIP" if item.day_idx == -1 else ("Day 2" if item.day_idx == 1 else "Day 1")
-            part_display = f"{item.disp} {item.pc} ({day_label})"
-            
-            unscheduled.append({
-                "stage": item.stage, 
-                "part": part_display, 
-                "missed_boxes": missed_val,
-                "status": assigned_reason, 
-                "reason": assigned_reason 
-            })
-
-        for key, bal in new_ht_balances.items():
-            if bal > 0:
-                w_key = f"{key[0]}|{key[1]}"
-                if w_key not in end_state["wip"]:
-                    channel = tracker_ht[key]['channel'] if key in tracker_ht else "UNKNOWN"
-                    end_state["wip"][w_key] = {"channel": channel}
-                end_state["wip"][w_key]["ht_balance"] = bal
-
-        final_face, final_od, furnaces_formatted = [], [], []
-        today_prod_map = {}
-        
-        for r in resources:
-            if r.type == 'FACE': final_face.append({"machine": r.id, "rows": r.rows})
-            elif r.type == 'OD': final_od.append({"machine": r.id, "rows": r.rows})
-            elif r.type == 'HT': furnaces_formatted.append({"furnace": r.id, "capacity": f"Total Cap: {int(r.capacity_info if isinstance(r.capacity_info, (int, float)) else 250)} kg/hr", "rows": r.rows})
-            
-            for row in r.rows:
-                if row.get("is_terminal"):
-                    part_str = row.get("part", "")
-                    qty = float(row.get("qty", 0)) if str(row.get("qty", 0)).replace('.','',1).isdigit() else 0
-                    disp = part_str.split("-")[0] if "-" in part_str else part_str.split(" ")[0]
-                    today_prod_map[disp] = today_prod_map.get(disp, 0) + qty
-
-        summary_list = []
-        for disp_name, data in monthly_data.get(month_str, {}).items():
-            ch = data.get("channel", "Unknown")
-            mo_req = data.get("total_req", 0)
-            mtd_prod = data.get("produced", 0)
-            d1_data = channel_demands_day1.get(disp_name, {})
-            d1_req = max(d1_data.get("IR", 0), d1_data.get("OR", 0))
-            t_prod = today_prod_map.get(disp_name, 0)
-            summary_list.append({
-                "type": disp_name, "channel": ch, "monthly_req": int(mo_req), "today_req": int(d1_req), "today_prod": int(t_prod),
-                "mtd_prod": int(mtd_prod), "balance": int(mo_req - mtd_prod),
-                "remaining_pct": round(((mo_req - mtd_prod) / mo_req * 100), 1) if mo_req > 0 else 0,
-                "difference": int(t_prod - d1_req)
-            })
-            
-        snapshot = {"monthly_data": monthly_data.get(month_str, {}), "plant_state": end_state}
-        save_setting("pending_state", snapshot)
-
-        return {
-            "status": "success", 
-            "debug_logs": debug_logs, 
-            "data": {
-                "face_grinding": final_face, 
-                "od_grinding": final_od, 
-                "heat_treatment": furnaces_formatted, 
-                "unscheduled": unscheduled, 
-                "summary": summary_list,
-                "state_snapshot": snapshot
-            }
-        }
-    except Exception as e:
-        import traceback
-        return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
-
-# ==========================================
-# FIXED REQUIRED DATA AVAILABILITY ENDPOINT
-# ==========================================
-@router.get("/api/data_availability")
-def get_data_availability(date: str):
-    """Safely computes data mappings utilizing the non-blocking Neon architecture lookups."""
-    ensure_caches_are_valid()
-    try:
-        req_date = datetime.strptime(date, "%Y-%m-%d")
-        availability_records = []
-        
-        # Load Zeroset definitions from cache safely without repetitive calls
-        for sheet_name, sheet_matrix in ZEROSET_CACHE["sheets"].items():
-            sheet_str_upper = str(sheet_name).strip().upper()
-            if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
-                ch_name = f"CH{sheet_str_upper.zfill(2)}"
-            else:
-                ch_name = sheet_str_upper
-                
-            r_idx, type_col_idx = None, None
-            for i in range(min(25, len(sheet_matrix))):
-                row_strs = [str(x).strip().upper() for x in sheet_matrix[i]]
-                if any(k in " ".join(row_strs) for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING', 'TOTAL']):
-                    r_idx = i
-                for j, val in enumerate(row_strs):
-                    if val in ["TYPE", "MF", "PART NO", "BRG NO"]:
-                        type_col_idx = j; break
-                if r_idx is not None and type_col_idx is not None: break
-
-            if r_idx is not None and type_col_idx is not None:
-                for idx in range(r_idx + 1, len(sheet_matrix)):
-                    try:
-                        row_vals = sheet_matrix[idx]
-                        if type_col_idx >= len(row_vals): continue
-                        raw_t = str(row_vals[type_col_idx]).strip()
-                        if not raw_t or is_invalid_part(raw_t): continue
-                        
-                        display_name = get_display_name(raw_t)
-                        
-                        # Process both configurations safely (IR & OR)
-                        for pc in ['IR', 'OR']:
-                            # Weight validation
-                            wt = MASTER_CACHE["weights"].get(f"{display_name}_{pc}")
-                            
-                            # Ring per box validation
-                            rpb_info = MASTER_CACHE["ring_per_box"].get(display_name, {}).get(pc, {})
-                            rpb = rpb_info.get("qty", 0.0)
-                            
-                            # Grinding compatibility maps tracking
-                            face_rate = 0.0
-                            od_rate = 0.0
-                            for m in MASTER_CACHE["machine_master"]:
-                                if m["type"] == "FACE":
-                                    face_rate = max(face_rate, m["capacity"].get(f"{display_name}_{pc}", 0.0))
-                                elif m["type"] == "OD":
-                                    od_rate = max(od_rate, m["capacity"].get(f"{display_name}_{pc}", 0.0))
-
-                            availability_records.append({
-                                "part_type": display_name,
-                                "part_code": pc,
-                                "channel": ch_name,
-                                "weight": f"{wt} kg" if wt else "Missing",
-                                "ring_per_box": int(rpb) if rpb > 0 else "Missing",
-                                "face_rate": f"{int(face_rate)}/hr" if face_rate > 0 else "Missing",
-                                "od_rate": f"{int(od_rate)}/hr" if od_rate > 0 else "Missing",
-                                "status": "Ready" if (wt and rpb > 0 and (face_rate > 0 or od_rate > 0)) else "Incomplete"
-                            })
-                    except Exception:
-                        continue # Resilient constraint: individual row calculation anomalies must never drop the process
-
-        return {"status": "success", "data": availability_records}
-    except Exception as e:
-        return {"status": "error", "message": f"Data Availability pipeline failure: {str(e)}", "data": []}
+            routing = get_routing_for_part(ch_norm, pcSorry, something went wrong. Please try your request again.

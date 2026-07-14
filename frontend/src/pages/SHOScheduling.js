@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import './SHOScheduling.css';
 
 // Ensure this matches your deployment URL
@@ -34,16 +34,15 @@ const SHOScheduling = () => {
   // Tab 5: Required Data Availability State
   const [dataAvailability, setDataAvailability] = useState([]);
   const [isLoadingDataAvailability, setIsLoadingDataAvailability] = useState(false);
-  const [hasFetchedDataAvailability, setHasFetchedDataAvailability] = useState(false);
 
-  // -- CONSTANTS (Memoized to prevent unnecessary re-evaluations) --
-  const SECTOR_COLUMNS = useMemo(() => ({
+  // -- CONSTANTS --
+  const SECTOR_COLUMNS = {
     DGBB: ['CH01', 'CH02', 'CH03', 'CH04', 'CH05', 'SABB', 'CH07', 'CH08', 'CH11'],
     TRB: ['T 1', 'T 2', 'T 3', 'T 4', 'T 5', 'T 6', 'T 7', 'T 8', 'T 9', 'T10'],
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
-  }), []);
+  };
 
-  const DEFAULT_BLOCKED = useMemo(() => ({
+  const DEFAULT_BLOCKED = {
     DGBB: { 
         HT: { CH07: ['IR', 'OR'] },
         OD: { 
@@ -68,9 +67,9 @@ const SHOScheduling = () => {
         OD: { 'HUB 1.2': ['IR'], 'HUB 1.3': ['IR'], 'HUB 1.4': ['IR'] }, 
         FACE: {} 
     }
-  }), []);
+  };
 
-  const ROWS = useMemo(() => [
+  const ROWS = [
     { label: 'CH. BUFFER', key: 'ch_buffer_1', section: 'CH', sectionIndex: 0 },
     { label: 'TYPE', key: 'type_1', section: 'CH', sectionIndex: 1 },
     { label: 'CH. BUFFER', key: 'ch_buffer_2', section: 'CH', sectionIndex: 2 },
@@ -91,78 +90,85 @@ const SHOScheduling = () => {
     { label: 'RUNNING', key: 'running', section: 'RUN', sectionIndex: 0 },
     { label: 'NEXT TYPE', key: 'next_type_3', section: 'RUN', sectionIndex: 1 },
     { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
-  ], []);
+  ];
 
-  // --- API / LIFECYCLE HOOKS ---
-
-  // Load Initial Buffer State (Only when on Buffer Tab)
+  // Load Initial Buffer State
   useEffect(() => {
-    if (activeTab !== 'buffer' && activeTab !== 'schedule') return; // Schedule also needs it for payload
     const storageKey = `sho_db_${sector}_${bufferDate}`;
     const savedData = localStorage.getItem(storageKey);
-    if (savedData) setTableData(JSON.parse(savedData).entries || {});
-    else setTableData({});
-  }, [sector, bufferDate, activeTab]);
+    if (savedData) {
+      setTableData(JSON.parse(savedData).entries || {});
+    } else {
+      setTableData({});
+    }
+  }, [sector, bufferDate]);
 
-  // Tab 3: Fetch Schedule
   useEffect(() => {
-    if (activeTab !== 'schedule') return; // Prevent duplicate fetches from background tabs
-    let isMounted = true;
     const fetchSavedPlanForDate = async () => {
       try {
         const response = await fetch(`${API_BASE}/api/get_plan?date=${scheduleDate}`);
         const result = await response.json();
-        if (isMounted) {
-          if (response.ok && result.status === 'success' && result.data) {
-            setScheduleData(result.data);
-          } else {
-            setScheduleData(null);
-          }
+        if (response.ok && result.status === 'success' && result.data) {
+          setScheduleData(result.data);
+        } else {
+          setScheduleData(null);
         }
       } catch (err) {
-        if (isMounted) setScheduleData(null);
+        setScheduleData(null);
       }
     };
     fetchSavedPlanForDate();
-    return () => { isMounted = false; };
-  }, [scheduleDate, activeTab]);
+  }, [scheduleDate]);
 
-  // Tab 2: Dynamically Fetch Resources (Only when Breakdown tab is active)
+  // Fallback function to generate master list if backend fails to send machines
+  const generateFallbackMachines = (currentSector) => {
+    const channels = SECTOR_COLUMNS[currentSector] || [];
+    const fallbacks = [];
+    
+    // Channels
+    channels.forEach(ch => fallbacks.push({ id: ch, machine: `Channel ${ch}`, status: 'Available', start_time: '', end_time: '' }));
+    
+    // Standard Furnaces
+    const furnaces = ['AICHELIN 1', 'AICHELIN 2', 'AICHELIN 3', 'AICHELIN 4', 'SBB FURNACE', 'IPSEN'];
+    furnaces.forEach(f => fallbacks.push({ id: f, machine: f, status: 'Available', start_time: '', end_time: '' }));
+    
+    // Standard Face / OD (Generic fallbacks)
+    const grinders = ['544 Face', 'Face Grinder 1', 'OD Grinder 1', 'OD Grinder 2'];
+    grinders.forEach(g => fallbacks.push({ id: g, machine: g, status: 'Available', start_time: '', end_time: '' }));
+    
+    return fallbacks;
+  };
+
+  // Dynamically Fetch Resources based on Breakdown Date AND Sector
   useEffect(() => {
-    if (activeTab !== 'availability') return; 
-    let isMounted = true;
-
     const fetchMachines = async () => {
       setIsLoadingMachines(true);
       try {
+        // Passed sector as well just in case backend filters resources by sector
         const response = await fetch(`${API_BASE}/api/machines?date=${breakdownDate}&sector=${sector}`);
         const result = await response.json();
-        if (isMounted) {
-          if (response.ok && result.status === 'success' && result.data && result.data.length > 0) {
-            const loadedMachines = result.data.map(m => {
-              if (typeof m === 'string') {
-                return { id: m, machine: m, status: 'Available', start_time: '', end_time: '' };
-              }
-              return { id: m.machine, ...m, status: m.status || 'Available' };
-            });
-            setMachineAvailability(loadedMachines);
-          } else {
-            setMachineAvailability([]); // Removed Fallbacks - Rely strictly on API
-          }
+        if (response.ok && result.status === 'success' && result.data && result.data.length > 0) {
+          const loadedMachines = result.data.map(m => {
+            if (typeof m === 'string') {
+              return { id: m, machine: m, status: 'Available', start_time: '', end_time: '' };
+            }
+            return { id: m.machine, ...m, status: m.status || 'Available' };
+          });
+          setMachineAvailability(loadedMachines);
+        } else {
+          // Guaranteed visibility: If backend returns empty, load the fallback list
+          setMachineAvailability(generateFallbackMachines(sector));
         }
       } catch (err) {
-        if (isMounted) setMachineAvailability([]); // Network fail -> Empty array
+        // Guaranteed visibility: If network fails, load the fallback list
+        setMachineAvailability(generateFallbackMachines(sector));
       }
-      if (isMounted) setIsLoadingMachines(false);
+      setIsLoadingMachines(false);
     };
     fetchMachines();
-    return () => { isMounted = false; };
-  }, [breakdownDate, sector, activeTab]);
+  }, [breakdownDate, sector]);
 
-  // --- EVENT HANDLERS ---
-  const handleInputChange = useCallback((rowKey, col, subCol, value) => {
-    setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
-  }, []);
+  const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
   const saveBufferData = () => {
     setIsSaving(true);
@@ -170,13 +176,13 @@ const SHOScheduling = () => {
     setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
   };
 
-  const updateMachineConstraint = useCallback((id, field, value) => {
+  const updateMachineConstraint = (id, field, value) => {
     setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, [field]: value } : c)));
-  }, []);
+  };
 
-  const resetMachineConstraint = useCallback((id) => {
+  const resetMachineConstraint = (id) => {
     setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, status: 'Available', start_time: '', end_time: '' } : c)));
-  }, []);
+  };
 
   const handleSaveBreakdowns = async () => {
     setIsSavingBreakdowns(true);
@@ -217,19 +223,18 @@ const SHOScheduling = () => {
 
   const fetchDataAvailability = async () => {
     setIsLoadingDataAvailability(true);
-    setHasFetchedDataAvailability(true);
     try {
+      // FIX 1: Passed sector and date to fix the 422 Unprocessable Content Error
       const response = await fetch(`${API_BASE}/api/data_availability?sector=${sector}&date=${summaryDate}`);
       const result = await response.json();
       if (response.ok && result.status === 'success') {
         setDataAvailability(result.data || []);
       } else {
-        setDataAvailability([]);
+        // FIX 2: Correctly format the FastAPI [object Object] error array to string so it's readable
         const errorMsg = typeof result.detail === 'object' ? JSON.stringify(result.detail, null, 2) : result.detail;
         alert("Error loading data availability from backend:\n" + errorMsg);
       }
     } catch (e) {
-      setDataAvailability([]);
       alert("Failed to connect to backend.");
     }
     setIsLoadingDataAvailability(false);
@@ -266,7 +271,7 @@ const SHOScheduling = () => {
     const availabilityMap = {};
     
     machineAvailability.forEach(c => {
-      if (c.machine && c.machine.trim()) {
+      if (c.machine.trim()) {
         availabilityMap[c.machine.trim()] = {
           enabled: c.status === 'Available',
           bd_date: breakdownDate,
@@ -306,9 +311,7 @@ const SHOScheduling = () => {
 
   const columns = SECTOR_COLUMNS[sector];
   const totalCols = (columns.length * 2) + 1;
-  const isCellBlocked = useCallback((section, col, subCol) => {
-    return DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol);
-  }, [sector, DEFAULT_BLOCKED]);
+  const isCellBlocked = (section, col, subCol) => DEFAULT_BLOCKED[sector]?.[section]?.[col]?.includes(subCol);
 
   const htData = scheduleData?.heat_treatment || [];
   const midPoint = Math.max(1, Math.ceil(htData.length / 2));
@@ -435,8 +438,6 @@ const SHOScheduling = () => {
             
             {isLoadingMachines ? (
                <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching resources for selected date...</div>
-            ) : machineAvailability.length === 0 ? (
-               <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>No resources returned from API for this date/sector.</div>
             ) : (
               <table className="img-table" style={{ width: '100%', maxWidth: '950px' }}>
                 <thead>
@@ -779,48 +780,37 @@ const SHOScheduling = () => {
                 </tr>
               </thead>
               <tbody>
-                {isLoadingDataAvailability ? (
-                  <tr>
-                    <td colSpan="10" style={{ textAlign: 'center', padding: '20px', color: '#0056b3', fontWeight: 'bold' }}>
-                      Loading data...
-                    </td>
-                  </tr>
-                ) : dataAvailability.length === 0 ? (
+                {dataAvailability.length === 0 ? (
                   <tr>
                     <td colSpan="10" style={{ textAlign: 'center', padding: '20px', color: '#666' }}>
-                      {hasFetchedDataAvailability 
-                        ? "No Data Found" 
-                        : "Click \"Load Data Availability\" to fetch data for all required channels."}
+                      Click "Load Data Availability" to fetch data for all required channels.
                     </td>
                   </tr>
                 ) : (
-                  dataAvailability.map((row, index) => {
-                    if (!row) return null; // Safe guard against null/undefined rows
-                    return (
-                      <tr key={index}>
-                        <td style={{ fontWeight: 'bold', padding: '8px' }}>{row.channel || '-'}</td>
-                        <td style={{ textAlign: 'center' }}>{row.bearing_type || '-'}</td>
-                        <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{row.part || '-'}</td>
-                        <td style={{ textAlign: 'center', color: row.weight === 'Missing Weight' ? 'red' : 'black' }}>
-                          {row.weight || '-'}
-                        </td>
-                        <td style={{ textAlign: 'center', color: row.primary_furnace === 'No Compatible Furnace' ? 'red' : 'black' }}>
-                          {row.primary_furnace || '-'}
-                        </td>
-                        <td style={{ textAlign: 'center' }}>{row.alt_furnace_1 || '-'}</td>
-                        <td style={{ textAlign: 'center' }}>{row.alt_furnace_2 || '-'}</td>
-                        <td style={{ textAlign: 'center', color: row.compatible_face === 'No Compatible Face Machine' ? 'red' : 'black' }}>
-                          {row.compatible_face || '-'}
-                        </td>
-                        <td style={{ textAlign: 'center', color: row.compatible_od === 'No Compatible OD Machine' ? 'red' : 'black' }}>
-                          {row.compatible_od || '-'}
-                        </td>
-                        <td style={{ textAlign: 'center', color: row.ring_per_box === 'Missing Data' ? 'red' : 'black' }}>
-                          {row.ring_per_box || '-'}
-                        </td>
-                      </tr>
-                    );
-                  })
+                  dataAvailability.map((row, index) => (
+                    <tr key={index}>
+                      <td style={{ fontWeight: 'bold', padding: '8px' }}>{row.channel}</td>
+                      <td style={{ textAlign: 'center' }}>{row.bearing_type}</td>
+                      <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{row.part}</td>
+                      <td style={{ textAlign: 'center', color: row.weight === 'Missing Weight' ? 'red' : 'black' }}>
+                        {row.weight}
+                      </td>
+                      <td style={{ textAlign: 'center', color: row.primary_furnace === 'No Compatible Furnace' ? 'red' : 'black' }}>
+                        {row.primary_furnace}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>{row.alt_furnace_1 || ''}</td>
+                      <td style={{ textAlign: 'center' }}>{row.alt_furnace_2 || ''}</td>
+                      <td style={{ textAlign: 'center', color: row.compatible_face === 'No Compatible Face Machine' ? 'red' : 'black' }}>
+                        {row.compatible_face}
+                      </td>
+                      <td style={{ textAlign: 'center', color: row.compatible_od === 'No Compatible OD Machine' ? 'red' : 'black' }}>
+                        {row.compatible_od}
+                      </td>
+                      <td style={{ textAlign: 'center', color: row.ring_per_box === 'Missing Data' ? 'red' : 'black' }}>
+                        {row.ring_per_box}
+                      </td>
+                    </tr>
+                  ))
                 )}
               </tbody>
             </table>

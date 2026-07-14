@@ -7,7 +7,7 @@ import io
 import json
 import time
 import sqlite3
-import pickle
+import gc
 from datetime import datetime, timedelta
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -19,14 +19,7 @@ ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 
-EXCEL_CACHE = {}
-CACHE_TTL = 3600  # 1 hour cache
-
-PARSED_MASTER_DATA = {
-    "box_matrix": ({}, 0),  
-    "production": ({}, {}, {}, {}, 0) 
-}
-
+# Cache tables limited to the lifecycle of a single request
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
@@ -162,6 +155,34 @@ def save_plan(payload: SavePlanRequest):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+# ==========================================
+# MEMORY-EFFICIENT SEQUENTIAL DATA LOADER
+# ==========================================
+def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
+    """Downloads and processes an Excel file sequentially, yielding one sheet at a time, to stay under memory limits."""
+    if not url or url.strip() == "": 
+        return
+    try:
+        resp = requests.get(url, timeout=60)
+        if resp.status_code == 200:
+            with io.BytesIO(resp.content) as file_buffer:
+                xls = pd.ExcelFile(file_buffer, engine='openpyxl')
+                target_sheets = sheet_names_to_process if sheet_names_to_process else xls.sheet_names
+                
+                for sheet in target_sheets:
+                    if sheet in xls.sheet_names:
+                        df = pd.read_excel(xls, sheet_name=sheet, header=None, usecols=usecols)
+                        yield sheet, df
+                        
+                        # Immediately release memory for the dataframe
+                        del df
+                        gc.collect()
+                del xls
+        del resp
+        gc.collect()
+    except Exception as e:
+        print(f"Error loading sequentially from {url}: {e}")
+
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
@@ -292,43 +313,6 @@ def is_target_date(val, target_date):
             return month_str in v_str
         return True
     return False
-
-def get_cached_excel_sheets(url, file_label="Unknown"):
-    logs = []
-    if not url or url.strip() == "": return None, logs
-    now = time.time()
-    
-    if url in EXCEL_CACHE:
-        cache_time, df_dict = EXCEL_CACHE[url]
-        if now - cache_time < CACHE_TTL:
-            return df_dict, [f"Loaded {file_label} from Memory Cache."]
-            
-    cache_file = f"cache_{file_label}.pkl"
-    if os.path.exists(cache_file):
-        mtime = os.path.getmtime(cache_file)
-        if now - mtime < CACHE_TTL:
-            try:
-                with open(cache_file, "rb") as f:
-                    df_dict = pickle.load(f)
-                EXCEL_CACHE[url] = (mtime, df_dict)
-                return df_dict, [f"Loaded {file_label} from Disk Cache."]
-            except Exception:
-                pass 
-
-    try:
-        resp = requests.get(url, timeout=60)
-        if resp.status_code != 200: 
-            raise Exception(f"HTTP {resp.status_code}")
-        content = io.BytesIO(resp.content)
-        df_dict = pd.read_excel(content, sheet_name=None, header=None)
-        
-        with open(cache_file, "wb") as f:
-            pickle.dump(df_dict, f)
-            
-        EXCEL_CACHE[url] = (now, df_dict)
-        return df_dict, [f"Downloaded {file_label} from Network."]
-    except Exception as e:
-        raise Exception(f"Failed to load {file_label} Excel sheet: {str(e)}")
 
 def get_rate_for_part(display_name, p_code, rates, res_id=""):
     key = (display_name, p_code, res_id)
@@ -490,6 +474,11 @@ def generate_schedule(payload: ScheduleRequest):
     debug_logs = []
     unscheduled = []
     
+    RATE_CACHE.clear()
+    WEIGHT_CACHE.clear()
+    FURNACE_CACHE.clear()
+    gc.collect()
+    
     try:
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date  
@@ -503,165 +492,170 @@ def generate_schedule(payload: ScheduleRequest):
         channel_demands_day1 = {} 
         channel_demands_day2 = {}
         
-        sheets_zero, logs1 = get_cached_excel_sheets(ZEROSET_URL, "ZEROSET")
-        debug_logs.extend(logs1)
-        
-        if sheets_zero:
-            for sheet_name, df_zero in sheets_zero.items():
-                sheet_str_upper = str(sheet_name).strip().upper()
-                if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
-                    ch_name = f"CH{sheet_str_upper.zfill(2)}"
-                elif sheet_str_upper == "SABB": ch_name = "SABB"
-                elif sheet_str_upper.startswith("T ") or sheet_str_upper.startswith("T1") or sheet_str_upper.startswith("T2") or sheet_str_upper.startswith("T3") or sheet_str_upper.startswith("T4") or sheet_str_upper.startswith("T5") or sheet_str_upper.startswith("T6") or sheet_str_upper.startswith("T7") or sheet_str_upper.startswith("T8") or sheet_str_upper.startswith("T9"):
-                    ch_name = sheet_str_upper
-                elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
-                else: ch_name = sheet_str_upper
+        # 1. LOAD ZEROSET SEQUENTIALLY
+        for sheet_name, df_zero in process_excel_sequentially(ZEROSET_URL):
+            sheet_str_upper = str(sheet_name).strip().upper()
+            if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
+                ch_name = f"CH{sheet_str_upper.zfill(2)}"
+            elif sheet_str_upper == "SABB": ch_name = "SABB"
+            elif sheet_str_upper.startswith("T ") or sheet_str_upper.startswith("T1") or sheet_str_upper.startswith("T2") or sheet_str_upper.startswith("T3") or sheet_str_upper.startswith("T4") or sheet_str_upper.startswith("T5") or sheet_str_upper.startswith("T6") or sheet_str_upper.startswith("T7") or sheet_str_upper.startswith("T8") or sheet_str_upper.startswith("T9"):
+                ch_name = sheet_str_upper
+            elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
+            else: ch_name = sheet_str_upper
 
-                ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
-                
-                r_idx, type_col_idx, mv_col_idx = None, None, None
-                c1_col, c2_col = None, None
-                monthly_cols = []
-                
-                for i in range(min(25, len(df_zero))):
-                    row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
-                    row_joined = " ".join(row_strs)
+            ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
+            
+            r_idx, type_col_idx, mv_col_idx = None, None, None
+            c1_col, c2_col = None, None
+            monthly_cols = []
+            
+            for i in range(min(25, len(df_zero))):
+                row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
+                row_joined = " ".join(row_strs)
+                if type_col_idx is None:
+                    for j, val in enumerate(row_strs):
+                        if val == "TYPE" or "TYPE " in val or " TYPE" in val:
+                            type_col_idx = j; break
                     if type_col_idx is None:
                         for j, val in enumerate(row_strs):
-                            if val == "TYPE" or "TYPE " in val or " TYPE" in val:
-                                type_col_idx = j; break
-                        if type_col_idx is None:
-                            for j, val in enumerate(row_strs):
-                                if val in ["MF", "PART NO", "BRG NO"]: type_col_idx = j; break
-                    if mv_col_idx is None:
-                        for j, val in enumerate(row_strs):
-                            if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
-                            
-                    if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
-                        r_idx = i
-                        for j, val in enumerate(df_zero.iloc[i].values):
-                            if is_target_date(val, day_1): c1_col = j
-                            if is_target_date(val, day_2): c2_col = j
-                            s_val = str(val).strip()
-                            if s_val.isdigit() and 1 <= int(s_val) <= 31: monthly_cols.append(j)
-                    if r_idx is not None and type_col_idx is not None and c1_col is not None: break
+                            if val in ["MF", "PART NO", "BRG NO"]: type_col_idx = j; break
+                if mv_col_idx is None:
+                    for j, val in enumerate(row_strs):
+                        if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
+                        
+                if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
+                    r_idx = i
+                    for j, val in enumerate(df_zero.iloc[i].values):
+                        if is_target_date(val, day_1): c1_col = j
+                        if is_target_date(val, day_2): c2_col = j
+                        s_val = str(val).strip()
+                        if s_val.isdigit() and 1 <= int(s_val) <= 31: monthly_cols.append(j)
+                if r_idx is not None and type_col_idx is not None and c1_col is not None: break
 
-                col_to_use = type_col_idx if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "SABB"] else mv_col_idx
-                if col_to_use is None: col_to_use = mv_col_idx if mv_col_idx is not None else type_col_idx
+            col_to_use = type_col_idx if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "SABB"] else mv_col_idx
+            if col_to_use is None: col_to_use = mv_col_idx if mv_col_idx is not None else type_col_idx
 
-                if r_idx is not None and type_col_idx is not None:
-                    last_mf = ""
-                    for idx in range(r_idx + 1, len(df_zero)):
-                        mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
-                        if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
-                        raw_t = str(df_zero.iloc[idx, col_to_use]).strip() if col_to_use is not None else ""
-                        if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
-                        if is_invalid_part(raw_t): continue
+            if r_idx is not None and type_col_idx is not None:
+                last_mf = ""
+                for idx in range(r_idx + 1, len(df_zero)):
+                    mf_val = str(df_zero.iloc[idx, type_col_idx]).strip() if type_col_idx is not None else ""
+                    if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
+                    raw_t = str(df_zero.iloc[idx, col_to_use]).strip() if col_to_use is not None else ""
+                    if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
+                    if is_invalid_part(raw_t): continue
+                    
+                    display_name = get_display_name(raw_t)
+                    if display_name not in monthly_data[month_str]:
+                        monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": ch_name}
+                    
+                    row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
+                    if row_monthly_sum > 0: monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
+                    
+                    val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
+                    val2 = safe_float(df_zero.iloc[idx, c2_col]) if c2_col is not None else 0.0
+                    
+                    r1 = val1 * 1000 if val1 > 0 else 0.0
+                    r2 = val2 * 1000 if val2 > 0 else 0.0
+                    
+                    if r1 > 0:
+                        if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
+                        channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
+                        channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
                         
-                        display_name = get_display_name(raw_t)
-                        if display_name not in monthly_data[month_str]:
-                            monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": ch_name}
-                        
-                        row_monthly_sum = sum([safe_float(df_zero.iloc[idx, col]) for col in monthly_cols if col < len(df_zero.columns)])
-                        if row_monthly_sum > 0: monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
-                        
-                        val1 = safe_float(df_zero.iloc[idx, c1_col]) if c1_col is not None else 0.0
-                        val2 = safe_float(df_zero.iloc[idx, c2_col]) if c2_col is not None else 0.0
-                        
-                        r1 = val1 * 1000 if val1 > 0 else 0.0
-                        r2 = val2 * 1000 if val2 > 0 else 0.0
-                        
-                        if r1 > 0:
-                            if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
-                            channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
-                            channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
-                            
-                        if r2 > 0:
-                            if display_name not in channel_demands_day2: channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
-                            channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
-                            channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
+                    if r2 > 0:
+                        if display_name not in channel_demands_day2: channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
+                        channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
+                        channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
 
-        del sheets_zero
-
+        # 2. LOAD BOX RING MATRIX SEQUENTIALLY
         box_matrix = {}
-        sheets_box, logs2 = get_cached_excel_sheets(BOX_RING_DATA_URL, "BOX_MATRIX")
-        debug_logs.extend(logs2)
-        box_cache_ts = EXCEL_CACHE.get(BOX_RING_DATA_URL, (0, None))[0]
-        
-        if PARSED_MASTER_DATA["box_matrix"][1] == box_cache_ts:
-            box_matrix = PARSED_MASTER_DATA["box_matrix"][0]
-        elif sheets_box:
-            for s_name, df_b in sheets_box.items():
-                s_name_up = str(s_name).upper().strip()
-                if 'RING' in s_name_up and 'BOX' in s_name_up:
-                    df_box = df_b.fillna('')
-                    for idx in range(1, len(df_box)):
-                        row_vals = list(df_box.iloc[idx])
-                        for i in range(0, len(row_vals) - 2, 3):
-                            fam_raw = str(row_vals[i]).strip()
-                            if not fam_raw or is_invalid_part(fam_raw): continue
-                            fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
-                            for f_raw in fams_to_process:
-                                for p_c in ['IR', 'OR']:
-                                    clean_keys = get_lookup_variants(f_raw, p_c)
-                                    for ck in clean_keys:
-                                        or_qty = safe_float(row_vals[i+1])
-                                        ir_qty = safe_float(row_vals[i+2])
-                                        if ck not in box_matrix: box_matrix[ck] = {}
-                                        if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': s_name}
-                                        if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': s_name}
-                elif 'BOX' in s_name_up and 'DAY' in s_name_up:
-                    df_fb = df_b.fillna('')
-                    type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
-                    for r_idx in range(min(20, len(df_fb))):
-                        norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_fb.iloc[r_idx]]
-                        t_c = next((j for j, h in enumerate(norm_strs) if 'TYPE' in h or 'BEARING' in h), -1)
-                        i_c = next((j for j, h in enumerate(norm_strs) if 'IR' in h and 'BOX' in h), -1)
-                        o_c = next((j for j, h in enumerate(norm_strs) if 'OR' in h and 'BOX' in h), -1)
-                        s_c = next((j for j, h in enumerate(norm_strs) if 'RING' in h and 'BOX' in h and 'IR' not in h and 'OR' not in h), -1)
-                        if t_c != -1 and (i_c != -1 or o_c != -1 or s_c != -1):
-                            type_col, ir_col, or_col, single_rpb_col = t_c, i_c, o_c, s_c; break
-                    if type_col != -1:
-                        for idx in range(r_idx + 1, len(df_fb)):
-                            row_vals = list(df_fb.iloc[idx])
-                            raw_t = str(row_vals[type_col]).strip()
-                            if not raw_t or is_invalid_part(raw_t): continue
+        for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
+            s_name_up = str(s_name).upper().strip()
+            df_box = df_b.fillna('')
+            if 'RING' in s_name_up and 'BOX' in s_name_up:
+                for idx in range(1, len(df_box)):
+                    row_vals = list(df_box.iloc[idx])
+                    for i in range(0, len(row_vals) - 2, 3):
+                        fam_raw = str(row_vals[i]).strip()
+                        if not fam_raw or is_invalid_part(fam_raw): continue
+                        fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
+                        for f_raw in fams_to_process:
                             for p_c in ['IR', 'OR']:
-                                clean_keys = get_lookup_variants(raw_t, p_c)
+                                clean_keys = get_lookup_variants(f_raw, p_c)
+                                for ck in clean_keys:
+                                    or_qty = safe_float(row_vals[i+1])
+                                    ir_qty = safe_float(row_vals[i+2])
+                                    if ck not in box_matrix: box_matrix[ck] = {}
+                                    if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': s_name}
+                                    if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': s_name}
+            elif 'BOX' in s_name_up and 'DAY' in s_name_up:
+                # 1. Regex parsing logic for specific format: "1838001 (10/26) 12 K"
+                for r_idx in range(len(df_box)):
+                    for c_idx in range(len(df_box.columns)):
+                        cell_val = str(df_box.iloc[r_idx, c_idx]).strip()
+                        match = re.search(r'([A-Z0-9/]+)\s*\(\s*(\d+)\s*/\s*(\d+)\s*\)\s*(\d+)\s*K?', cell_val, re.IGNORECASE)
+                        if match:
+                            part_type = match.group(1).strip()
+                            ir_boxes = int(match.group(2))
+                            or_boxes = int(match.group(3))
+                            ref_qty = int(match.group(4)) * 1000 if 'K' in cell_val.upper() else int(match.group(4))
+                            
+                            ir_rpb = ref_qty / ir_boxes if ir_boxes > 0 else 0
+                            or_rpb = ref_qty / or_boxes if or_boxes > 0 else 0
+                            
+                            for p_c in ['IR', 'OR']:
+                                clean_keys = get_lookup_variants(part_type, p_c)
                                 for ck in clean_keys:
                                     if ck not in box_matrix: box_matrix[ck] = {}
                                     if p_c == 'IR' and ('IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0):
-                                        fq = safe_float(row_vals[ir_col]) if ir_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
-                                        if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': s_name}
+                                        if ir_rpb > 0: box_matrix[ck]['IR'] = {'qty': ir_rpb, 'source': s_name}
                                     if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
-                                        fq = safe_float(row_vals[or_col]) if or_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
-                                        if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': s_name}
-            PARSED_MASTER_DATA["box_matrix"] = (box_matrix, box_cache_ts)
-        del sheets_box
+                                        if or_rpb > 0: box_matrix[ck]['OR'] = {'qty': or_rpb, 'source': s_name}
 
-        sheets_prod, logs3 = get_cached_excel_sheets(SHO_PRODUCTION_URL, "SHO_PRODUCTION")
-        debug_logs.extend(logs3)
-        prod_cache_ts = EXCEL_CACHE.get(SHO_PRODUCTION_URL, (0, None))[0]
+                # 2. Existing standard tabular logic for safety
+                type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
+                for r_idx in range(min(20, len(df_box))):
+                    norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_box.iloc[r_idx]]
+                    t_c = next((j for j, h in enumerate(norm_strs) if 'TYPE' in h or 'BEARING' in h), -1)
+                    i_c = next((j for j, h in enumerate(norm_strs) if 'IR' in h and 'BOX' in h), -1)
+                    o_c = next((j for j, h in enumerate(norm_strs) if 'OR' in h and 'BOX' in h), -1)
+                    s_c = next((j for j, h in enumerate(norm_strs) if 'RING' in h and 'BOX' in h and 'IR' not in h and 'OR' not in h), -1)
+                    if t_c != -1 and (i_c != -1 or o_c != -1 or s_c != -1):
+                        type_col, ir_col, or_col, single_rpb_col = t_c, i_c, o_c, s_c; break
+                if type_col != -1:
+                    for idx in range(r_idx + 1, len(df_box)):
+                        row_vals = list(df_box.iloc[idx])
+                        raw_t = str(row_vals[type_col]).strip()
+                        if not raw_t or is_invalid_part(raw_t): continue
+                        for p_c in ['IR', 'OR']:
+                            clean_keys = get_lookup_variants(raw_t, p_c)
+                            for ck in clean_keys:
+                                if ck not in box_matrix: box_matrix[ck] = {}
+                                if p_c == 'IR' and ('IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0):
+                                    fq = safe_float(row_vals[ir_col]) if ir_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
+                                    if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': s_name}
+                                if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
+                                    fq = safe_float(row_vals[or_col]) if or_col != -1 else (safe_float(row_vals[single_rpb_col]) if single_rpb_col != -1 else 0.0)
+                                    if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': s_name}
 
-        if PARSED_MASTER_DATA["production"][4] == prod_cache_ts:
-            weight_matrix, furnace_map, machines_data, furnace_specs_local, _ = PARSED_MASTER_DATA["production"]
-        elif sheets_prod:
-            weight_matrix = {}
-            furnace_map = {}
-            machines_data = {'FACE': {}, 'OD': {}}
-            furnace_specs_local = DEFAULT_FURNACES.copy() 
-
-            for sheet_name, df_m in sheets_prod.items():
-                if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
+        # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
+        weight_matrix = {}
+        furnace_map = {}
+        machines_data = {'FACE': {}, 'OD': {}}
+        furnace_specs_local = DEFAULT_FURNACES.copy()
+        
+        for sheet_name, df_m in process_excel_sequentially(SHO_PRODUCTION_URL):
+            if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
+                if 'FLEX' not in str(sheet_name).upper():
                     for r in range(len(df_m)):
                         row = df_m.iloc[r].values
                         f_name = str(row[0]).strip().upper() if len(row) > 0 else ""
                         cap = safe_float(row[1]) if len(row) > 1 else 0.0
                         if f_name and cap > 0 and ('FURNACE' in f_name or 'AICHELIN' in f_name or 'UNITHERM' in f_name):
                             furnace_specs_local[f_name] = cap
-                            
-            if 'WEIGHTS' in sheets_prod:
-                df_w = sheets_prod['WEIGHTS'].fillna('')
+            
+            if sheet_name == 'WEIGHTS':
+                df_w = df_m.fillna('')
                 header_idx = -1
                 for r_idx in range(min(10, len(df_w))):
                     h_row = [str(x).strip().upper() for x in df_w.iloc[r_idx].values]
@@ -687,9 +681,8 @@ def generate_schedule(payload: ScheduleRequest):
                                     clean_keys = get_lookup_variants(raw_fam, part_code)
                                     for ck in clean_keys: weight_matrix[f"{ck}_{part_code}"] = wt_val
 
-            fur_sheet_key = next((k for k in sheets_prod.keys() if 'FURNACE' in str(k).upper() and 'FLEX' in str(k).upper()), None)
-            if fur_sheet_key:
-                df_f = sheets_prod[fur_sheet_key]
+            if 'FURNACE' in str(sheet_name).upper() and 'FLEX' in str(sheet_name).upper():
+                df_f = df_m
                 df_f.columns = [str(x).strip().upper() for x in df_f.iloc[0]]
                 for idx, r in df_f.iloc[1:].iterrows():
                     comp_level = str(r.get('COMP LEVEL 1', r.iloc[0] if len(r) > 0 else '')).strip()
@@ -708,9 +701,8 @@ def generate_schedule(payload: ScheduleRequest):
                             if matched_fn and matched_fn not in valid_furnaces: valid_furnaces.append(matched_fn)
                         if valid_furnaces: 
                             for ck in clean_keys: furnace_map[f"{ck}_{p_code}"] = valid_furnaces
-            
-            for sheet_name, df_m in sheets_prod.items():
-                if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']: continue
+
+            if sheet_name not in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']:
                 str_matrix = df_m.fillna('').astype(str).values
                 current_m_num = None
                 current_m_type = "UNKNOWN"
@@ -766,9 +758,6 @@ def generate_schedule(payload: ScheduleRequest):
                                         
                                     if rate_rings > 0:
                                         for ck in set(clean_keys): machines_data[current_m_type][current_m_num]['rates'][f"{ck}_{pc}"] = rate_rings
-                                            
-            PARSED_MASTER_DATA["production"] = (weight_matrix, furnace_map, machines_data, furnace_specs_local, prod_cache_ts)
-        del sheets_prod
 
         current_state = get_previous_day_state(payload.date)
         work_items = []
@@ -931,7 +920,9 @@ def generate_schedule(payload: ScheduleRequest):
                     break 
                     
                 best_pair = None
-                best_key = (float('inf'), float('inf'), float('inf'), float('-inf'))
+                # Updated Key: (Needs Split, Start Time, Day Index, Gap, -Priority)
+                # This ensures zero-split compatibility is processed before partial batch splitting
+                best_key = (float('inf'), float('inf'), float('inf'), float('inf'), float('-inf'))
                 
                 for item in active_items:
                     for res in item.valid_resources:
@@ -947,7 +938,20 @@ def generate_schedule(payload: ScheduleRequest):
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         gap = max(0.0, item.ready_time - (res.ready_time + setup))
                         
-                        key = (start_time, item.day_idx, gap, -item.priority)
+                        # Determine if this machine can finish the ENTIRE quantity before constraint ends
+                        if res.type == 'HT':
+                            weight = item.rates[res.id][1]
+                            req_time = (item.qty * weight) / rate_or_cap
+                        else:
+                            req_time = item.qty / rate_or_cap
+                            
+                        available_time_limit = min(res.max_time, res.bd_start if (res.has_bd and start_time < res.bd_start) else res.max_time)
+                        time_available = available_time_limit - start_time
+                        
+                        # Set penalty boolean if quantity must be split due to time constraint
+                        needs_split = 1 if req_time > time_available else 0
+                        
+                        key = (needs_split, start_time, item.day_idx, gap, -item.priority)
                         
                         if key < best_key:
                             best_key = key
@@ -1023,15 +1027,19 @@ def generate_schedule(payload: ScheduleRequest):
                     new_end = format_time(out_time if res.type == 'HT' else res_ready_time)
                     last_row["timing"] = f"{old_start}-{new_end}"
                     
-                    display_val = f"{int(new_qty)} Rings ({math.ceil(new_qty / rpb)} Boxes)" if rpb > 0 else f"{int(new_qty)} Rings"
-                    if res.type != 'HT': last_row["std_box"] = display_val
+                    if res.type != 'HT':
+                        # Display Box Quantity strictly if Rings/Box is available, otherwise Ring QTY(Q)
+                        last_row["std_box"] = str(math.ceil(new_qty / rpb)) if rpb > 0 else f"{int(new_qty)}(Q)"
                 else:
-                    display_val = f"{int(chunk_qty)} Rings ({math.ceil(chunk_qty / rpb)} Boxes)" if rpb > 0 else f"{int(chunk_qty)} Rings"
                     timing_display = f"{format_time(start_time)}-{format_time(out_time if res.type == 'HT' else res_ready_time)}"
                     is_terminal = (next_stage is None)
                     
-                    if res.type == 'HT': res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
-                    else: res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
+                    if res.type == 'HT':
+                        res.rows.append({"part": f"{item.disp}-{item.pc}{day_label}", "qty": str(int(chunk_qty)), "cha": item.channel, "rate": display_rate, "timing": timing_display, "alert": False, "is_terminal": is_terminal})
+                    else:
+                        # Display Box Quantity strictly if Rings/Box is available, otherwise Ring QTY(Q)
+                        display_val = str(math.ceil(chunk_qty / rpb)) if rpb > 0 else f"{int(chunk_qty)}(Q)"
+                        res.rows.append({"part": f"{item.disp} {item.pc}{day_label}", "qty": str(int(chunk_qty)), "std_box": display_val, "timing": timing_display, "p_2nd": "1" if len(res.rows) == 0 else "", "p_3rd": "1" if len(res.rows) == 1 else "", "alert": False, "p_label": f"P{len(res.rows) + 1}", "is_terminal": is_terminal})
 
         end_state = { "machines": {}, "wip": {} }
 
@@ -1074,43 +1082,15 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             if item.qty <= 0.01: continue
             
-            # 1. Missing Weight
-            if item.stage == 'HT' and get_weight_for_part(item.disp, item.pc, weight_matrix) is None:
-                assigned_reason = "Missing Weight"
-                
-            # 2. Machine Rate Not Available
-            elif any(r.type == item.stage for r in resources) and len(item.valid_resources) == 0 and not (not item.routing or item.stage not in item.routing):
-                assigned_reason = "Machine Rate Not Available"
-                
-            # 3. Missing Routing
-            elif not item.routing or item.stage not in item.routing:
-                assigned_reason = "Missing Routing"
-                
-            # 4. No Compatible Machine
-            elif not any(r.type == item.stage for r in resources):
-                assigned_reason = "No Compatible Machine"
-                
-            # 5. Insufficient Capacity (Ready within scheduling window but machines maxed out)
-            elif item.ready_time < 24.0 and len(item.valid_resources) > 0:
-                assigned_reason = "Insufficient Capacity"
-                
-            # 6. Previous Process Pending
-            elif (item.routing and item.stage in item.routing and 
-                  any(u.disp == item.disp and u.pc == item.pc and u.day_idx == item.day_idx and 
-                      u.stage in item.routing[:item.routing.index(item.stage)] and u.qty > 0.01 for u in work_items)):
-                assigned_reason = "Previous Process Pending"
-                
-            # 7. Material waiting in WIP for next process
-            elif item.day_idx == -1:
-                assigned_reason = "Waiting for Next Process"
-                
-            # 8. Scheduling day finished before job could start
-            elif item.ready_time >= 24.0:
-                assigned_reason = "Scheduling Window Exhausted"
-                
-            # 9. Fallback Default
-            else:
-                assigned_reason = "Not Scheduled"
+            if item.stage == 'HT' and get_weight_for_part(item.disp, item.pc, weight_matrix) is None: assigned_reason = "Missing Weight"
+            elif any(r.type == item.stage for r in resources) and len(item.valid_resources) == 0 and not (not item.routing or item.stage not in item.routing): assigned_reason = "Machine Rate Not Available"
+            elif not item.routing or item.stage not in item.routing: assigned_reason = "Missing Routing"
+            elif not any(r.type == item.stage for r in resources): assigned_reason = "No Compatible Machine"
+            elif item.ready_time < 24.0 and len(item.valid_resources) > 0: assigned_reason = "Insufficient Capacity"
+            elif (item.routing and item.stage in item.routing and any(u.disp == item.disp and u.pc == item.pc and u.day_idx == item.day_idx and u.stage in item.routing[:item.routing.index(item.stage)] and u.qty > 0.01 for u in work_items)): assigned_reason = "Previous Process Pending"
+            elif item.day_idx == -1: assigned_reason = "Waiting for Next Process"
+            elif item.ready_time >= 24.0: assigned_reason = "Scheduling Window Exhausted"
+            else: assigned_reason = "Not Scheduled"
 
             if item.stage != get_first_required_stage(item.routing):
                 w_key = f"{item.disp}|{item.pc}"
@@ -1124,16 +1104,13 @@ def generate_schedule(payload: ScheduleRequest):
                 end_state["wip"][w_key][item.stage]["rt"] = max(0.0, item.ready_time - 24.0)
 
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
-            missed_val = f"{int(item.qty)} Rings" if rpb <= 0 else f"{int(item.qty)} Rings ({math.ceil(item.qty / rpb)} Boxes)"
+            missed_val = f"{int(item.qty)}(Q)" if rpb <= 0 else str(math.ceil(item.qty / rpb))
             
             if item.day_idx == -1: day_label = "WIP"
             else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"
                 
             part_display = f"{item.disp} {item.pc} ({day_label})"
             
-            # --- THE FIX ---
-            # Appending BOTH "status" and "reason" keys to guarantee compatibility 
-            # with any frontend table mapping without mutating the core structure.
             unscheduled.append({
                 "stage": item.stage, 
                 "part": part_display, 

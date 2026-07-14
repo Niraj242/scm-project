@@ -25,9 +25,15 @@ const SHOScheduling = () => {
   const [summaryData, setSummaryData] = useState([]);
   const [isLoadingSummary, setIsLoadingSummary] = useState(false);
 
-  // Tab 2: Machine Availability State
+  // Tab 2: Breakdown Entry State
+  const [breakdownDate, setBreakdownDate] = useState(new Date().toISOString().split('T')[0]);
   const [machineAvailability, setMachineAvailability] = useState([]);
   const [isLoadingMachines, setIsLoadingMachines] = useState(false);
+  const [isSavingBreakdowns, setIsSavingBreakdowns] = useState(false);
+
+  // Tab 5: Required Data Availability State
+  const [dataAvailability, setDataAvailability] = useState([]);
+  const [isLoadingDataAvailability, setIsLoadingDataAvailability] = useState(false);
 
   // -- CONSTANTS --
   const SECTOR_COLUMNS = {
@@ -36,7 +42,6 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
-  // UPDATED: Mapped exactly according to the provided Channel/Process matrix image
   const DEFAULT_BLOCKED = {
     DGBB: { 
         HT: { CH07: ['IR', 'OR'] },
@@ -98,17 +103,15 @@ const SHOScheduling = () => {
     }
   }, [sector, bufferDate]);
 
-  // NEW FIX: Automatically load saved plan when Date changes, or clear if none exists
   useEffect(() => {
     const fetchSavedPlanForDate = async () => {
       try {
-        // Backend must implement this GET endpoint to return {"status": "success", "data": {...}}
         const response = await fetch(`${API_BASE}/api/get_plan?date=${scheduleDate}`);
         const result = await response.json();
         if (response.ok && result.status === 'success' && result.data) {
           setScheduleData(result.data);
         } else {
-          setScheduleData(null); // Clear previous date's data to show empty state
+          setScheduleData(null);
         }
       } catch (err) {
         setScheduleData(null);
@@ -117,17 +120,23 @@ const SHOScheduling = () => {
     fetchSavedPlanForDate();
   }, [scheduleDate]);
 
-  // Dynamically Fetch ALL Face, OD & HT Machines from Production Sheet
+  // Dynamically Fetch Resources (Furnaces, Face, OD, Channels) based on Breakdown Date
   useEffect(() => {
     const fetchMachines = async () => {
       setIsLoadingMachines(true);
       try {
-        const response = await fetch(`${API_BASE}/api/machines`);
+        // Backend should support fetching breakdown state for the selected date
+        // If no records exist in DB for this date, backend returns master list with 'Available' defaults
+        const response = await fetch(`${API_BASE}/api/machines?date=${breakdownDate}`);
         const result = await response.json();
         if (response.ok && result.status === 'success') {
-          const loadedMachines = result.data.map(m => ({
-            id: m, machine: m, enabled: true, bd_date: '', start_time: '', end_time: ''
-          }));
+          // Backend now expected to send an array of objects or just string array fallback
+          const loadedMachines = result.data.map(m => {
+            if (typeof m === 'string') {
+              return { id: m, machine: m, status: 'Available', start_time: '', end_time: '' };
+            }
+            return { id: m.machine, ...m }; // If already formatted object
+          });
           setMachineAvailability(loadedMachines);
         } else {
           console.warn("Failed to load machine list: " + result.detail);
@@ -138,7 +147,7 @@ const SHOScheduling = () => {
       setIsLoadingMachines(false);
     };
     fetchMachines();
-  }, []);
+  }, [breakdownDate]);
 
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
@@ -153,7 +162,24 @@ const SHOScheduling = () => {
   };
 
   const resetMachineConstraint = (id) => {
-    setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, enabled: true, bd_date: '', start_time: '', end_time: '' } : c)));
+    setMachineAvailability(prev => prev.map(c => (c.id === id ? { ...c, status: 'Available', start_time: '', end_time: '' } : c)));
+  };
+
+  const handleSaveBreakdowns = async () => {
+    setIsSavingBreakdowns(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/save_breakdowns`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: breakdownDate, breakdowns: machineAvailability })
+      });
+      const result = await response.json();
+      if (result.status === 'success') alert('Breakdowns saved successfully for ' + breakdownDate);
+      else alert('Error saving breakdowns: ' + result.detail);
+    } catch (error) {
+      alert('Error connecting to server.');
+    }
+    setIsSavingBreakdowns(false);
   };
 
   const fetchSummaryOnly = async () => {
@@ -171,9 +197,25 @@ const SHOScheduling = () => {
         alert("Error loading summary: " + result.detail);
       }
     } catch (e) {
-      alert("Failed to connect to backend. Verify your backend is running.");
+      alert("Failed to connect to backend.");
     }
     setIsLoadingSummary(false);
+  };
+
+  const fetchDataAvailability = async () => {
+    setIsLoadingDataAvailability(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/data_availability`);
+      const result = await response.json();
+      if (response.ok && result.status === 'success') {
+        setDataAvailability(result.data || []);
+      } else {
+        alert("Error loading data availability: " + result.detail);
+      }
+    } catch (e) {
+      alert("Failed to connect to backend.");
+    }
+    setIsLoadingDataAvailability(false);
   };
 
   const handleSavePlan = async () => {
@@ -184,7 +226,7 @@ const SHOScheduling = () => {
       face_grinding: scheduleData.face_grinding || [],
       od_grinding: scheduleData.od_grinding || [],
       heat_treatment: scheduleData.heat_treatment || [],
-      unscheduled: scheduleData.unscheduled || [] // Ensuring unscheduled parts save to DB
+      unscheduled: scheduleData.unscheduled || [] 
     };
 
     try {
@@ -206,11 +248,12 @@ const SHOScheduling = () => {
     setIsLoadingPlan(true);
     const availabilityMap = {};
     
+    // Adapted mapping to handle the new text-based status for backwards compatibility with scheduler
     machineAvailability.forEach(c => {
       if (c.machine.trim()) {
         availabilityMap[c.machine.trim()] = {
-          enabled: c.enabled,
-          bd_date: c.bd_date,
+          enabled: c.status === 'Available',
+          bd_date: breakdownDate, // Scheduler takes the global breakdown date now
           start_time: c.start_time,
           end_time: c.end_time
         };
@@ -240,7 +283,7 @@ const SHOScheduling = () => {
         alert("Server failed to generate schedule: " + (result.detail || result.message)); 
       }
     } catch (e) { 
-      alert(`Network error: Failed to connect to backend at ${API_BASE}. Server may be offline.`); 
+      alert(`Network error: Failed to connect to backend.`); 
     }
     setIsLoadingPlan(false);
   };
@@ -256,12 +299,13 @@ const SHOScheduling = () => {
 
   return (
     <div className="sho-container">
-      {/* 4 NAVIGATION TABS */}
+      {/* 5 NAVIGATION TABS */}
       <div className="tab-buttons" style={{ marginBottom: '15px' }}>
         <button className={activeTab === 'buffer' ? 'active' : ''} onClick={() => setActiveTab('buffer')}>1. Buffer Entry</button>
         <button className={activeTab === 'availability' ? 'active' : ''} onClick={() => setActiveTab('availability')}>2. Breakdown Entry</button>
         <button className={activeTab === 'schedule' ? 'active' : ''} onClick={() => setActiveTab('schedule')}>3. Production Schedule</button>
         <button className={activeTab === 'summary' ? 'active' : ''} onClick={() => setActiveTab('summary')}>4. Production Summary</button>
+        <button className={activeTab === 'data_availability' ? 'active' : ''} onClick={() => setActiveTab('data_availability')}>5. Required Data Availability</button>
       </div>
 
       {/* TAB 1: BUFFER ENTRY */}
@@ -353,51 +397,78 @@ const SHOScheduling = () => {
 
       {/* TAB 2: BREAKDOWN ENTRY */}
       {activeTab === 'availability' && (
-        <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
-          <h2 style={{ color: '#0056b3', marginTop: 0 }}>Breakdown Entry Log</h2>
-          <p style={{ color: '#555', marginBottom: '20px' }}>Enter machine breakdown times to halt scheduling during that period. Leave blank for 100% availability.</p>
-          
-          {isLoadingMachines ? (
-             <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching machines...</div>
-          ) : (
-            <table className="img-table" style={{ width: '100%', maxWidth: '950px' }}>
-              <thead>
-                <tr style={{ backgroundColor: '#eef8ff' }}>
-                  <th style={{ textAlign: 'left', padding: '10px' }}>Machine / Furnace Name</th>
-                  <th>Status</th>
-                  <th>Breakdown Date</th>
-                  <th>Breakdown Start</th>
-                  <th>Breakdown End</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {machineAvailability.map((c) => (
-                  <tr key={c.id}>
-                    <td style={{ fontWeight: 'bold', padding: '10px' }}>{c.machine}</td>
-                    <td style={{ textAlign: 'center' }}>
-                      <select value={c.enabled ? "true" : "false"} onChange={(e) => updateMachineConstraint(c.id, 'enabled', e.target.value === "true")} style={{ padding: '4px' }}>
-                        <option value="true">Available</option>
-                        <option value="false">Off / Total Breakdown</option>
-                      </select>
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <input type="date" value={c.bd_date || ''} onChange={(e) => updateMachineConstraint(c.id, 'bd_date', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <input type="time" value={c.start_time || ''} onChange={(e) => updateMachineConstraint(c.id, 'start_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <input type="time" value={c.end_time || ''} onChange={(e) => updateMachineConstraint(c.id, 'end_time', e.target.value)} style={{ padding: '4px' }} disabled={!c.enabled} />
-                    </td>
-                    <td style={{ textAlign: 'center' }}>
-                      <button onClick={() => resetMachineConstraint(c.id)} style={{ padding: '4px 8px', cursor: 'pointer', backgroundColor: '#e9ecef', border: '1px solid #ccc' }}>Reset</button>
-                    </td>
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <div className="controls-panel">
+            <div className="control-group">
+              <label>Breakdown Date:</label>
+              <input type="date" value={breakdownDate} onChange={(e) => setBreakdownDate(e.target.value)} />
+            </div>
+            <button className="btn-save" onClick={handleSaveBreakdowns} disabled={isSavingBreakdowns}>
+              {isSavingBreakdowns ? "Saving..." : "Save Breakdown Entries"}
+            </button>
+          </div>
+
+          <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
+            <h2 style={{ color: '#0056b3', marginTop: 0 }}>Breakdown Entry Log</h2>
+            <p style={{ color: '#555', marginBottom: '20px' }}>
+              Select a date above. Apply full breakdowns or partial hours for Furnaces, Face Machines, OD Machines, and Channels. 
+              Unsaved entries default to Available.
+            </p>
+            
+            {isLoadingMachines ? (
+               <div style={{ padding: '20px', color: '#666', fontWeight: 'bold' }}>Fetching resources for selected date...</div>
+            ) : (
+              <table className="img-table" style={{ width: '100%', maxWidth: '950px' }}>
+                <thead>
+                  <tr style={{ backgroundColor: '#eef8ff' }}>
+                    <th style={{ textAlign: 'left', padding: '10px' }}>Resource Name</th>
+                    <th>Status</th>
+                    <th>Breakdown Start Time</th>
+                    <th>Breakdown End Time</th>
+                    <th>Action</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+                </thead>
+                <tbody>
+                  {machineAvailability.map((c) => (
+                    <tr key={c.id}>
+                      <td style={{ fontWeight: 'bold', padding: '10px' }}>{c.machine}</td>
+                      <td style={{ textAlign: 'center' }}>
+                        <select 
+                          value={c.status} 
+                          onChange={(e) => updateMachineConstraint(c.id, 'status', e.target.value)} 
+                          style={{ padding: '4px', width: '150px' }}
+                        >
+                          <option value="Available">Available</option>
+                          <option value="Complete Breakdown">Complete Breakdown</option>
+                        </select>
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input 
+                          type="time" 
+                          value={c.start_time || ''} 
+                          onChange={(e) => updateMachineConstraint(c.id, 'start_time', e.target.value)} 
+                          style={{ padding: '4px' }} 
+                          disabled={c.status === 'Complete Breakdown'} 
+                        />
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <input 
+                          type="time" 
+                          value={c.end_time || ''} 
+                          onChange={(e) => updateMachineConstraint(c.id, 'end_time', e.target.value)} 
+                          style={{ padding: '4px' }} 
+                          disabled={c.status === 'Complete Breakdown'} 
+                        />
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        <button onClick={() => resetMachineConstraint(c.id)} style={{ padding: '4px 8px', cursor: 'pointer', backgroundColor: '#e9ecef', border: '1px solid #ccc' }}>Reset</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
         </div>
       )}
 
@@ -580,7 +651,6 @@ const SHOScheduling = () => {
                                 <tr key={idx}>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
-                                    {/* UPDATED: Displays both missed boxes and the detailed status reason */}
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>
                                       {item.missed_boxes}
                                       {item.status && (
@@ -650,6 +720,74 @@ const SHOScheduling = () => {
                       <td style={{ textAlign: 'center' }}>{s.mtd_prod}</td>
                       <td style={{ textAlign: 'center' }}>{s.balance}</td>
                       <td style={{ textAlign: 'center', color: '#555', fontSize: '0.9em' }}>{s.remaining_pct != null ? `${s.remaining_pct}%` : '0%'}</td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 5: REQUIRED DATA AVAILABILITY */}
+      {activeTab === 'data_availability' && (
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+          <div className="controls-panel">
+            <button className="btn-save" onClick={fetchDataAvailability} disabled={isLoadingDataAvailability}>
+              {isLoadingDataAvailability ? "Fetching Master Data..." : "Load Data Availability"}
+            </button>
+          </div>
+
+          <div style={{ backgroundColor: 'white', padding: '20px', flex: 1, overflowY: 'auto' }}>
+            <h2 style={{ color: '#0056b3', marginTop: 0 }}>Required Data Availability</h2>
+            <p style={{ color: '#555', marginBottom: '20px' }}>
+              Reporting view mapping all requested Bearing Types against master production parameters.
+            </p>
+            <table className="img-table" style={{ width: '100%' }}>
+              <thead>
+                <tr style={{ backgroundColor: '#eef8ff' }}>
+                  <th style={{ padding: '10px', textAlign: 'left' }}>Channel</th>
+                  <th>Bearing Type</th>
+                  <th>Part (IR / OR)</th>
+                  <th>Weight per Ring</th>
+                  <th>Primary Furnace</th>
+                  <th>Alternative Furnace 1</th>
+                  <th>Alternative Furnace 2</th>
+                  <th>Compatible Face Machine</th>
+                  <th>Compatible OD Machine</th>
+                  <th>Ring per Box</th>
+                </tr>
+              </thead>
+              <tbody>
+                {dataAvailability.length === 0 ? (
+                  <tr>
+                    <td colSpan="10" style={{ textAlign: 'center', padding: '20px', color: '#666' }}>
+                      Click "Load Data Availability" to fetch data for all required channels.
+                    </td>
+                  </tr>
+                ) : (
+                  dataAvailability.map((row, index) => (
+                    <tr key={index}>
+                      <td style={{ fontWeight: 'bold', padding: '8px' }}>{row.channel}</td>
+                      <td style={{ textAlign: 'center' }}>{row.bearing_type}</td>
+                      <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{row.part}</td>
+                      <td style={{ textAlign: 'center', color: row.weight === 'Missing Weight' ? 'red' : 'black' }}>
+                        {row.weight}
+                      </td>
+                      <td style={{ textAlign: 'center', color: row.primary_furnace === 'No Compatible Furnace' ? 'red' : 'black' }}>
+                        {row.primary_furnace}
+                      </td>
+                      <td style={{ textAlign: 'center' }}>{row.alt_furnace_1 || ''}</td>
+                      <td style={{ textAlign: 'center' }}>{row.alt_furnace_2 || ''}</td>
+                      <td style={{ textAlign: 'center', color: row.compatible_face === 'No Compatible Face Machine' ? 'red' : 'black' }}>
+                        {row.compatible_face}
+                      </td>
+                      <td style={{ textAlign: 'center', color: row.compatible_od === 'No Compatible OD Machine' ? 'red' : 'black' }}>
+                        {row.compatible_od}
+                      </td>
+                      <td style={{ textAlign: 'center', color: row.ring_per_box === 'Missing Data' ? 'red' : 'black' }}>
+                        {row.ring_per_box}
+                      </td>
                     </tr>
                   ))
                 )}

@@ -230,7 +230,7 @@ const SHOScheduling = () => {
       if (response.ok && result.status === 'success') {
         setDataAvailability(result.data || []);
       } else {
-        // FIX 2: Correctly format the FastAPI [object Object] error array to string so it's readable
+        // FIX 2: Correctly format the FastAPI error array to string so it's readable
         const errorMsg = typeof result.detail === 'object' ? JSON.stringify(result.detail, null, 2) : result.detail;
         alert("Error loading data availability from backend:\n" + errorMsg);
       }

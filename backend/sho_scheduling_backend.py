@@ -1704,4 +1704,4 @@ def get_data_availability(date: str):
                             std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
                             box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
                             ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
-                            rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'I seem to be encountering an error. Can I try something else for you?
+                            rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h), None)

@@ -135,9 +135,6 @@ def health_check():
 def get_monthly_tracking_api():
     return load_monthly_tracking()
 
-# ==========================================
-# NEW ENDPOINTS ADDED TO FIX THE 404 ERRORS
-# ==========================================
 @router.get("/api/machines")
 def get_machines():
     try:
@@ -177,18 +174,13 @@ def save_plan(payload: SavePlanRequest):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
-# ==========================================
-# MEMORY-EFFICIENT SEQUENTIAL DATA LOADER
-# ==========================================
 def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
-    """Downloads and processes an Excel file sequentially, yielding one sheet at a time, to stay under memory limits."""
     if not url or url.strip() == "": 
         return
     try:
         resp = requests.get(url, timeout=60)
         if resp.status_code == 200:
             with io.BytesIO(resp.content) as file_buffer:
-                # OPTIMIZATION: Try lightning-fast rust engine 'calamine' first, fallback to 'openpyxl'
                 try:
                     xls = pd.ExcelFile(file_buffer, engine='calamine')
                 except Exception:
@@ -572,7 +564,6 @@ def generate_schedule(payload: ScheduleRequest):
                 for idx in range(r_idx + 1, len(df_zero)):
                     row_vals_zero = list(df_zero.iloc[idx].values)
                     
-                    # HARDENING: Check bounds before indexing row values
                     mf_val = str(row_vals_zero[type_col_idx]).strip() if (type_col_idx is not None and type_col_idx < len(row_vals_zero)) else ""
                     if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
                     raw_t = str(row_vals_zero[col_to_use]).strip() if (col_to_use is not None and col_to_use < len(row_vals_zero)) else ""
@@ -602,16 +593,25 @@ def generate_schedule(payload: ScheduleRequest):
                         channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
                         channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
 
-        # 2. LOAD BOX RING MATRIX SEQUENTIALLY
-        box_matrix = {}
+        # 2. LOAD BOX RING MATRIX SEQUENTIALLY (WITH STRICT SHEET PRECEDENCE)
+        box_matrices = {
+            "tier1": {}, # "RING PER BOX." sheets (Highest priority)
+            "tier2": {}, # Other "RING BOX" sheets
+            "tier3": {}  # "BOX DAY" sheets (Lowest priority)
+        }
         for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
             s_name_up = str(s_name).upper().strip()
             df_box = df_b.fillna('')
+            
             if 'RING' in s_name_up and 'BOX' in s_name_up:
+                # Differentiate Tier 1 ("RING PER BOX.") from Tier 2 ("RING BOX")
+                tier = "tier1" if "PER" in s_name_up else "tier2"
+                target_map = box_matrices[tier]
+                
                 for idx in range(1, len(df_box)):
                     row_vals = list(df_box.iloc[idx])
                     for i in range(0, len(row_vals) - 2, 3):
-                        fam_raw = str(row_vals[i]).strip()
+                        fam_raw = str(row_vals[i]).strip() if i < len(row_vals) else ""
                         if not fam_raw or is_invalid_part(fam_raw): continue
                         fams_to_process = fam_raw.split("/") if "/" in fam_raw else [fam_raw]
                         for f_raw in fams_to_process:
@@ -620,10 +620,14 @@ def generate_schedule(payload: ScheduleRequest):
                                 for ck in clean_keys:
                                     or_qty = safe_float(row_vals[i+1]) if (i+1 < len(row_vals)) else 0.0
                                     ir_qty = safe_float(row_vals[i+2]) if (i+2 < len(row_vals)) else 0.0
-                                    if ck not in box_matrix: box_matrix[ck] = {}
-                                    if or_qty > 0 and p_c == 'OR': box_matrix[ck]['OR'] = {'qty': or_qty, 'source': s_name}
-                                    if ir_qty > 0 and p_c == 'IR': box_matrix[ck]['IR'] = {'qty': ir_qty, 'source': s_name}
+                                    if ck not in target_map: target_map[ck] = {}
+                                    if or_qty > 0 and p_c == 'OR': target_map[ck]['OR'] = {'qty': or_qty, 'source': s_name}
+                                    if ir_qty > 0 and p_c == 'IR': target_map[ck]['IR'] = {'qty': ir_qty, 'source': s_name}
+                                    
             elif 'BOX' in s_name_up and 'DAY' in s_name_up:
+                tier = "tier3"
+                target_map = box_matrices[tier]
+                
                 # 1. Regex parsing logic for specific format: "1838001 (10/26) 12 K"
                 for r_idx in range(len(df_box)):
                     for c_idx in range(len(df_box.columns)):
@@ -641,11 +645,11 @@ def generate_schedule(payload: ScheduleRequest):
                             for p_c in ['IR', 'OR']:
                                 clean_keys = get_lookup_variants(part_type, p_c)
                                 for ck in clean_keys:
-                                    if ck not in box_matrix: box_matrix[ck] = {}
-                                    if p_c == 'IR' and ('IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0):
-                                        if ir_rpb > 0: box_matrix[ck]['IR'] = {'qty': ir_rpb, 'source': s_name}
-                                    if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
-                                        if or_rpb > 0: box_matrix[ck]['OR'] = {'qty': or_rpb, 'source': s_name}
+                                    if ck not in target_map: target_map[ck] = {}
+                                    if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR']['qty'] <= 0):
+                                        if ir_rpb > 0: target_map[ck]['IR'] = {'qty': ir_rpb, 'source': s_name}
+                                    if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR']['qty'] <= 0):
+                                        if or_rpb > 0: target_map[ck]['OR'] = {'qty': or_rpb, 'source': s_name}
 
                 # 2. Existing standard tabular logic for safety
                 type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
@@ -665,13 +669,23 @@ def generate_schedule(payload: ScheduleRequest):
                         for p_c in ['IR', 'OR']:
                             clean_keys = get_lookup_variants(raw_t, p_c)
                             for ck in clean_keys:
-                                if ck not in box_matrix: box_matrix[ck] = {}
-                                if p_c == 'IR' and ('IR' not in box_matrix[ck] or box_matrix[ck]['IR']['qty'] <= 0):
+                                if ck not in target_map: target_map[ck] = {}
+                                if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR']['qty'] <= 0):
                                     fq = safe_float(row_vals[ir_col]) if (ir_col != -1 and ir_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
-                                    if fq > 0: box_matrix[ck]['IR'] = {'qty': fq, 'source': s_name}
-                                if p_c == 'OR' and ('OR' not in box_matrix[ck] or box_matrix[ck]['OR']['qty'] <= 0):
+                                    if fq > 0: target_map[ck]['IR'] = {'qty': fq, 'source': s_name}
+                                if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR']['qty'] <= 0):
                                     fq = safe_float(row_vals[or_col]) if (or_col != -1 and or_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
-                                    if fq > 0: box_matrix[ck]['OR'] = {'qty': fq, 'source': s_name}
+                                    if fq > 0: target_map[ck]['OR'] = {'qty': fq, 'source': s_name}
+
+        # Merge the tiers sequentially: Tier 3 (lowest) -> Tier 2 -> Tier 1 (highest priority overrides)
+        box_matrix = {}
+        for tier in ["tier3", "tier2", "tier1"]:
+            for part_key, part_data in box_matrices[tier].items():
+                if part_key not in box_matrix:
+                    box_matrix[part_key] = {}
+                for p_code, details in part_data.items():
+                    if details.get('qty', 0.0) > 0:
+                        box_matrix[part_key][p_code] = details
 
         # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
         weight_matrix = {}
@@ -917,9 +931,7 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
 
-        # ==========================================
         # 1. LOOK-AHEAD BATCH MERGING (PRE-EVALUATION)
-        # ==========================================
         for i in range(len(work_items)):
             item1 = work_items[i]
             if item1.qty <= 0.01 or item1.day_idx != 0: continue
@@ -1008,9 +1020,7 @@ def generate_schedule(payload: ScheduleRequest):
                 else:
                     actual_time = chunk_qty / rate_or_cap
 
-                # ==========================================
                 # 2. END-OF-DAY STOPPING LOGIC
-                # ==========================================
                 if start_time < 24.0 and (start_time + actual_time) > 24.0:
                     max_allowed_time = min(6.0, 30.0 - start_time)
                     if actual_time > max_allowed_time:
@@ -1113,9 +1123,7 @@ def generate_schedule(payload: ScheduleRequest):
             if key not in tracker_ht and bal > 0:
                 new_ht_balances[key] = bal
 
-        # ==========================================
         # 3. UNSCHEDULED PARTS REASON GENERATION
-        # ==========================================
         for item in work_items:
             if item.qty <= 0.01: continue
             

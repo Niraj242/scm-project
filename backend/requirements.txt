@@ -2,16 +2,20 @@
 fastapi
 uvicorn[standard]
 
+# Data Processing
 openpyxl
 python-calamine
 
 # Database & ORM
 sqlalchemy
 psycopg2-binary
+asyncpg          # ADDED: For high-performance async database queries
 
 # Security & Auth
 python-jose[cryptography]
 passlib[argon2]
+PyJWT            # ADDED: Modern, actively maintained JWT alternative
+argon2-cffi      # ADDED: Direct, modern password hashing alternative
 python-multipart
 email-validator
 
@@ -29,3 +33,4 @@ loguru
 # Testing
 pytest
 httpx
+pytest-asyncio   # ADDED: Required for testing async FastAPI endpoints

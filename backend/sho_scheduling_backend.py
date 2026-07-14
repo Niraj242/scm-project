@@ -26,11 +26,95 @@ FURNACE_CACHE = {}
 VARIANTS_CACHE = {}  # OPTIMIZATION: Cache variants to prevent heavy nested regex operations
 
 DEFAULT_FURNACES = {
-    "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
-    "ROLLER FURNACE ( 148 )": 250.0, "SIMPLICITY FURNACE(1238)": 180.0,
-    "BIRLEC FURNACE   ( 1158 )": 170.0, "SHOEI FURNACE    ( 1062 )": 350.0,
+    "AICHELIN.(896)": 350.0, 
+    "CASTLINK FURNACE( 1018 )": 250.0,
+    "ROLLER FURNACE ( 148 )": 250.0, 
+    "SIMPLICITY FURNACE(1238)": 180.0,
+    "BIRLEC FURNACE   ( 1158 )": 170.0, 
+    "SHOEI FURNACE    ( 1062 )": 350.0,
     "AICHELIN UNITHERM ( 2033 )": 250.0
 }
+
+# ==========================================
+# CACHING & MEMORY OPTIMIZATION (RENDER FIX)
+# ==========================================
+GLOBAL_EXCEL_CACHE = {}
+CACHE_TTL = 180  # 3 minutes
+
+def zeroset_sheet_filter(sheet_name: str) -> bool:
+    s = str(sheet_name).strip().upper()
+    if s in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
+        return True
+    if s == "SABB":
+        return True
+    if s.startswith("T") or "HUB" in s:
+        return True
+    return False
+
+def box_ring_sheet_filter(sheet_name: str) -> bool:
+    s = str(sheet_name).strip().upper()
+    return "RING" in s or "BOX" in s or "SETUP" in s or "CHART" in s
+
+def prod_master_sheet_filter(sheet_name: str) -> bool:
+    s = str(sheet_name).strip().upper()
+    # Ignore typical bulky non-data worksheets
+    if any(k in s for k in ["INDEX", "README", "INSTRUCTION", "DASHBOARD", "SUMMARY", "TEMPLATE"]):
+        return False
+    return True
+
+def get_excel_sheets_cached(url: str, sheet_filter_fn=None):
+    if not url or url.strip() == "": 
+        return
+    now = time.time()
+    
+    # Check if a valid, unexpired cache exists
+    if url in GLOBAL_EXCEL_CACHE:
+        cache_entry = GLOBAL_EXCEL_CACHE[url]
+        if now - cache_entry["timestamp"] < CACHE_TTL:
+            for sheet, data in cache_entry["sheets"].items():
+                if sheet_filter_fn and not sheet_filter_fn(sheet):
+                    continue
+                yield sheet, pd.DataFrame(data)
+            return
+
+    # If cache is expired or missing, fetch and parse
+    sheets_data = {}
+    try:
+        resp = requests.get(url, timeout=60)
+        if resp.status_code == 200:
+            with io.BytesIO(resp.content) as file_buffer:
+                try:
+                    xls = pd.ExcelFile(file_buffer, engine='calamine')
+                except Exception:
+                    xls = pd.ExcelFile(file_buffer, engine='openpyxl')
+                    
+                for sheet in xls.sheet_names:
+                    # Filter sheets aggressively before parsing to preserve RAM
+                    if sheet_filter_fn and not sheet_filter_fn(sheet):
+                        continue
+                    df = pd.read_excel(xls, sheet_name=sheet, header=None)
+                    df_clean = df.fillna('')
+                    sheets_data[sheet] = df_clean.values.tolist()
+                    del df
+                    del df_clean
+                    gc.collect()
+                del xls
+            
+            GLOBAL_EXCEL_CACHE[url] = {
+                "timestamp": now,
+                "sheets": sheets_data
+            }
+        del resp
+        gc.collect()
+    except Exception as e:
+        print(f"Error caching excel from {url}: {e}")
+        
+    # Yield fresh sheets
+    if url in GLOBAL_EXCEL_CACHE:
+        for sheet, data in GLOBAL_EXCEL_CACHE[url]["sheets"].items():
+            if sheet_filter_fn and not sheet_filter_fn(sheet):
+                continue
+            yield sheet, pd.DataFrame(data)
 
 # ==========================================
 # DATABASE & PERSISTENCE
@@ -186,8 +270,59 @@ def save_plan(payload: SavePlanRequest):
         return {"status": "error", "detail": str(e)}
 
 # ==========================================
-# BREAKDOWN ENDPOINTS
+# BREAKDOWN ENDPOINTS & RESOURCE MATCHING
 # ==========================================
+def get_all_resources_dynamic():
+    """Returns dynamic furnaces, face grinding, OD grinding and channels exact names."""
+    furnaces = list(DEFAULT_FURNACES.keys())
+    face_mcs = set()
+    od_mcs = set()
+    
+    # 1. Look inside local state cache
+    state = get_setting('pending_state', {})
+    if "plant_state" in state and "machines" in state["plant_state"]:
+        for m in state["plant_state"]["machines"].keys():
+            if m in furnaces: continue
+            mu = str(m).upper()
+            if "FACE" in mu or "DDS" in mu or "BG" in mu: 
+                face_mcs.add(m)
+            else: 
+                od_mcs.add(m)
+                
+    # 2. Look inside memory cache of production sheets
+    if SHO_PRODUCTION_URL in GLOBAL_EXCEL_CACHE:
+        sheets = GLOBAL_EXCEL_CACHE[SHO_PRODUCTION_URL]["sheets"]
+        for sheet_name, sheet_data in sheets.items():
+            if sheet_name in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']:
+                continue
+            for row in sheet_data:
+                row_str = " ".join([str(x) for x in row]).upper()
+                if 'MACHINE' in row_str or 'M/C' in row_str:
+                    cells = [str(c).strip() for c in row if str(c).strip()]
+                    m_cand = cells[1] if len(cells) > 1 else None
+                    if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
+                        if m_cand in furnaces: continue
+                        mu = m_cand.upper()
+                        if "FACE" in mu or "DDS" in mu or "BG" in mu:
+                            face_mcs.add(m_cand)
+                        elif "OD" in mu or "CL" in mu or "CELL" in mu or "+" in mu:
+                            od_mcs.add(m_cand)
+                            
+    # Fallback exact matching if cache is empty
+    if not face_mcs: 
+        face_mcs = {"DDS 1", "DDS 2", "BG 1"}
+    if not od_mcs: 
+        od_mcs = {"CL 1", "CL 2", "CELL 1"}
+
+    # Exact channels used directly in PROCESS_FLOW config (No padding, proper names)
+    channels = [
+        "CH1", "CH2", "CH3", "CH4", "CH5", "SABB", "CH7", "CH8", "CH11", "CH12", "CH13",
+        "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10", "T11",
+        "HUB 1.1", "HUB 1.2", "HUB 1.3", "HUB 1.4", "HUB 3", "THUB 1.1", "THUB 1.2", "THUB 1.3"
+    ]
+    
+    return sorted(list(furnaces)), sorted(list(face_mcs)), sorted(list(od_mcs)), channels
+
 @router.get("/api/breakdowns")
 def get_breakdowns(date: str):
     saved = {}
@@ -200,33 +335,14 @@ def get_breakdowns(date: str):
     except Exception:
         pass
 
-    furnaces = list(DEFAULT_FURNACES.keys())
-    
-    face_mcs = set()
-    od_mcs = set()
-    state = get_setting('pending_state', {})
-    if "plant_state" in state and "machines" in state["plant_state"]:
-        for m in state["plant_state"]["machines"].keys():
-            if m in furnaces: continue
-            mu = str(m).upper()
-            if "FACE" in mu or "DDS" in mu or "BG" in mu: face_mcs.add(m)
-            else: od_mcs.add(m)
-
-    if not face_mcs: face_mcs = {"DDS 1", "DDS 2", "BG 1"}
-    if not od_mcs: od_mcs = {"CL 1", "CL 2", "CELL 1"}
-
-    channels = [
-        "CH01", "CH02", "CH03", "CH04", "CH05", "CH06", "CH07", "CH08", "CH09", "CH10", "CH11", "CH12", "CH13",
-        "SABB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T11",
-        "HUB 1.1", "HUB 1.2", "HUB 1.3", "HUB 1.4", "T HUB 1.1", "T HUB 1.2", "T HUB 1.3"
-    ]
+    furnaces, face_mcs, od_mcs, channels = get_all_resources_dynamic()
 
     res_list = []
-    for f in sorted(furnaces):
+    for f in furnaces:
         res_list.append({"resource": f, "type": "Furnace", **saved.get(f, {"status": "Available", "start_time": "", "end_time": ""})})
-    for m in sorted(face_mcs):
+    for m in face_mcs:
         res_list.append({"resource": m, "type": "Face Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
-    for m in sorted(od_mcs):
+    for m in od_mcs:
         res_list.append({"resource": m, "type": "OD Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
     for c in channels:
         res_list.append({"resource": c, "type": "Channel", **saved.get(c, {"status": "Available", "start_time": "", "end_time": ""})})
@@ -247,35 +363,19 @@ def save_breakdowns(payload: SaveBreakdownsRequest):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@router.post("/api/clear_cache")
+def clear_cache():
+    GLOBAL_EXCEL_CACHE.clear()
+    RATE_CACHE.clear()
+    WEIGHT_CACHE.clear()
+    FURNACE_CACHE.clear()
+    VARIANTS_CACHE.clear()
+    gc.collect()
+    return {"status": "success", "message": "All parsed excel and master configuration caches cleared successfully!"}
+
 # ==========================================
 # UTIL FUNCTIONS
 # ==========================================
-def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
-    if not url or url.strip() == "": 
-        return
-    try:
-        resp = requests.get(url, timeout=60)
-        if resp.status_code == 200:
-            with io.BytesIO(resp.content) as file_buffer:
-                try:
-                    xls = pd.ExcelFile(file_buffer, engine='calamine')
-                except Exception:
-                    xls = pd.ExcelFile(file_buffer, engine='openpyxl')
-                    
-                target_sheets = sheet_names_to_process if sheet_names_to_process else xls.sheet_names
-                
-                for sheet in target_sheets:
-                    if sheet in xls.sheet_names:
-                        df = pd.read_excel(xls, sheet_name=sheet, header=None, usecols=usecols)
-                        yield sheet, df
-                        del df
-                        gc.collect()
-                del xls
-        del resp
-        gc.collect()
-    except Exception as e:
-        print(f"Error loading sequentially from {url}: {e}")
-
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
     ch = ch.replace("CH", "").replace("CHANNEL", "").replace(" ", "").strip()
@@ -602,13 +702,13 @@ def generate_schedule(payload: ScheduleRequest):
         channel_demands_day1 = {} 
         channel_demands_day2 = {}
         
-        # 1. LOAD ZEROSET SEQUENTIALLY
-        for sheet_name, df_zero in process_excel_sequentially(ZEROSET_URL):
+        # 1. LOAD ZEROSET SEQUENTIALLY (WITH LOW-RAM CACHE)
+        for sheet_name, df_zero in get_excel_sheets_cached(ZEROSET_URL, zeroset_sheet_filter):
             sheet_str_upper = str(sheet_name).strip().upper()
             if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
                 ch_name = f"CH{sheet_str_upper.zfill(2)}"
             elif sheet_str_upper == "SABB": ch_name = "SABB"
-            elif sheet_str_upper.startswith("T ") or any(sheet_str_upper.startswith(f"T{k}") for k in range(1, 10)):
+            elif sheet_str_upper.startswith("T ") or any(sheet_str_upper.startswith(f"T{k}") for k in range(1, 12)):
                 ch_name = sheet_str_upper
             elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
             else: ch_name = sheet_str_upper
@@ -679,10 +779,10 @@ def generate_schedule(payload: ScheduleRequest):
                         channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
                         channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
 
-        # 2. LOAD BOX RING MATRIX SEQUENTIALLY (WITH SETUP CHART)
+        # 2. LOAD BOX RING MATRIX SEQUENTIALLY (WITH CACHE)
         box_matrices = {"tier1": {}, "tier2": {}, "tier3": {}}
         setup_chart_matrix = {}
-        for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
+        for s_name, df_b in get_excel_sheets_cached(BOX_RING_DATA_URL, box_ring_sheet_filter):
             s_name_up = str(s_name).upper().strip()
             df_box = df_b.fillna('')
             
@@ -787,13 +887,13 @@ def generate_schedule(payload: ScheduleRequest):
                 for p_code, details in part_data.items():
                     if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code] = details
 
-        # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
+        # 3. LOAD PRODUCTION MASTER SEQUENTIALLY (WITH CACHE)
         weight_matrix = {}
         furnace_map = {}
         machines_data = {'FACE': {}, 'OD': {}}
         furnace_specs_local = DEFAULT_FURNACES.copy()
         
-        for sheet_name, df_m in process_excel_sequentially(SHO_PRODUCTION_URL):
+        for sheet_name, df_m in get_excel_sheets_cached(SHO_PRODUCTION_URL, prod_master_sheet_filter):
             if 'FURNACE' in str(sheet_name).upper() or 'AICHELIN' in str(sheet_name).upper():
                 if 'FLEX' not in str(sheet_name).upper():
                     for r in range(len(df_m)):
@@ -1366,7 +1466,7 @@ def generate_schedule(payload: ScheduleRequest):
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
 
 # ==========================================
-# NEW TAB: REQUIRED DATA AVAILABILITY
+# REQUIRED DATA AVAILABILITY TAB
 # ==========================================
 @router.get("/api/data_availability")
 def get_data_availability(date: str):
@@ -1378,24 +1478,23 @@ def get_data_availability(date: str):
     
     try:
         req_date = datetime.strptime(date, "%Y-%m-%d")
-        
         channel_demands_day1 = {}
         
-        # 1. Parse Zeroset
-        for sheet_name, df_zero in process_excel_sequentially(ZEROSET_URL):
+        # 1. Parse Zeroset (Retrieve ALL types across ALL valid sheets/channels)
+        for sheet_name, df_zero in get_excel_sheets_cached(ZEROSET_URL, zeroset_sheet_filter):
             sheet_str_upper = str(sheet_name).strip().upper()
             if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
-                ch_name = f"CH{sheet_str_upper.zfill(2)}"
-            elif sheet_str_upper == "SABB": ch_name = "SABB"
-            elif sheet_str_upper.startswith("T ") or any(sheet_str_upper.startswith(f"T{k}") for k in range(1, 10)):
+                ch_name = f"CH{int(sheet_str_upper)}"  # Normalizes "01" to "1"
+            elif sheet_str_upper == "SABB": 
+                ch_name = "SABB"
+            elif sheet_str_upper.startswith("T ") or any(sheet_str_upper.startswith(f"T{k}") for k in range(1, 12)):
+                ch_name = sheet_str_upper.replace(" ", "")  # Normalizes "T 1" to "T1"
+            elif "HUB" in sheet_str_upper: 
                 ch_name = sheet_str_upper
-            elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
-            else: ch_name = sheet_str_upper
-
-            ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
+            else: 
+                ch_name = sheet_str_upper
             
             r_idx, type_col_idx, mv_col_idx = None, None, None
-            c1_col = None
             
             for i in range(min(25, len(df_zero))):
                 row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
@@ -1411,38 +1510,31 @@ def get_data_availability(date: str):
                     for j, val in enumerate(row_strs):
                         if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
                         
-                if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
+                if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING', 'TOTAL']):
                     r_idx = i
-                    for j, val in enumerate(df_zero.iloc[i].values):
-                        if is_target_date(val, req_date): c1_col = j
-                if r_idx is not None and type_col_idx is not None and c1_col is not None: break
+                if r_idx is not None and type_col_idx is not None: break
 
             col_to_use = type_col_idx if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "SABB"] else mv_col_idx
             if col_to_use is None: col_to_use = mv_col_idx if mv_col_idx is not None else type_col_idx
 
-            if r_idx is not None and type_col_idx is not None and c1_col is not None:
+            if r_idx is not None and type_col_idx is not None:
                 last_mf = ""
                 for idx in range(r_idx + 1, len(df_zero)):
                     row_vals_zero = list(df_zero.iloc[idx].values)
                     mf_val = str(row_vals_zero[type_col_idx]).strip() if (type_col_idx is not None and type_col_idx < len(row_vals_zero)) else ""
-                    if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
+                    if mf_val and mf_val not in ["NAN", "NONE", ""]: last_mf = mf_val
                     raw_t = str(row_vals_zero[col_to_use]).strip() if (col_to_use is not None and col_to_use < len(row_vals_zero)) else ""
-                    if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
+                    if not raw_t or raw_t in ["NAN", "NONE", ""]: raw_t = last_mf
                     if is_invalid_part(raw_t): continue
                     
                     display_name = get_display_name(raw_t)
-                    val1 = safe_float(row_vals_zero[c1_col]) if (c1_col is not None and c1_col < len(row_vals_zero)) else 0.0
-                    r1 = val1 * 1000 if val1 > 0 else 0.0
-                    
-                    if r1 > 0:
-                        if display_name not in channel_demands_day1: 
-                            channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
-                        channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
-                        channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
+                    # FIX: Extract ALL parts from Zeroset regardless of daily demand
+                    if display_name not in channel_demands_day1: 
+                        channel_demands_day1[display_name] = {'channel': ch_name}
 
         # 2. Parse Box Ring Matrix Sheets
         box_matrices = {"tier1": {}, "tier2": {}, "tier3": {}}
-        for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
+        for s_name, df_b in get_excel_sheets_cached(BOX_RING_DATA_URL, box_ring_sheet_filter):
             s_name_up = str(s_name).upper().strip()
             df_box = df_b.fillna('')
             if 'RING' in s_name_up and 'BOX' in s_name_up:
@@ -1510,14 +1602,39 @@ def get_data_availability(date: str):
                                     fq = safe_float(row_vals[or_col]) if (or_col != -1 and or_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
                                     if fq > 0: target_map[ck]['OR'] = {'qty': fq, 'source': s_name}
 
-        # 3. Parse Production Master Sheets
+        # Build optimized lookup sub-matrices for Ring per Box (Tier1/2) and Box Data (Tier3)
+        box_matrix_rpb = {}
+        for tier in ["tier2", "tier1"]:
+            for part_key, part_data in box_matrices[tier].items():
+                if part_key not in box_matrix_rpb: box_matrix_rpb[part_key] = {}
+                for p_code, details in part_data.items():
+                    if details.get('qty', 0.0) > 0: box_matrix_rpb[part_key][p_code] = details
+
+        box_matrix_rbd = {}
+        for part_key, part_data in box_matrices["tier3"].items():
+            if part_key not in box_matrix_rbd: box_matrix_rbd[part_key] = {}
+            for p_code, details in part_data.items():
+                if details.get('qty', 0.0) > 0: box_matrix_rbd[part_key][p_code] = details
+
+        # 3. Parse Production Master Sheets (Synchronized exact logic with main scheduler)
         weight_matrix = {}
         furnace_map = {}
         machines_data = {'FACE': {}, 'OD': {}}
         furnace_specs_local = DEFAULT_FURNACES.copy()
         
-        for sheet_name, df_m in process_excel_sequentially(SHO_PRODUCTION_URL):
-            if sheet_name == 'WEIGHTS':
+        for sheet_name, df_m in get_excel_sheets_cached(SHO_PRODUCTION_URL, prod_master_sheet_filter):
+            sheet_name_up = str(sheet_name).upper().strip()
+            
+            if 'FURNACE' in sheet_name_up or 'AICHELIN' in sheet_name_up:
+                if 'FLEX' not in sheet_name_up:
+                    for r in range(len(df_m)):
+                        row = df_m.iloc[r].values
+                        f_name = str(row[0]).strip().upper() if len(row) > 0 else ""
+                        cap = safe_float(row[1]) if len(row) > 1 else 0.0
+                        if f_name and cap > 0 and ('FURNACE' in f_name or 'AICHELIN' in f_name or 'UNITHERM' in f_name):
+                            furnace_specs_local[f_name] = cap
+            
+            if sheet_name_up == 'WEIGHTS':
                 df_w = df_m.fillna('')
                 header_idx = -1
                 for r_idx in range(min(10, len(df_w))):
@@ -1542,19 +1659,20 @@ def get_data_availability(date: str):
                                     clean_keys = get_lookup_variants(raw_fam, part_code)
                                     for ck in clean_keys: weight_matrix[f"{ck}_{part_code}"] = wt_val
 
-            elif 'FURNACE' in str(sheet_name).upper() and 'FLEX' in str(sheet_name).upper():
+            elif 'FURNACE' in sheet_name_up and 'FLEX' in sheet_name_up:
                 df_f = df_m
                 if len(df_f) > 0:
-                    df_f.columns = [str(x).strip().upper() for x in df_f.iloc[0]]
-                    for idx, r in df_f.iloc[1:].iterrows():
-                        comp_level = str(r.iloc[0]).strip() if len(r) > 0 else ""
+                    df_f_cols = [str(x).strip().upper() for x in df_f.iloc[0]]
+                    for idx, r_row in enumerate(df_f.values[1:]):
+                        r = pd.Series(r_row, index=df_f_cols)
+                        comp_level = str(r_row[0]).strip() if len(r_row) > 0 else ""
                         if is_invalid_part(comp_level): continue
                         p_code = 'IR' if comp_level.startswith('IM') else ('OR' if comp_level.startswith('OM') else None)
                         if p_code:
                             clean_keys = get_lookup_variants(comp_level, p_code)
                             valid_furnaces = []
                             for fn_key in ['PRIMARY FURNA', 'PRIMARY FURNACE', 'ALTERNATIVE 1', 'ALTERNATIVE 2']:
-                                fn = str(r.get(fn_key, '')).strip().upper()
+                                fn = str(r.get(fn_key, '')).strip().upper() if fn_key in r else ""
                                 if not fn or fn == 'NAN': continue
                                 matched_fn = None
                                 if fn == "AU" or "UNITHERM" in fn: matched_fn = "AICHELIN UNITHERM ( 2033 )"
@@ -1564,7 +1682,7 @@ def get_data_availability(date: str):
                             if valid_furnaces:
                                 for ck in clean_keys: furnace_map[f"{ck}_{p_code}"] = valid_furnaces
 
-            if sheet_name not in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']:
+            if sheet_name_up not in ['WEIGHTS', 'FURNACE TYPE FLEXIBILITY', 'RING PER BOX.', 'CHANNEL PROCESS FLEXIBILITY'] and 'FLEX' not in sheet_name_up:
                 str_matrix = df_m.fillna('').astype(str).values
                 current_m_num = None
                 current_m_type = "UNKNOWN"
@@ -1583,90 +1701,7 @@ def get_data_availability(date: str):
                             if current_m_num not in machines_data[current_m_type]:
                                 machines_data[current_m_type][current_m_num] = {'name': current_m_num, 'rates': {}}
                             norm_headers = [re.sub(r'[\s./_\-]', '', h) for h in h_row]
-                            type_idx = next((j for j, h in enumerate(norm_headers) if 'TYPE' in h or 'BEARING' in h or 'PART' in h), -1)
+                            std_hr_idx = next((j for j, h in enumerate(norm_headers) if 'STDHR' in h), -1)
+                            box_hr_idx = next((j for j, h in enumerate(norm_headers) if 'BOX' in h and 'HR' in h), -1)
                             ring_hr_idx = next((j for j, h in enumerate(norm_headers) if ('RING' in h and 'HR' in h) or ('QTY' in h and 'HR' in h) or 'RATE' in h), -1)
-                            for offset2 in range(1, 200):
-                                if r + offset2 >= str_matrix.shape[0]: break
-                                row_vals = str_matrix[r + offset2]
-                                if "MACHINE" in " ".join(row_vals).upper() or "M/C" in " ".join(row_vals).upper(): break
-                                raw_t = str(row_vals[type_idx]).strip() if (type_idx != -1 and type_idx < len(row_vals)) else ""
-                                if is_invalid_part(raw_t): continue
-                                for pc in ['IR', 'OR']:
-                                    rate_rings = safe_float(row_vals[ring_hr_idx]) if (ring_hr_idx != -1 and ring_hr_idx < len(row_vals)) else 1.0
-                                    clean_keys = get_lookup_variants(raw_t, pc)
-                                    for ck in clean_keys:
-                                        machines_data[current_m_type][current_m_num]['rates'][f"{ck}_{pc}"] = rate_rings
-
-        # 4. Generate structured rows exactly as requested
-        records = []
-        for disp_name, data in sorted(channel_demands_day1.items(), key=lambda x: (x[1]['channel'], x[0])):
-            for pc in ['IR', 'OR']:
-                variants = get_lookup_variants(disp_name, pc)
-                
-                # Weight lookup
-                wt = get_weight_for_part(disp_name, pc, weight_matrix)
-                wt_display = f"{wt}" if wt is not None else "Missing Weight"
-                
-                # Furnace lookup
-                explicit_furnaces = None
-                for var in variants:
-                    if f"{var}_{pc}" in furnace_map:
-                        explicit_furnaces = furnace_map[f"{var}_{pc}"]
-                        break
-                if explicit_furnaces:
-                    primary_f = explicit_furnaces[0] if len(explicit_furnaces) > 0 else "No Compatible Furnace"
-                    alt_f1 = explicit_furnaces[1] if len(explicit_furnaces) > 1 else ""
-                    alt_f2 = explicit_furnaces[2] if len(explicit_furnaces) > 2 else ""
-                else:
-                    primary_f = "No Compatible Furnace"
-                    alt_f1 = ""
-                    alt_f2 = ""
-                    
-                # Face machine lookup
-                comp_face = []
-                for m_num, m_info in machines_data.get('FACE', {}).items():
-                    if get_rate_for_part(disp_name, pc, m_info.get('rates', {}), m_num) > 0:
-                        comp_face.append(m_num)
-                face_display = ", ".join(comp_face) if comp_face else "No Compatible Face Machine"
-                
-                # OD machine lookup
-                comp_od = []
-                for m_num, m_info in machines_data.get('OD', {}).items():
-                    if get_rate_for_part(disp_name, pc, m_info.get('rates', {}), m_num) > 0:
-                        comp_od.append(m_num)
-                od_display = ", ".join(comp_od) if comp_od else "No Compatible OD Machine"
-                
-                # Ring per Box (tier1/tier2)
-                rpb_val = 0.0
-                for tier in ["tier1", "tier2"]:
-                    for var in variants:
-                        if var in box_matrices[tier] and pc in box_matrices[tier][var]:
-                            rpb_val = box_matrices[tier][var][pc]['qty']
-                            break
-                    if rpb_val > 0: break
-                rpb_display = f"{int(rpb_val)}" if rpb_val > 0 else ""
-                
-                # Ring/Box Data (tier3)
-                rb_val = 0.0
-                for var in variants:
-                    if var in box_matrices["tier3"] and pc in box_matrices["tier3"][var]:
-                        rb_val = box_matrices["tier3"][var][pc]['qty']
-                        break
-                rb_display = f"{round(rb_val, 2)}" if rb_val > 0 else "Missing Data"
-                
-                records.append({
-                    "channel": data['channel'],
-                    "bearing_type": disp_name,
-                    "part": pc,
-                    "weight": wt_display,
-                    "primary_furnace": primary_f,
-                    "alternative_furnace_1": alt_f1,
-                    "alternative_furnace_2": alt_f2,
-                    "compatible_face_machine": face_display,
-                    "compatible_od_machine": od_display,
-                    "ring_per_box": rpb_display,
-                    "ring_box_data": rb_display
-                })
-        return {"status": "success", "data": records}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
+                            rpb_idx = next((j for j, h in enumerate(norm_headers) if 'RING' in h and 'I seem to be encountering an error. Can I try something else for you?

@@ -1441,6 +1441,140 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_fam = matched_state.get("last_fam")
                 res.last_pc = matched_state.get("last_pc")
 
+        # ==========================================
+# MAIN SCHEDULER ROUTE
+# ==========================================
+@router.post("/api/schedule")
+def generate_schedule(payload: ScheduleRequest):
+    debug_logs, unscheduled = [], []
+    RATE_CACHE.clear()
+    WEIGHT_CACHE.clear()
+    FURNACE_CACHE.clear()
+    VARIANTS_CACHE.clear()
+    gc.collect()
+    
+    try:
+        req_date = datetime.strptime(payload.date, "%Y-%m-%d")
+        day_1 = req_date  
+        day_2 = req_date + timedelta(days=1)
+        month_str = req_date.strftime("%Y-%m")
+        
+        monthly_data = load_monthly_tracking()
+        if month_str not in monthly_data: monthly_data[month_str] = {}
+
+        channel_demands_day1, channel_demands_day2 = {}, {}
+        
+        # 1. LOAD ONLY DAILY TRANSACTIONAL ZEROSET FROM EXCEL (Cached dynamically)
+        for sheet_name, df_zero in get_excel_sheets_cached(ZEROSET_URL, zeroset_sheet_filter):
+            sheet_str_upper = str(sheet_name).strip().upper()
+            if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
+                ch_name = f"CH{sheet_str_upper.zfill(2)}"
+            elif sheet_str_upper == "SABB": ch_name = "SABB"
+            elif sheet_str_upper.startswith("T ") or any(sheet_str_upper.startswith(f"T{k}") for k in range(1, 12)):
+                ch_name = sheet_str_upper
+            elif "HUB" in sheet_str_upper: ch_name = sheet_str_upper
+            else: ch_name = sheet_str_upper
+
+            ir_multiplier = 2 if any(k in sheet_str_upper for k in ["HUB", "TBHU", "THUB"]) else 1
+            
+            r_idx, type_col_idx, mv_col_idx = None, None, None
+            c1_col, c2_col = None, None
+            monthly_cols = []
+            
+            for i in range(min(25, len(df_zero))):
+                row_strs = [str(x).strip().upper() for x in df_zero.iloc[i].values]
+                row_joined = " ".join(row_strs)
+                if type_col_idx is None:
+                    for j, val in enumerate(row_strs):
+                        if val == "TYPE" or "TYPE " in val or " TYPE" in val:
+                            type_col_idx = j; break
+                    if type_col_idx is None:
+                        for j, val in enumerate(row_strs):
+                            if val in ["MF", "PART NO", "BRG NO"]: type_col_idx = j; break
+                if mv_col_idx is None:
+                    for j, val in enumerate(row_strs):
+                        if val in ["MV", "FV", "VAR", "VARIANT"]: mv_col_idx = j; break
+                        
+                if any(k in row_joined for k in ['MTD', 'PKWIP', 'PLAN', 'ASKING']):
+                    r_idx = i
+                    for j, val in enumerate(df_zero.iloc[i].values):
+                        if is_target_date(val, day_1): c1_col = j
+                        if is_target_date(val, day_2): c2_col = j
+                        s_val = str(val).strip()
+                        if s_val.isdigit() and 1 <= int(s_val) <= 31: monthly_cols.append(j)
+                if r_idx is not None and type_col_idx is not None and c1_col is not None: break
+
+            col_to_use = type_col_idx if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "SABB"] else mv_col_idx
+            if col_to_use is None: col_to_use = mv_col_idx if mv_col_idx is not None else type_col_idx
+
+            if r_idx is not None and type_col_idx is not None:
+                last_mf = ""
+                for idx in range(r_idx + 1, len(df_zero)):
+                    row_vals_zero = list(df_zero.iloc[idx].values)
+                    
+                    mf_val = str(row_vals_zero[type_col_idx]).strip() if (type_col_idx is not None and type_col_idx < len(row_vals_zero)) else ""
+                    if mf_val and mf_val not in ["NAN", "NONE"]: last_mf = mf_val
+                    raw_t = str(row_vals_zero[col_to_use]).strip() if (col_to_use is not None and col_to_use < len(row_vals_zero)) else ""
+                    if not raw_t or raw_t in ["NAN", "NONE"]: raw_t = last_mf
+                    if is_invalid_part(raw_t): continue
+                    
+                    display_name = get_display_name(raw_t)
+                    GLOBAL_PART_TO_CHANNEL[display_name] = ch_name
+                    if display_name not in monthly_data[month_str]:
+                        monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": ch_name}
+                    
+                    row_monthly_sum = sum([safe_float(row_vals_zero[col]) for col in monthly_cols if col < len(row_vals_zero)])
+                    if row_monthly_sum > 0: monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
+                    
+                    val1 = safe_float(row_vals_zero[c1_col]) if (c1_col is not None and c1_col < len(row_vals_zero)) else 0.0
+                    val2 = safe_float(row_vals_zero[c2_col]) if (c2_col is not None and c2_col < len(row_vals_zero)) else 0.0
+                    
+                    r1 = val1 * 1000 if val1 > 0 else 0.0
+                    r2 = val2 * 1000 if val2 > 0 else 0.0
+                    
+                    if r1 > 0:
+                        if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
+                        channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
+                        channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
+                        
+                    if r2 > 0:
+                        if display_name not in channel_demands_day2: channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
+                        channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
+                        channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
+
+        # 2. LOAD STATIC LOOKUPS FROM IN-MEMORY CACHE (NO EXCEL RUNTIME PARSING)
+        weight_matrix = MASTER_DATA_CACHE.get("weights") or {}
+        furnace_map = MASTER_DATA_CACHE.get("furnace_type_flexibility") or {}
+        box_matrix = MASTER_DATA_CACHE.get("box_matrix") or {}
+        setup_chart_matrix = MASTER_DATA_CACHE.get("setup_chart") or {}
+        furnace_specs_local = MASTER_DATA_CACHE.get("furnaces_specs") or DEFAULT_FURNACES.copy()
+
+        current_state = get_previous_day_state(payload.date)
+        work_items, resources = [], []
+        
+        for f_name, cap in furnace_specs_local.items(): 
+            resources.append(Resource(f_name, 'HT', cap))
+        
+        face_mcs = MASTER_DATA_CACHE.get("face_machine_compatibility") or {}
+        for m_num, rates in face_mcs.items(): 
+            resources.append(Resource(m_num, 'FACE', rates))
+            
+        od_mcs = MASTER_DATA_CACHE.get("od_machine_compatibility") or {}
+        for m_num, rates in od_mcs.items(): 
+            resources.append(Resource(m_num, 'OD', rates))
+
+        for res in resources:
+            norm_res_id = normalize_resource_name(res.id)
+            matched_state = None
+            for sm_id, sm_data in current_state.get("machines", {}).items():
+                if normalize_resource_name(sm_id) == norm_res_id:
+                    matched_state = sm_data
+                    break
+            if matched_state:
+                res.ready_time = float(matched_state.get("ready_time", 0.0))
+                res.last_fam = matched_state.get("last_fam")
+                res.last_pc = matched_state.get("last_pc")
+
         ht_balances = {}
         for w_key, w_data in current_state.get("wip", {}).items():
             if "|" not in w_key: continue
@@ -1449,4 +1583,5 @@ def generate_schedule(payload: ScheduleRequest):
             
             if "ht_balance" in w_data: ht_balances[(disp, pc)] = float(w_data["ht_balance"])
                 
-            routing = get_routing_for_part(ch_norm, pcSorry, something went wrong. Please try your request again.
+            routing = get_routing_for_part(ch_norm, pc)
+       

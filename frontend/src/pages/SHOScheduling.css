@@ -1,3 +1,6 @@
+/* ==========================================
+   1. GENERAL LAYOUT & CONTAINER STYLES
+   ========================================== */
 .sho-container {
   font-family: Arial, sans-serif;
   padding: 15px;
@@ -42,10 +45,39 @@
   padding: 8px 20px;
   cursor: pointer;
   margin-left: auto;
+  transition: background-color 0.15s ease;
 }
 .btn-save:hover:not(:disabled) { background-color: #004494; }
 .btn-save:disabled { background-color: #7b9bb9; cursor: not-allowed; }
 
+/* ==========================================
+   2. TAB NAVIGATION
+   ========================================== */
+.tab-buttons {
+  display: flex;
+  margin-bottom: 10px;
+  gap: 5px;
+  flex-wrap: wrap; /* Keeps tabs clean on narrower viewport widths */
+}
+.tab-buttons button {
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: bold;
+  border: 1px solid #aaa;
+  border-bottom: none;
+  background-color: #e9ecef;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+.tab-buttons button.active {
+  background-color: white;
+  border-top: 3px solid #0056b3;
+  color: #004085;
+}
+
+/* ==========================================
+   3. TAB 1: BUFFER ENTRY (EXCEL VIEW)
+   ========================================== */
 .table-scroll-container {
   flex-grow: 1;
   overflow: auto;
@@ -136,26 +168,9 @@
   background-color: #d6d8db; 
 }
 
-.tab-buttons {
-  display: flex;
-  margin-bottom: 10px;
-  gap: 5px;
-}
-.tab-buttons button {
-  padding: 8px 16px;
-  font-size: 14px;
-  font-weight: bold;
-  border: 1px solid #aaa;
-  border-bottom: none;
-  background-color: #e9ecef;
-  cursor: pointer;
-}
-.tab-buttons button.active {
-  background-color: white;
-  border-top: 3px solid #0056b3;
-  color: #004085;
-}
-
+/* ==========================================
+   4. TAB 3: PRODUCTION SCHEDULE STYLES
+   ========================================== */
 .image-layout-container {
   background-color: white;
   border: 2px solid #000;
@@ -245,3 +260,69 @@
 .inner-ht-table td { border: 1px solid #999; padding: 4px; }
 .inner-ht-table .machine-name-row td { text-align: center; padding-left: 0; }
 .nested-td { padding: 0; vertical-align: top; }
+
+/* ==========================================
+   5. NEW ADDITIONS: UPDATED TAB STYLING
+   ========================================== */
+
+/* Subtly highlights rows under cursor for easier scanning on complex grids */
+.img-table tbody tr:hover {
+  background-color: #f1f7fc;
+}
+
+/* Styled Inputs & Dropdowns for Breakdown Grid (Tab 2) */
+.img-table select,
+.img-table input[type="time"] {
+  padding: 4px 8px;
+  border: 1px solid #aaa;
+  border-radius: 4px;
+  font-family: inherit;
+  font-size: 12px;
+  background-color: #fff;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.img-table select:focus,
+.img-table input[type="time"]:focus {
+  border-color: #0056b3;
+  box-shadow: 0 0 0 2px rgba(0, 86, 179, 0.15);
+}
+
+.img-table input[type="time"]:disabled {
+  background-color: #e9ecef;
+  border-color: #ccc;
+  cursor: not-allowed;
+  color: #8c8c8c;
+}
+
+/* Standardize Reset Action Button inside Breakdown Grid */
+.img-table button {
+  padding: 4px 10px;
+  cursor: pointer;
+  background-color: #f8f9fa;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: bold;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+.img-table button:hover {
+  background-color: #e2e6ea;
+  border-color: #dae0e5;
+}
+
+/* Data Availability Alert styling (Tab 5) */
+.text-missing {
+  color: #dc3545;
+  font-weight: bold;
+}
+
+/* Unscheduled Parts Section styling in Tab 3 */
+.unscheduled-alert-box {
+  margin-top: 20px;
+  padding: 15px;
+  background-color: #fff5f5;
+  border: 1px solid #ffcccc;
+  border-radius: 5px;
+}

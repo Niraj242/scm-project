@@ -138,115 +138,6 @@ class SaveBreakdownsRequest(BaseModel):
     date: str
     entries: List[BreakdownItem]
 
-@router.get("/api/health")
-def health_check():
-    return {"status": "ok"}
-
-@router.get("/api/monthly_tracking")
-def get_monthly_tracking_api():
-    return load_monthly_tracking()
-
-@router.get("/api/machines")
-def get_machines():
-    try:
-        state = get_setting('pending_state', {})
-        if "plant_state" in state and "machines" in state["plant_state"]:
-            return state["plant_state"]["machines"]
-        return {}
-    except Exception:
-        return {}
-
-@router.get("/api/get_plan")
-def get_plan(date: str):
-    try:
-        plans = load_saved_plan()
-        return plans.get(date, {})
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-
-@router.post("/api/save_plan")
-def save_plan(payload: SavePlanRequest):
-    try:
-        plans = load_saved_plan()
-        plans[payload.date] = payload.plan
-        save_setting('saved_plan', plans)
-
-        pending = get_setting('pending_state', {})
-        if pending:
-            if "monthly_data" in pending:
-                month_str = payload.date[:7]
-                monthly_all = load_monthly_tracking()
-                monthly_all[month_str] = pending["monthly_data"]
-                save_monthly_tracking(monthly_all)
-            if "plant_state" in pending:
-                save_daily_state(payload.date, pending["plant_state"])
-            save_setting('pending_state', {})
-        return {"status": "success"}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-
-# ==========================================
-# BREAKDOWN ENDPOINTS
-# ==========================================
-@router.get("/api/breakdowns")
-def get_breakdowns(date: str):
-    saved = {}
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            c = conn.cursor()
-            c.execute("SELECT resource, status, start_time, end_time FROM breakdowns WHERE date=?", (date,))
-            for row in c.fetchall():
-                saved[row[0]] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
-    except Exception:
-        pass
-
-    furnaces = list(DEFAULT_FURNACES.keys())
-    
-    face_mcs = set()
-    od_mcs = set()
-    state = get_setting('pending_state', {})
-    if "plant_state" in state and "machines" in state["plant_state"]:
-        for m in state["plant_state"]["machines"].keys():
-            if m in furnaces: continue
-            mu = str(m).upper()
-            if "FACE" in mu or "DDS" in mu or "BG" in mu: face_mcs.add(m)
-            else: od_mcs.add(m)
-
-    if not face_mcs: face_mcs = {"DDS 1", "DDS 2", "BG 1"}
-    if not od_mcs: od_mcs = {"CL 1", "CL 2", "CELL 1"}
-
-    channels = [
-        "CH01", "CH02", "CH03", "CH04", "CH05", "CH06", "CH07", "CH08", "CH09", "CH10", "CH11", "CH12", "CH13",
-        "SABB", "T 1", "T 2", "T 3", "T 4", "T 5", "T 6", "T 7", "T 8", "T 9", "T10", "T11",
-        "HUB 1.1", "HUB 1.2", "HUB 1.3", "HUB 1.4", "T HUB 1.1", "T HUB 1.2", "T HUB 1.3"
-    ]
-
-    res_list = []
-    for f in sorted(furnaces):
-        res_list.append({"resource": f, "type": "Furnace", **saved.get(f, {"status": "Available", "start_time": "", "end_time": ""})})
-    for m in sorted(face_mcs):
-        res_list.append({"resource": m, "type": "Face Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
-    for m in sorted(od_mcs):
-        res_list.append({"resource": m, "type": "OD Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
-    for c in channels:
-        res_list.append({"resource": c, "type": "Channel", **saved.get(c, {"status": "Available", "start_time": "", "end_time": ""})})
-
-    return {"status": "success", "data": res_list}
-
-@router.post("/api/save_breakdowns")
-def save_breakdowns(payload: SaveBreakdownsRequest):
-    try:
-        with sqlite3.connect(DB_PATH) as conn:
-            c = conn.cursor()
-            c.execute("DELETE FROM breakdowns WHERE date=?", (payload.date,))
-            for ent in payload.entries:
-                c.execute("INSERT INTO breakdowns (date, resource, status, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
-                          (payload.date, ent.resource, ent.status, ent.start_time, ent.end_time))
-            conn.commit()
-        return {"status": "success"}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-
 # ==========================================
 # UTIL FUNCTIONS
 # ==========================================
@@ -275,6 +166,42 @@ def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
         gc.collect()
     except Exception as e:
         print(f"Error loading sequentially from {url}: {e}")
+
+# Global Resource Cache to prevent re-reading Excel heavily for basic routing/master lists
+MASTER_RESOURCES_CACHE = {"furnaces": [], "face": [], "od": [], "channels": []}
+
+def get_all_resources():
+    if MASTER_RESOURCES_CACHE["channels"]:
+        return MASTER_RESOURCES_CACHE
+    
+    channels = set()
+    for ch, pc in PROCESS_FLOW.keys():
+        channels.add(ch)
+    MASTER_RESOURCES_CACHE["channels"] = sorted(list(channels))
+
+    furnaces = set(DEFAULT_FURNACES.keys())
+    MASTER_RESOURCES_CACHE["furnaces"] = sorted(list(furnaces))
+
+    face_mcs = set()
+    od_mcs = set()
+    for sheet_name, df_m in process_excel_sequentially(SHO_PRODUCTION_URL):
+        if sheet_name not in ['WEIGHTS', 'Furnace Type Flexibility', 'RING PER BOX.', 'Channel Process Flexibility']:
+            str_matrix = df_m.fillna('').astype(str).values
+            for r in range(str_matrix.shape[0]):
+                row_text = " ".join(str_matrix[r]).upper()
+                if 'MACHINE' in row_text or 'M/C' in row_text:
+                    cells = [c.strip() for c in str_matrix[r] if c.strip()]
+                    m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
+                    if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
+                        if "FACE" in row_text or "DDS" in m_cand.upper() or "BG" in m_cand.upper(): face_mcs.add(m_cand)
+                        elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand: od_mcs.add(m_cand)
+
+    if not face_mcs: face_mcs = {"DDS 1", "DDS 2", "BG 1"}
+    if not od_mcs: od_mcs = {"CL 1", "CL 2", "CELL 1"}
+
+    MASTER_RESOURCES_CACHE["face"] = sorted(list(face_mcs))
+    MASTER_RESOURCES_CACHE["od"] = sorted(list(od_mcs))
+    return MASTER_RESOURCES_CACHE
 
 def normalize_channel(ch_str):
     ch = str(ch_str).strip().upper()
@@ -574,6 +501,102 @@ class Resource:
         self.bd_end = 0.0
         self.capacity_info = capacity_info 
         self.rows = []
+
+# ==========================================
+# GENERAL ENDPOINTS
+# ==========================================
+@router.get("/api/health")
+def health_check():
+    return {"status": "ok"}
+
+@router.get("/api/monthly_tracking")
+def get_monthly_tracking_api():
+    return load_monthly_tracking()
+
+@router.get("/api/machines")
+def get_machines():
+    try:
+        res = get_all_resources()
+        machines_dict = {}
+        for f in res["furnaces"]: machines_dict[f] = {"type": "Furnace"}
+        for m in res["face"]: machines_dict[m] = {"type": "Face Grinding"}
+        for m in res["od"]: machines_dict[m] = {"type": "OD Grinding"}
+        for c in res["channels"]: machines_dict[c] = {"type": "Channel"}
+        return machines_dict
+    except Exception:
+        return {}
+
+@router.get("/api/get_plan")
+def get_plan(date: str):
+    try:
+        plans = load_saved_plan()
+        return plans.get(date, {})
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@router.post("/api/save_plan")
+def save_plan(payload: SavePlanRequest):
+    try:
+        plans = load_saved_plan()
+        plans[payload.date] = payload.plan
+        save_setting('saved_plan', plans)
+
+        pending = get_setting('pending_state', {})
+        if pending:
+            if "monthly_data" in pending:
+                month_str = payload.date[:7]
+                monthly_all = load_monthly_tracking()
+                monthly_all[month_str] = pending["monthly_data"]
+                save_monthly_tracking(monthly_all)
+            if "plant_state" in pending:
+                save_daily_state(payload.date, pending["plant_state"])
+            save_setting('pending_state', {})
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+# ==========================================
+# BREAKDOWN ENDPOINTS
+# ==========================================
+@router.get("/api/breakdowns")
+def get_breakdowns(date: str):
+    saved = {}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT resource, status, start_time, end_time FROM breakdowns WHERE date=?", (date,))
+            for row in c.fetchall():
+                saved[row[0]] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
+    except Exception:
+        pass
+
+    master = get_all_resources()
+    res_list = []
+    
+    for f in master["furnaces"]:
+        res_list.append({"resource": f, "type": "Furnace", **saved.get(f, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in master["face"]:
+        res_list.append({"resource": m, "type": "Face Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in master["od"]:
+        res_list.append({"resource": m, "type": "OD Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for c in master["channels"]:
+        res_list.append({"resource": c, "type": "Channel", **saved.get(c, {"status": "Available", "start_time": "", "end_time": ""})})
+
+    return {"status": "success", "data": res_list}
+
+@router.post("/api/save_breakdowns")
+def save_breakdowns(payload: SaveBreakdownsRequest):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM breakdowns WHERE date=?", (payload.date,))
+            for ent in payload.entries:
+                c.execute("INSERT INTO breakdowns (date, resource, status, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+                          (payload.date, ent.resource, ent.status, ent.start_time, ent.end_time))
+            conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 # ==========================================
 # MAIN SCHEDULER ROUTE
@@ -1008,21 +1031,40 @@ def generate_schedule(payload: ScheduleRequest):
 
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}
+        channel_bd_map = {}
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 c = conn.cursor()
                 c.execute("SELECT resource, status, start_time, end_time FROM breakdowns WHERE date=?", (payload.date,))
                 for row in c.fetchall():
-                    db_breakdowns[row[0]] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
+                    r_name = row[0]
+                    db_breakdowns[r_name] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
         except Exception:
             pass
+
+        # Build Channel Breakdown Map explicitly for lookup
+        for k, v in db_breakdowns.items():
+            norm_k = normalize_channel(k)
+            st = v.get("status", "")
+            if "Complete" in st:
+                channel_bd_map[norm_k] = {"blocked": True}
+            else:
+                c_st = v.get('start_time', '')
+                c_et = v.get('end_time', '')
+                if c_st and c_et:
+                    channel_bd_map[norm_k] = {
+                        "blocked": False,
+                        "start": time_str_to_float(c_st),
+                        "end": time_str_to_float(c_et)
+                    }
 
         avail_dict = payload.machine_availability if hasattr(payload, 'machine_availability') else {}
         for res in resources:
             bd_info = db_breakdowns.get(res.id)
             if bd_info:
-                if bd_info["status"] == "Complete Breakdown": res.blocked = True
-                elif bd_info["status"] == "Available":
+                if "Complete" in bd_info.get("status", ""): 
+                    res.blocked = True
+                else:
                     st_str = bd_info.get('start_time', '')
                     et_str = bd_info.get('end_time', '')
                     if st_str and et_str:
@@ -1087,11 +1129,8 @@ def generate_schedule(payload: ScheduleRequest):
                 # Filter out Complete Channel Breakdowns
                 filtered_active_items = []
                 for i in active_items:
-                    ch_info = None
-                    for k, v in db_breakdowns.items():
-                        if normalize_channel(k) == normalize_channel(i.channel):
-                            ch_info = v; break
-                    if ch_info and ch_info["status"] == "Complete Breakdown":
+                    norm_ch = normalize_channel(i.channel)
+                    if norm_ch in channel_bd_map and channel_bd_map[norm_ch].get("blocked"):
                         i.missing_reason = "Channel Complete Breakdown"
                         continue
                     filtered_active_items.append(i)
@@ -1122,6 +1161,25 @@ def generate_schedule(payload: ScheduleRequest):
                             if res.last_fam == item.disp: setup = 0.0 if res.last_pc == item.pc else 2.0 
                         
                         start_time = max(res.ready_time + setup, item.ready_time)
+                        
+                        if res.type == 'HT':
+                            weight = item.rates[res.id][1]
+                            est_req_time = (item.qty * weight) / rate_or_cap
+                        else:
+                            est_req_time = item.qty / rate_or_cap
+
+                        # Adjust for machine breakdown overlap: delay scheduling until breakdown ends
+                        if res.has_bd and start_time < res.bd_end and (start_time + est_req_time) > res.bd_start:
+                            start_time = max(start_time, res.bd_end)
+
+                        # Adjust for channel breakdown overlap: delay scheduling until channel breakdown ends
+                        norm_ch = normalize_channel(item.channel)
+                        if norm_ch in channel_bd_map and not channel_bd_map[norm_ch].get("blocked"):
+                            ch_bds = channel_bd_map[norm_ch]["start"]
+                            ch_bde = channel_bd_map[norm_ch]["end"]
+                            if start_time < ch_bde and (start_time + est_req_time) > ch_bds:
+                                start_time = max(start_time, ch_bde)
+                                
                         if start_time >= res.max_time: continue
                         
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
@@ -1133,7 +1191,7 @@ def generate_schedule(payload: ScheduleRequest):
                         else:
                             req_time = item.qty / rate_or_cap
                             
-                        available_time_limit = min(res.max_time, res.bd_start if (res.has_bd and start_time < res.bd_start) else res.max_time)
+                        available_time_limit = res.max_time
                         time_available = available_time_limit - start_time
                         
                         needs_split = 1 if req_time > time_available else 0
@@ -1162,24 +1220,6 @@ def generate_schedule(payload: ScheduleRequest):
                         if res.type == 'HT': chunk_qty = (actual_time * rate_or_cap) / weight
                         else: chunk_qty = actual_time * rate_or_cap
                 
-                # Machine Breakdown Windows
-                if res.has_bd and start_time < res.bd_end and (start_time + actual_time) > res.bd_start:
-                    actual_time += (res.bd_end - max(start_time, res.bd_start))
-
-                # Channel Partial Breakdown Windows
-                ch_info_active = None
-                for k, v in db_breakdowns.items():
-                    if normalize_channel(k) == normalize_channel(item.channel):
-                        ch_info_active = v; break
-                if ch_info_active and ch_info_active["status"] == "Available":
-                    c_st = ch_info_active.get('start_time', '')
-                    c_et = ch_info_active.get('end_time', '')
-                    if c_st and c_et:
-                        ch_bds = time_str_to_float(c_st)
-                        ch_bde = time_str_to_float(c_et)
-                        if start_time < ch_bde and (start_time + actual_time) > ch_bds:
-                            actual_time += (ch_bde - max(start_time, ch_bds))
-
                 if res.type == 'HT':
                     res_ready_time = start_time + actual_time + 0.5
                     out_time = start_time + actual_time + 3.5
@@ -1670,5 +1710,3 @@ def get_data_availability(date: str):
         return {"status": "success", "data": records}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
-

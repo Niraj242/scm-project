@@ -580,7 +580,15 @@ const SHOScheduling = () => {
                                 <tr key={idx}>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
-                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>{item.missed_boxes}</td>
+                                    {/* UPDATED: Displays both missed boxes and the detailed status reason */}
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>
+                                      {item.missed_boxes}
+                                      {item.status && (
+                                        <span style={{ color: '#b30000', marginLeft: '8px', fontWeight: 'bold' }}>
+                                          ({item.status})
+                                        </span>
+                                      )}
+                                    </td>
                                 </tr>
                             ))}
                         </tbody>

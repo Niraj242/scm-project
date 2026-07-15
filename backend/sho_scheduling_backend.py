@@ -257,7 +257,7 @@ def get_lookup_variants(raw_text, p_code=None):
     elif '/' in t and len(parts) > 1:
         if not any(x in parts[1] for x in ['Q', 'X']): t = parts[0].strip()
 
-    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q', 'LM', 'M', 'ETN9', 'J2/Q']
+    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'D', 'E', 'J', 'X', 'Q', 'LM', 'M', 'ETN9', 'J2/Q']
     t_nosuff = t
     changed = True
     while changed:

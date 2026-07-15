@@ -117,7 +117,6 @@ const SHOScheduling = () => {
     fetchSavedPlanForDate();
   }, [scheduleDate]);
 
-
   // Dynamically Fetch ALL Face, OD & HT Machines from Production Sheet
   useEffect(() => {
     const fetchMachines = async () => {
@@ -125,42 +124,21 @@ const SHOScheduling = () => {
       try {
         const response = await fetch(`${API_BASE}/api/machines`);
         const result = await response.json();
-        
-        // Accept either the new status wrapper OR the raw dictionary fallback
-        if (response.ok && (result.status === 'success' || !result.status)) {
-          
-          // Isolate the payload (handles if backend sends {status, data} OR just {...})
-          const machinePayload = result.data || result;
-          
-          let machineNames = [];
-          
-          // Safely extract the machine names into an array of strings
-          if (Array.isArray(machinePayload)) {
-             // If backend sends an array: ["Furnace 1"] OR [{"name": "Furnace 1"}]
-             machineNames = machinePayload.map(m => typeof m === 'string' ? m : (m.name || m.id));
-          } else if (typeof machinePayload === 'object' && machinePayload !== null) {
-             // If backend sends a dictionary: {"Furnace 1": {"type": "Furnace"}}
-             machineNames = Object.keys(machinePayload);
-          }
-
-          // Now we can safely map because machineNames is guaranteed to be an array of strings
-          const loadedMachines = machineNames.map(m => ({
+        if (response.ok && result.status === 'success') {
+          const loadedMachines = result.data.map(m => ({
             id: m, machine: m, enabled: true, bd_date: '', start_time: '', end_time: ''
           }));
-          
           setMachineAvailability(loadedMachines);
         } else {
-          console.warn("Failed to load machine list: " + (result.detail || result.message));
+          console.warn("Failed to load machine list: " + result.detail);
         }
       } catch (err) {
-        console.warn("Could not connect to backend to fetch machines. Details:", err);
+        console.warn("Could not connect to backend to fetch machines.");
       }
       setIsLoadingMachines(false);
     };
     fetchMachines();
   }, []);
-  
-
 
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
@@ -602,15 +580,7 @@ const SHOScheduling = () => {
                                 <tr key={idx}>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
-                                    {/* UPDATED: Displays both missed boxes and the detailed status reason */}
-                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>
-                                      {item.missed_boxes}
-                                      {item.status && (
-                                        <span style={{ color: '#b30000', marginLeft: '8px', fontWeight: 'bold' }}>
-                                          ({item.status})
-                                        </span>
-                                      )}
-                                    </td>
+                                    <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>{item.missed_boxes}</td>
                                 </tr>
                             ))}
                         </tbody>

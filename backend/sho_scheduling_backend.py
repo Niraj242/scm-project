@@ -1021,14 +1021,14 @@ def generate_schedule(payload: ScheduleRequest):
                     buffer_val = 0.0
                     ch_entry = payload.entries.get(ch_norm)
                     if isinstance(ch_entry, dict):
-                        raw_buf = ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))
+                        raw_buf = ch_entry.get('CHANNEL', ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0))))
                         try: buffer_val = float(raw_buf)
                         except: pass
                     elif ch_entry is not None:
                         try: buffer_val = float(ch_entry)
                         except: pass
                     
-                    # Score is matched directly to buffer value (smaller buffer numbers sort earlier)
+                    # Score is matched directly to channel buffer value (smaller buffer numbers sort earlier)
                     ch_stats[ch_norm] = {'demand': 0.0, 'buffer': buffer_val, 'score': buffer_val}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
@@ -1061,45 +1061,88 @@ def generate_schedule(payload: ScheduleRequest):
             raw_d2 = reqs['raw_d2']
             bal = ht_balances.get(key, 0.0)
             
-            buffer_val = ch_stats[ch_norm]['buffer']
             rpd = get_rpd_for_part(disp, pc, box_matrix)
             rpb = get_box_for_part(disp, pc, box_matrix)
             
-            if payload.unit_mode == 'day':
-                buffer_rings = buffer_val * rpd
-            elif payload.unit_mode == 'box':
-                buffer_rings = buffer_val * rpb
-            else:
-                buffer_rings = buffer_val
+            ch_entry = payload.entries.get(ch_norm, {})
+            ch_buf_raw = 0.0
+            od_buf_raw = 0.0
+            face_buf_raw = 0.0
+            ht_buf_raw = 0.0
+            
+            if isinstance(ch_entry, dict):
+                ch_buf_raw = float(ch_entry.get('CHANNEL', ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))))
+                od_buf_raw = float(ch_entry.get('OD', 0.0))
+                face_buf_raw = float(ch_entry.get('FACE', 0.0))
+                ht_buf_raw = float(ch_entry.get('HT', 0.0))
+            elif ch_entry is not None:
+                try: ch_buf_raw = float(ch_entry)
+                except: pass
 
-            total_stock = bal + buffer_rings
+            def to_rings(val):
+                if payload.unit_mode == 'day': return val * rpd
+                elif payload.unit_mode == 'box': return val * rpb
+                return val
+
+            buffers_state = {
+                'CHANNEL': to_rings(ch_buf_raw),
+                'OD': to_rings(od_buf_raw),
+                'FACE': to_rings(face_buf_raw),
+                'HT': to_rings(ht_buf_raw)
+            }
             
             wip_d1_sat = min(raw_d1, bal)
-            wip_d2_sat = min(raw_d2, bal - wip_d1_sat)
+            rem_d1 = raw_d1 - wip_d1_sat
             
-            d1_sat = min(raw_d1, total_stock)
-            total_stock -= d1_sat
-            net_d1 = raw_d1 - d1_sat
+            wip_d2_sat = min(raw_d2, max(0.0, bal - wip_d1_sat))
+            rem_d2 = raw_d2 - wip_d2_sat
             
-            d2_sat = min(raw_d2, total_stock)
-            total_stock -= d2_sat
-            net_d2 = raw_d2 - d2_sat
-            
-            actual_bal_consumed = min(bal, d1_sat + d2_sat)
+            actual_bal_consumed = wip_d1_sat + wip_d2_sat
             leftover_bal = bal - actual_bal_consumed
             
-            reqs['net_d1'] = net_d1
-            reqs['net_d2'] = net_d2
+            def apply_buffers(demand, bufs):
+                ch_d = min(demand, bufs['CHANNEL'])
+                bufs['CHANNEL'] -= ch_d
+                rem_ch = demand - ch_d
+                
+                od_d = min(rem_ch, bufs['OD'])
+                bufs['OD'] -= od_d
+                rem_od = rem_ch - od_d
+                
+                face_d = min(rem_od, bufs['FACE'])
+                bufs['FACE'] -= face_d
+                rem_face = rem_od - face_d
+                
+                ht_d = min(rem_face, bufs['HT'])
+                bufs['HT'] -= ht_d
+                rem_ht = rem_face - ht_d
+                
+                return {'CHANNEL': rem_ch, 'OD': rem_od, 'FACE': rem_face, 'HT': rem_ht}
+                
+            reqs_d1 = apply_buffers(rem_d1, buffers_state)
+            reqs_d2 = apply_buffers(rem_d2, buffers_state)
+            
+            reqs['net_d1'] = reqs_d1.get(first_stage, 0.0)
+            reqs['net_d2'] = reqs_d2.get(first_stage, 0.0)
             reqs['d2_satisfied'] = wip_d2_sat
             reqs['leftover_bal'] = leftover_bal
             reqs['first_stage'] = first_stage
             
             item_priority = ch_stats[ch_norm]['score']
-
-            if net_d1 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, item_priority, routing))
-            if net_d2 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
+            
+            schedulable = [s for s in routing if s in ['HT', 'FACE', 'OD']]
+            
+            if schedulable:
+                for day_idx, r_dict in [(0, reqs_d1), (1, reqs_d2)]:
+                    injections = {schedulable[0]: r_dict.get(schedulable[0], 0.0)}
+                    for i in range(1, len(schedulable)):
+                        curr = schedulable[i]
+                        prev = schedulable[i-1]
+                        injections[curr] = max(0.0, r_dict.get(curr, 0.0) - r_dict.get(prev, 0.0))
+                        
+                    for stage, qty in injections.items():
+                        if qty > 0:
+                            work_items.append(WorkItem(stage, disp, pc, day_idx, reqs['channel'], qty, 0.0, item_priority, routing))
 
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}
@@ -1268,7 +1311,7 @@ def generate_schedule(payload: ScheduleRequest):
                         
                         needs_split = 1 if req_time > time_available else 0
                         
-                        # Ascending sort logic key: direct item.priority orders least buffer first[cite: 1]
+                        # Ascending sort logic key: direct item.priority orders least buffer first
                         key = (needs_split, start_time, item.day_idx, gap, item.priority)
                         
                         if key < best_key:

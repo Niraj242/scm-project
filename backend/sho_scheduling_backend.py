@@ -840,7 +840,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if part_key not in box_matrix: box_matrix[part_key] = {}
                 for p_code, details in part_data.items():
                     if p_code not in box_matrix[part_key]:
-                        box_matrix[part_key][p_code] = details.copy()
+                        box_matrix[part_key][part_key] = details.copy()
                     else:
                         if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code]['qty'] = details['qty']
                         if 'rpd' in details: box_matrix[part_key][p_code]['rpd'] = details['rpd']
@@ -1007,7 +1007,6 @@ def generate_schedule(payload: ScheduleRequest):
                 rt = float(stage_data.get("rt", 0.0))
                 
                 if qty > 0 and stage != first_stage:
-                    # WIP items assigned an absolute lowest score (-100.0) so they always sort first in the ascending loop
                     work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, -100.0, routing))
 
         # -----------------------------------------------------
@@ -1028,7 +1027,6 @@ def generate_schedule(payload: ScheduleRequest):
                         try: buffer_val = float(ch_entry)
                         except: pass
                     
-                    # Score is matched directly to channel buffer value (smaller buffer numbers sort earlier)
                     ch_stats[ch_norm] = {'demand': 0.0, 'buffer': buffer_val, 'score': buffer_val}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
@@ -1063,6 +1061,8 @@ def generate_schedule(payload: ScheduleRequest):
             
             rpd = get_rpd_for_part(disp, pc, box_matrix)
             rpb = get_box_for_part(disp, pc, box_matrix)
+            if rpd <= 0: rpd = 1000.0
+            if rpb <= 0: rpb = 100.0
             
             ch_entry = payload.entries.get(ch_norm, {})
             ch_buf_raw = 0.0
@@ -1079,51 +1079,62 @@ def generate_schedule(payload: ScheduleRequest):
                 try: ch_buf_raw = float(ch_entry)
                 except: pass
 
-            def to_rings(val):
+            def to_rings(val, stage_key):
+                unit = payload.unit_mode
+                if isinstance(ch_entry, dict):
+                    unit = ch_entry.get(f"{stage_key}_unit", ch_entry.get(f"{stage_key}_mode", ch_entry.get("unit", ch_entry.get("unit_mode", payload.unit_mode))))
+                unit_str = str(unit).lower().strip()
+                if 'day' in unit_str: return val * rpd
+                if 'box' in unit_str or 'bx' in unit_str: return val * rpb
+                if 'ring' in unit_str or 'rng' in unit_str: return val
                 if payload.unit_mode == 'day': return val * rpd
-                elif payload.unit_mode == 'box': return val * rpb
+                if payload.unit_mode == 'box': return val * rpb
                 return val
 
             buffers_state = {
-                'CHANNEL': to_rings(ch_buf_raw),
-                'OD': to_rings(od_buf_raw),
-                'FACE': to_rings(face_buf_raw),
-                'HT': to_rings(ht_buf_raw)
+                'CHANNEL': to_rings(ch_buf_raw, 'CHANNEL'),
+                'OD': to_rings(od_buf_raw, 'OD'),
+                'FACE': to_rings(face_buf_raw, 'FACE'),
+                'HT': to_rings(ht_buf_raw, 'HT')
             }
             
-            wip_d1_sat = min(raw_d1, bal)
-            rem_d1 = raw_d1 - wip_d1_sat
+            # --- DAY-1 BACKWARD PROPAGATION DEDUCTION FLOW ---
+            rem_ch_d1 = max(0.0, raw_d1 - buffers_state['CHANNEL'])
+            buffers_state['CHANNEL'] = max(0.0, buffers_state['CHANNEL'] - raw_d1)
             
-            wip_d2_sat = min(raw_d2, max(0.0, bal - wip_d1_sat))
-            rem_d2 = raw_d2 - wip_d2_sat
+            rem_od_d1 = max(0.0, rem_ch_d1 - buffers_state['OD'])
+            buffers_state['OD'] = max(0.0, buffers_state['OD'] - rem_ch_d1)
             
-            actual_bal_consumed = wip_d1_sat + wip_d2_sat
-            leftover_bal = bal - actual_bal_consumed
+            rem_face_d1 = max(0.0, rem_od_d1 - buffers_state['FACE'])
+            buffers_state['FACE'] = max(0.0, buffers_state['FACE'] - rem_od_d1)
             
-            def apply_buffers(demand, bufs):
-                ch_d = min(demand, bufs['CHANNEL'])
-                bufs['CHANNEL'] -= ch_d
-                rem_ch = demand - ch_d
-                
-                od_d = min(rem_ch, bufs['OD'])
-                bufs['OD'] -= od_d
-                rem_od = rem_ch - od_d
-                
-                face_d = min(rem_od, bufs['FACE'])
-                bufs['FACE'] -= face_d
-                rem_face = rem_od - face_d
-                
-                ht_d = min(rem_face, bufs['HT'])
-                bufs['HT'] -= ht_d
-                rem_ht = rem_face - ht_d
-                
-                return {'CHANNEL': rem_ch, 'OD': rem_od, 'FACE': rem_face, 'HT': rem_ht}
-                
-            reqs_d1 = apply_buffers(rem_d1, buffers_state)
-            reqs_d2 = apply_buffers(rem_d2, buffers_state)
+            rem_ht_d1 = max(0.0, rem_face_d1 - buffers_state['HT'])
+            buffers_state['HT'] = max(0.0, buffers_state['HT'] - rem_face_d1)
             
-            reqs['net_d1'] = reqs_d1.get(first_stage, 0.0)
-            reqs['net_d2'] = reqs_d2.get(first_stage, 0.0)
+            reqs_d1 = {'CHANNEL': rem_ch_d1, 'OD': rem_od_d1, 'FACE': rem_face_d1, 'HT': rem_ht_d1}
+            
+            # --- DAY-2 BACKWARD PROPAGATION DEDUCTION FLOW ---
+            rem_ch_d2 = max(0.0, raw_d2 - buffers_state['CHANNEL'])
+            buffers_state['CHANNEL'] = max(0.0, buffers_state['CHANNEL'] - raw_d2)
+            
+            rem_od_d2 = max(0.0, rem_ch_d2 - buffers_state['OD'])
+            buffers_state['OD'] = max(0.0, buffers_state['OD'] - rem_ch_d2)
+            
+            rem_face_d2 = max(0.0, rem_od_d2 - buffers_state['FACE'])
+            buffers_state['FACE'] = max(0.0, buffers_state['FACE'] - rem_od_d2)
+            
+            rem_ht_d2 = max(0.0, rem_face_d2 - buffers_state['HT'])
+            buffers_state['HT'] = max(0.0, buffers_state['HT'] - rem_face_d2)
+            
+            reqs_d2 = {'CHANNEL': rem_ch_d2, 'OD': rem_od_d2, 'FACE': rem_face_d2, 'HT': rem_ht_d2}
+            
+            wip_d1_sat = min(rem_ht_d1, bal)
+            leftover_bal = bal - wip_d1_sat
+            wip_d2_sat = min(rem_ht_d2, leftover_bal)
+            leftover_bal -= wip_d2_sat
+            
+            reqs['net_d1'] = rem_ht_d1
+            reqs['net_d2'] = rem_ht_d2
             reqs['d2_satisfied'] = wip_d2_sat
             reqs['leftover_bal'] = leftover_bal
             reqs['first_stage'] = first_stage

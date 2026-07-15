@@ -209,8 +209,8 @@ def get_all_resources():
                     cells = [c.strip() for c in str_matrix[r] if c.strip()]
                     m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
                     if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
-                        if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): face_mcs.add(m_cand)
-                        elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: od_mcs.add(m_cand)
+                        if "FACE" in row_text or "DDS" in m_cand.upper() or "BG" in m_cand.upper(): face_mcs.add(m_cand)
+                        elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand: od_mcs.add(m_cand)
 
     if not face_mcs: face_mcs = {"DDS 1", "DDS 2", "BG 1"}
     if not od_mcs: od_mcs = {"CL 1", "CL 2", "CELL 1"}
@@ -451,6 +451,84 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
 # ==========================================
 # ROBUST BUFFER DAYS CONVERSION HELPERS
 # ==========================================
+def read_buffer_days(entries, bearing, channel, ir_or):
+    """
+    Extracts the entered buffer days by handling nested dicts, direct matches,
+    or composite keys (e.g. CH1_6205_IR, 6205_IR, CH1) dynamically with scoring.
+    """
+    if not entries:
+        return 0.0
+        
+    bearing_upper = str(bearing).strip().upper()
+    bearing_clean = re.sub(r'[\s_\-/|.]', '', bearing_upper)
+    channel_upper = str(channel).strip().upper()
+    channel_clean = re.sub(r'[\s_\-/|.]', '', channel_upper)
+    ir_or_upper = str(ir_or).strip().upper()
+    
+    def extract_val(v):
+        if isinstance(v, dict):
+            for key in ['buffer_day', 'buffer', 'value', 'qty', 'val']:
+                if key in v:
+                    return safe_float(v[key])
+            for k, val in v.items():
+                if isinstance(val, (int, float)) or str(val).replace('.','',1).isdigit():
+                    return safe_float(val)
+        return safe_float(v)
+
+    # 1. Check direct nested dictionary structures
+    if channel_upper in entries:
+        ch_sub = entries[channel_upper]
+        if isinstance(ch_sub, dict):
+            if bearing_upper in ch_sub:
+                br_sub = ch_sub[bearing_upper]
+                if isinstance(br_sub, dict):
+                    if ir_or_upper in br_sub:
+                        return extract_val(br_sub[ir_or_upper])
+                return extract_val(br_sub)
+            for k, v in ch_sub.items():
+                if re.sub(r'[\s_\-/|.]', '', str(k).upper()) == bearing_clean:
+                    if isinstance(v, dict) and ir_or_upper in v:
+                        return extract_val(v[ir_or_upper])
+                    return extract_val(v)
+            return extract_val(ch_sub)
+            
+    if bearing_upper in entries:
+        br_sub = entries[bearing_upper]
+        if isinstance(br_sub, dict):
+            if ir_or_upper in br_sub:
+                return extract_val(br_sub[ir_or_upper])
+            return extract_val(br_sub)
+        return extract_val(br_sub)
+
+    # 2. Score and retrieve from flat keys
+    best_score = -1
+    best_val = 0.0
+    
+    for k, v in entries.items():
+        k_upper = str(k).strip().upper()
+        k_clean = re.sub(r'[\s_\-/|.]', '', k_upper)
+        
+        if bearing_clean in k_clean and channel_clean in k_clean and ir_or_upper in k_clean:
+            score = 100
+        elif bearing_clean in k_clean and ir_or_upper in k_clean:
+            score = 80
+        elif bearing_clean in k_clean and channel_clean in k_clean:
+            score = 70
+        elif bearing_clean in k_clean or k_clean in bearing_clean or any(var in k_clean for var in get_lookup_variants(bearing, ir_or)):
+            score = 50
+        elif channel_clean == k_clean or normalize_channel(k) == channel:
+            score = 30
+        else:
+            score = 0
+            
+        if score > best_score:
+            val = extract_val(v)
+            if val > 0:
+                best_score = score
+                best_val = val
+                
+    return best_val
+
 def get_channel_entry(entries, ch_norm):
     """Retrieves an entry mapping safely by normalizing target channel keys."""
     if not entries:
@@ -492,73 +570,19 @@ def get_buffer_rings_for_part(disp, side, ch_norm, payload, box_matrix, demand_r
     Returns:
         available_rings, available_boxes
     """
-
-    ch_entry = get_channel_entry(payload.entries, ch_norm)
-
-    if ch_entry is None:
+    buffer_days = read_buffer_days(payload.entries, disp, ch_norm, side)
+    if buffer_days <= 0:
         return 0.0, 0.0
-
-    entered_val = 0.0
-
-    if isinstance(ch_entry, dict):
-        entry_type = str(ch_entry.get("type", "")).strip().upper()
-
-        if (not entry_type) or entry_type in ["NONE", "NAN"] or entry_type == disp:
-            entered_val = safe_float(
-                ch_entry.get(
-                    "buffer_day",
-                    ch_entry.get(
-                        "buffer",
-                        ch_entry.get("value", 0.0)
-                    )
-                )
-            )
-    else:
-        entered_val = safe_float(ch_entry)
-
-    if entered_val <= 0:
-        return 0.0, 0.0
-
-    unit_mode = str(payload.unit_mode).strip().upper()
 
     rpb = get_box_for_part(disp, side, box_matrix)
-    print(
-        f"[BUFFER CHECK] {disp_name} {pc} "
-        f"Demand={raw_val} "
-        f"AvailBuffer={avail_rings}"
-    )
+    avail_rings = buffer_days * demand_rings
 
-    # ---------------- DAYS ----------------
-    if "DAY" in unit_mode:
-
-        # 1 Day = today's requirement
-        avail_rings = entered_val * demand_rings
-
-        if rpb > 0:
-            avail_boxes = math.ceil(avail_rings / rpb)
-        else:
-            avail_boxes = 0
-
-        return avail_rings, float(avail_boxes)
-
-    # ---------------- BOXES ----------------
-    elif "BOX" in unit_mode:
-
-        avail_rings = entered_val * rpb
-
-        return avail_rings, entered_val
-
-    # ---------------- RINGS ----------------
+    if rpb > 0:
+        avail_boxes = math.ceil(avail_rings / rpb)
     else:
+        avail_boxes = 0
 
-        if rpb > 0:
-            avail_boxes = math.ceil(entered_val / rpb)
-        else:
-            avail_boxes = 0
-
-        return entered_val, float(avail_boxes)
-
-
+    return avail_rings, float(avail_boxes)
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
@@ -773,6 +797,7 @@ def generate_schedule(payload: ScheduleRequest):
 
         channel_demands_day1 = {} 
         channel_demands_day2 = {}
+        original_demands_day1 = {}  # Keep the original demands for temporary debug logs
         
         # 1. LOAD ZEROSET SEQUENTIALLY
         for sheet_name, df_zero in process_excel_sequentially(ZEROSET_URL):
@@ -845,6 +870,10 @@ def generate_schedule(payload: ScheduleRequest):
                         if display_name not in channel_demands_day1: channel_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
                         channel_demands_day1[display_name]['IR'] = max(channel_demands_day1[display_name]['IR'], r1 * ir_multiplier)
                         channel_demands_day1[display_name]['OR'] = max(channel_demands_day1[display_name]['OR'], r1)
+                        
+                        if display_name not in original_demands_day1: original_demands_day1[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
+                        original_demands_day1[display_name]['IR'] = max(original_demands_day1[display_name]['IR'], r1 * ir_multiplier)
+                        original_demands_day1[display_name]['OR'] = max(original_demands_day1[display_name]['OR'], r1)
                         
                     if r2 > 0:
                         if display_name not in channel_demands_day2: channel_demands_day2[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
@@ -953,7 +982,7 @@ def generate_schedule(payload: ScheduleRequest):
                                     fq = safe_float(row_vals[or_col]) if (or_col != -1 and or_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
                                     if fq > 0: target_map[ck]['OR'] = {'qty': fq, 'source': s_name}
                                     
-                # Parse Custom Buffer Days values specifically from target master sheets[cite: 1]
+                # Parse Custom Buffer Days values specifically from target master sheets
                 if s_name_up in ["BOX PER DAY TRB", "BOX PER DAY DGBB"]:
                     header_row_idx = None
                     running_type_col_idx = None
@@ -995,7 +1024,7 @@ def generate_schedule(payload: ScheduleRequest):
                             cell_val = str(row_vals_pd.iloc[c_idx_pd]).strip()
                             if not cell_val or cell_val.upper() in ["NAN", "NONE", "", "-"]: continue
                             
-                            # Parse dual IR/OR brackets (e.g. "6012 (30/41) 4.5 K")[cite: 1]
+                            # Parse dual IR/OR brackets (e.g. "6012 (30/41) 4.5 K")
                             match = re.search(r'\(\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*\)', cell_val)
                             if match:
                                 ir_boxes = float(match.group(1))
@@ -1024,7 +1053,7 @@ def generate_schedule(payload: ScheduleRequest):
                     if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code] = details
 
         # -----------------------------------------------------
-        # APPLY BUFFER CONVERSION & REDUCTION BEFORE SCHEDULING[cite: 1]
+        # APPLY BUFFER CONVERSION & REDUCTION BEFORE SCHEDULING
         # -----------------------------------------------------
         for disp_name in list(channel_demands_day1.keys()):
             data = channel_demands_day1[disp_name]
@@ -1032,27 +1061,31 @@ def generate_schedule(payload: ScheduleRequest):
             for pc in ['IR', 'OR']:
                 raw_val = float(data.get(pc, 0.0))
                 if raw_val > 0:
-                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
-                    if avail_rings > 0:
-                        # Reduce Day 1 demand first, then spill leftover to Day 2 demands[cite: 1]
-                        rem_buf = avail_rings
-                        reduced_d1 = max(0.0, raw_val - rem_buf)
-                        rem_buf -= (raw_val - reduced_d1)
-                        data[pc] = reduced_d1
-                 
-                        print(
-                            f"[AFTER REDUCTION] {disp_name} {pc} = {data[pc]}"
-                        )
+                    # Step 2: Read buffer days (always converted from Buffer Days)
+                    buffer_days = read_buffer_days(payload.entries, disp_name, ch_norm, pc)
                     
-            
+                    # Step 3: Convert Buffer Days to Rings using Day Demand (boxes * rpb)
+                    boxes_per_day = find_boxes_per_day(disp_name, pc, ch_norm, box_per_day_map)
+                    rpb = get_box_for_part(disp_name, pc, box_matrix)
+                    if boxes_per_day > 0 and rpb > 0:
+                        day_demand = boxes_per_day * rpb
+                    else:
+                        day_demand = raw_val
                         
-                        if rem_buf > 0 and disp_name in channel_demands_day2:
-                            d2_data = channel_demands_day2[disp_name]
-                            raw_val_d2 = float(d2_data.get(pc, 0.0))
-                            if raw_val_d2 > 0:
-                                reduced_d2 = max(0.0, raw_val_d2 - rem_buf)
-                                rem_buf -= (raw_val_d2 - reduced_d2)
-                                d2_data[pc] = reduced_d2
+                    buffer_rings = buffer_days * day_demand
+                    
+                    # Deduct from demand
+                    reduced_d1 = max(0.0, raw_val - buffer_rings)
+                    data[pc] = reduced_d1
+                    
+                    # Store remaining buffer to subtract from Day 2 demands
+                    rem_buf = buffer_rings - (raw_val - reduced_d1)
+                    if rem_buf > 0 and disp_name in channel_demands_day2:
+                        d2_data = channel_demands_day2[disp_name]
+                        raw_val_d2 = float(d2_data.get(pc, 0.0))
+                        if raw_val_d2 > 0:
+                            reduced_d2 = max(0.0, raw_val_d2 - rem_buf)
+                            d2_data[pc] = reduced_d2
 
         for disp_name in list(channel_demands_day2.keys()):
             data = channel_demands_day2[disp_name]
@@ -1062,16 +1095,15 @@ def generate_schedule(payload: ScheduleRequest):
                     continue
                 raw_val = float(data.get(pc, 0.0))
                 if raw_val > 0:
-                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
-                    if avail_rings > 0:
-                        data[pc] = max(0.0, raw_val - avail_rings)
-                        
-                        print(
-                            f"[BUFFER CHECK] {disp_name} {pc} "
-                            f"Demand={raw_val} "
-                            f"AvailBuffer={avail_rings}"
-                        )
-        
+                    buffer_days = read_buffer_days(payload.entries, disp_name, ch_norm, pc)
+                    boxes_per_day = find_boxes_per_day(disp_name, pc, ch_norm, box_per_day_map)
+                    rpb = get_box_for_part(disp_name, pc, box_matrix)
+                    if boxes_per_day > 0 and rpb > 0:
+                        day_demand = boxes_per_day * rpb
+                    else:
+                        day_demand = raw_val
+                    buffer_rings = buffer_days * day_demand
+                    data[pc] = max(0.0, raw_val - buffer_rings)
 
         # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
         weight_matrix = {}
@@ -1287,18 +1319,37 @@ def generate_schedule(payload: ScheduleRequest):
             reqs['leftover_bal'] = bal
             reqs['first_stage'] = first_stage
 
-
-
-
-
-
+            # -----------------------------------------------------
+            # PRINT TEMPORARY DEBUG LOGS BEFORE WORKITEM GENERATION
+            # -----------------------------------------------------
+            orig_d1 = original_demands_day1.get(disp, {}).get(pc, 0.0)
+            buffer_days = read_buffer_days(payload.entries, disp, ch_norm, pc)
+            boxes_per_day = find_boxes_per_day(disp, pc, ch_norm, box_per_day_map)
+            rpb = get_box_for_part(disp, pc, box_matrix)
+            if boxes_per_day > 0 and rpb > 0:
+                day_demand = boxes_per_day * rpb
+            else:
+                day_demand = orig_d1
+            buffer_rings = buffer_days * day_demand
+            net_demand_calc = max(0.0, orig_d1 - buffer_rings)
+            wi_qty = net_d1 if net_d1 > 0 else 0.0
+            
+            print(f"Bearing: {disp}")
+            print(f"Channel: {reqs['channel']}")
+            print(f"IR/OR: {pc}")
+            print()
+            print(f"Day-1 Demand: {orig_d1}")
+            print(f"Entered Buffer Days: {buffer_days}")
+            print(f"Converted Buffer Rings: {buffer_rings}")
+            print(f"Net Demand: {net_demand_calc}")
+            print(f"WorkItem Quantity: {wi_qty}")
             
             # -----------------------------------------------------
             # FULLY IMPLEMENTED BUFFER PRIORITIZATION LOGIC
             # -----------------------------------------------------
             buffer_val = 0.0
             
-            ch_entry = get_channel_entry(payload.entries, ch_norm)
+            ch_entry = payload.entries.get(ch_norm)
             
             if isinstance(ch_entry, dict):
                 entry_type = str(ch_entry.get('type', '')).strip().upper()
@@ -1696,4 +1747,3 @@ def generate_schedule(payload: ScheduleRequest):
     except Exception as e:
         import traceback
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
-

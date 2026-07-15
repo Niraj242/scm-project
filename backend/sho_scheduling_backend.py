@@ -487,73 +487,73 @@ def find_boxes_per_day(disp, pc, ch_norm, box_per_day_map):
                 return val
     return 0.0
 
-def get_buffer_rings_for_part(disp, pc, ch_norm, payload, box_matrix, box_per_day_map):
-    """Calculates available buffer rings for the given part based on the active unit_mode."""
+def get_buffer_rings_for_part(disp, side, ch_norm, payload, box_matrix, demand_rings):
+    """
+    Returns:
+        available_rings, available_boxes
+    """
+
     ch_entry = get_channel_entry(payload.entries, ch_norm)
+
     if ch_entry is None:
         return 0.0, 0.0
-        
+
     entered_val = 0.0
+
     if isinstance(ch_entry, dict):
-        entry_type = str(ch_entry.get('type', '')).strip().upper()
-        if not entry_type or entry_type in ['NONE', 'NAN'] or entry_type == disp:
-            raw_val = ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))
-            try:
-                entered_val = float(raw_val)
-            except:
-                pass
+        entry_type = str(ch_entry.get("type", "")).strip().upper()
+
+        if (not entry_type) or entry_type in ["NONE", "NAN"] or entry_type == disp:
+            entered_val = safe_float(
+                ch_entry.get(
+                    "buffer_day",
+                    ch_entry.get(
+                        "buffer",
+                        ch_entry.get("value", 0.0)
+                    )
+                )
+            )
     else:
-        try:
-            entered_val = float(ch_entry)
-        except:
-            pass
-            
+        entered_val = safe_float(ch_entry)
+
     if entered_val <= 0:
         return 0.0, 0.0
-        
+
     unit_mode = str(payload.unit_mode).strip().upper()
-    
+
+    rpb = get_box_for_part(disp, side, box_matrix)
+
+    # ---------------- DAYS ----------------
     if "DAY" in unit_mode:
-    """
-    TEMPORARY LOGIC
 
-    Buffer Days are treated as a fraction of today's required quantity.
+        # 1 Day = today's requirement
+        avail_rings = entered_val * demand_rings
 
-    Example:
-        Demand = 10000 Rings
-        Buffer Days = 0.5
+        if rpb > 0:
+            avail_boxes = math.ceil(avail_rings / rpb)
+        else:
+            avail_boxes = 0
 
-        Available Buffer = 5000 Rings
-    """
+        return avail_rings, float(avail_boxes)
 
-    # pc = today's required quantity before buffer deduction
-    avail_rings = max(0.0, entered_val * pc)
-
-    # Convert rings back to boxes only for display
-    rpb = get_box_for_part(disp, pc, box_matrix)
-
-    if rpb > 0:
-        avail_boxes = avail_rings / rpb
-        display_boxes = math.ceil(avail_boxes)
-    else:
-        display_boxes = 0
-
-    return avail_rings, float(display_boxes)
-
-    
-        
+    # ---------------- BOXES ----------------
     elif "BOX" in unit_mode:
-        # Boxes Entry Conversion
-        rpb = get_box_for_part(disp, pc, box_matrix)
+
         avail_rings = entered_val * rpb
+
         return avail_rings, entered_val
-        
+
+    # ---------------- RINGS ----------------
     else:
-        # Rings Entry direct retrieval
-        rpb = get_box_for_part(disp, pc, box_matrix)
-        avail_boxes = entered_val / rpb if rpb > 0 else 0.0
-        display_boxes = math.ceil(avail_boxes) if avail_boxes % 1 != 0 else int(avail_boxes)
-        return entered_val, float(display_boxes)
+
+        if rpb > 0:
+            avail_boxes = math.ceil(entered_val / rpb)
+        else:
+            avail_boxes = 0
+
+        return entered_val, float(avail_boxes)
+
+
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
@@ -1027,7 +1027,7 @@ def generate_schedule(payload: ScheduleRequest):
             for pc in ['IR', 'OR']:
                 raw_val = float(data.get(pc, 0.0))
                 if raw_val > 0:
-                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix)
+                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
                     if avail_rings > 0:
                         # Reduce Day 1 demand first, then spill leftover to Day 2 demands[cite: 1]
                         rem_buf = avail_rings
@@ -1035,11 +1035,12 @@ def generate_schedule(payload: ScheduleRequest):
                         rem_buf -= (raw_val - reduced_d1)
                         data[pc] = reduced_d1
                         print(
-                            f"{disp_name} {pc} "
-                            f"Demand={raw_val} "
-                            f"Buffer={avail_rings} "
+                            f"[BUFFER] {disp_name} {pc} | "
+                            f"Demand={raw_val} | "
+                            f"Buffer={avail_rings} | "
                             f"Remaining={reduced_d1}"
                         )
+            
                         
                         if rem_buf > 0 and disp_name in channel_demands_day2:
                             d2_data = channel_demands_day2[disp_name]
@@ -1057,7 +1058,7 @@ def generate_schedule(payload: ScheduleRequest):
                     continue
                 raw_val = float(data.get(pc, 0.0))
                 if raw_val > 0:
-                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix)
+                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
                     if avail_rings > 0:
                         data[pc] = max(0.0, raw_val - avail_rings)
 

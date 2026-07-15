@@ -1096,6 +1096,11 @@ def generate_schedule(payload: ScheduleRequest):
                     if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
                     tracker_ht[key]['raw_d2'] = raw_d2
 
+        total_req_ht = 0.0
+        total_req_face = 0.0
+        total_req_od = 0.0
+        total_req_channel = 0.0
+
         for key, reqs in tracker_ht.items():
             disp, pc = key
             ch_norm = normalize_channel(reqs['channel'])
@@ -1153,16 +1158,19 @@ def generate_schedule(payload: ScheduleRequest):
                 raw_d2, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf
             )
 
+            total_req_ht += reqs_d1.get('HT', 0.0) + reqs_d2.get('HT', 0.0)
+            total_req_face += reqs_d1.get('FACE', 0.0) + reqs_d2.get('FACE', 0.0)
+            total_req_od += reqs_d1.get('OD', 0.0) + reqs_d2.get('OD', 0.0)
+            total_req_channel += reqs_d1.get('CHANNEL', 0.0) + reqs_d2.get('CHANNEL', 0.0)
+
             actual_bal_consumed = 0.0
 
             # Schedule Day-1 only with remaining exact quantities per stage (clamped locally)
             for i, stage in enumerate(routing):
                 if stage == 'CHANNEL': continue
                 req_here = reqs_d1.get(stage, 0.0)
-                next_stage = routing[i+1]
-                req_next = reqs_d1.get(next_stage, 0.0)
 
-                inject_qty = req_here - req_next
+                inject_qty = req_here
 
                 if stage == first_stage and inject_qty > 0:
                     sat_bal = min(inject_qty, bal)
@@ -1179,10 +1187,8 @@ def generate_schedule(payload: ScheduleRequest):
             for i, stage in enumerate(routing):
                 if stage == 'CHANNEL': continue
                 req_here = reqs_d2.get(stage, 0.0)
-                next_stage = routing[i+1]
-                req_next = reqs_d2.get(next_stage, 0.0)
 
-                inject_qty = req_here - req_next
+                inject_qty = req_here
 
                 if stage == first_stage and inject_qty > 0:
                     sat_bal = min(inject_qty, bal)
@@ -1367,7 +1373,7 @@ def generate_schedule(payload: ScheduleRequest):
                         
                         needs_split = 1 if req_time > time_available else 0
                         
-                        # Ascending sort logic key: direct item.priority orders least buffer first[cite: 1]
+                        # Ascending sort logic key: direct item.priority orders least buffer first
                         key = (needs_split, start_time, item.day_idx, gap, item.priority)
                         
                         if key < best_key:
@@ -1561,6 +1567,23 @@ def generate_schedule(payload: ScheduleRequest):
             "plant_state": end_state
         }
         save_setting("pending_state", snapshot)
+
+        # Log injection block
+        skipped_reasons = {}
+        for u in unscheduled:
+            r = u.get("reason", "Unknown")
+            skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
+
+        debug_logs.append(f"Demands Generated: {len(tracker_ht)}")
+        debug_logs.append(f"Remaining HT: {total_req_ht}")
+        debug_logs.append(f"Remaining Face: {total_req_face}")
+        debug_logs.append(f"Remaining OD: {total_req_od}")
+        debug_logs.append(f"Remaining Channel: {total_req_channel}")
+        debug_logs.append(f"Work Items Created: {len(work_items)}")
+        debug_logs.append(f"Work Items Allocated (Rows): {sum(len(r.rows) for r in resources)}")
+        debug_logs.append(f"Work Items Skipped: {len(unscheduled)}")
+        for r, count in skipped_reasons.items():
+            debug_logs.append(f" - {r}: {count}")
 
         return {
             "status": "success", 

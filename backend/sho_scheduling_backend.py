@@ -257,7 +257,7 @@ def get_lookup_variants(raw_text, p_code=None):
     elif '/' in t and len(parts) > 1:
         if not any(x in parts[1] for x in ['Q', 'X']): t = parts[0].strip()
 
-    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'D', 'E', 'J', 'X', 'Q', 'LM', 'M', 'ETN9', 'J2/Q']
+    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q', 'LM', 'M', 'ETN9', 'J2/Q']
     t_nosuff = t
     changed = True
     while changed:
@@ -733,7 +733,7 @@ def generate_schedule(payload: ScheduleRequest):
                         channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
                         channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
 
-        # 2. LOAD BOX RING MATRIX SEQUENTIALLY (WITH SETUP CHART)
+        # 2. LOAD BOX RING MATRIX MATRIX SEQUENTIALLY (WITH SETUP CHART)
         box_matrices = {"tier1": {}, "tier2": {}, "tier3": {}}
         setup_chart_matrix = {}
         for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
@@ -1007,13 +1007,29 @@ def generate_schedule(payload: ScheduleRequest):
                 rt = float(stage_data.get("rt", 0.0))
                 
                 if qty > 0 and stage != first_stage:
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
+                    # WIP items assigned an absolute lowest score (-100.0) so they always sort first in the ascending loop
+                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, -100.0, routing))
 
+        # -----------------------------------------------------
+        # DYNAMIC CHANNEL BUFFER & PRIORITY RULE EXTRACTION
+        # -----------------------------------------------------
         ch_stats = {}
         for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
             for display_name, data in demands.items():
                 ch_norm = normalize_channel(data['channel'])
-                if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
+                if ch_norm not in ch_stats: 
+                    buffer_val = 0.0
+                    ch_entry = payload.entries.get(ch_norm)
+                    if isinstance(ch_entry, dict):
+                        raw_buf = ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))
+                        try: buffer_val = float(raw_buf)
+                        except: pass
+                    elif ch_entry is not None:
+                        try: buffer_val = float(ch_entry)
+                        except: pass
+                    
+                    # Score is matched directly to buffer value (smaller buffer numbers sort earlier)
+                    ch_stats[ch_norm] = {'demand': 0.0, 'buffer': buffer_val, 'score': buffer_val}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
         tracker_ht = {}
@@ -1045,22 +1061,7 @@ def generate_schedule(payload: ScheduleRequest):
             raw_d2 = reqs['raw_d2']
             bal = ht_balances.get(key, 0.0)
             
-            # -----------------------------------------------------
-            # FULLY IMPLEMENTED BUFFER PRIORITIZATION LOGIC
-            # -----------------------------------------------------
-            buffer_val = 0.0
-            
-            ch_entry = payload.entries.get(ch_norm)
-            if isinstance(ch_entry, dict):
-                entry_type = str(ch_entry.get('type', '')).strip().upper()
-                if not entry_type or entry_type in ['NONE', 'NAN'] or entry_type == disp:
-                    raw_buf = ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))
-                    try: buffer_val = float(raw_buf)
-                    except: pass
-            elif ch_entry is not None:
-                try: buffer_val = float(ch_entry)
-                except: pass
-
+            buffer_val = ch_stats[ch_norm]['buffer']
             rpd = get_rpd_for_part(disp, pc, box_matrix)
             rpb = get_box_for_part(disp, pc, box_matrix)
             
@@ -1210,7 +1211,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if not active_items: break 
                     
                 best_pair = None
-                best_key = (float('inf'), float('inf'), float('inf'), float('inf'), float('-inf'))
+                best_key = (float('inf'), float('inf'), float('inf'), float('inf'), float('inf'))
                 
                 for item in active_items:
                     for res in item.valid_resources:
@@ -1266,7 +1267,9 @@ def generate_schedule(payload: ScheduleRequest):
                         time_available = available_time_limit - start_time
                         
                         needs_split = 1 if req_time > time_available else 0
-                        key = (needs_split, start_time, item.day_idx, gap, -item.priority)
+                        
+                        # Ascending sort logic key: direct item.priority orders least buffer first[cite: 1]
+                        key = (needs_split, start_time, item.day_idx, gap, item.priority)
                         
                         if key < best_key:
                             best_key = key
@@ -1477,7 +1480,7 @@ def generate_schedule(payload: ScheduleRequest):
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
 
 # ==========================================
-# NEW TAB: REQUIRED DATA AVAILABILITY
+# REQUIRED DATA AVAILABILITY ENDPOINT
 # ==========================================
 @router.get("/api/data_availability")
 def get_data_availability(date: str):

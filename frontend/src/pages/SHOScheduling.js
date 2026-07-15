@@ -36,7 +36,7 @@ const SHOScheduling = () => {
     HUB: ['HUB 1.1', 'HUB 1.2', 'HUB 1.3', 'HUB 1.4', 'T HUB 1.1', 'T HUB 1.2', 'T HUB 1.3']
   };
 
-  // Mapped exactly according to the provided Channel/Process matrix image
+  // UPDATED: Mapped exactly according to the provided Channel/Process matrix image
   const DEFAULT_BLOCKED = {
     DGBB: { 
         HT: { CH07: ['IR', 'OR'] },
@@ -98,10 +98,11 @@ const SHOScheduling = () => {
     }
   }, [sector, bufferDate]);
 
-  // Automatically load saved plan when Date changes, or clear if none exists
+  // NEW FIX: Automatically load saved plan when Date changes, or clear if none exists
   useEffect(() => {
     const fetchSavedPlanForDate = async () => {
       try {
+        // Backend must implement this GET endpoint to return {"status": "success", "data": {...}}
         const response = await fetch(`${API_BASE}/api/get_plan?date=${scheduleDate}`);
         const result = await response.json();
         if (response.ok && result.status === 'success' && result.data) {
@@ -115,6 +116,7 @@ const SHOScheduling = () => {
     };
     fetchSavedPlanForDate();
   }, [scheduleDate]);
+
 
   // Dynamically Fetch ALL Face, OD & HT Machines from Production Sheet
   useEffect(() => {
@@ -158,6 +160,8 @@ const SHOScheduling = () => {
     fetchMachines();
   }, []);
   
+
+
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
   const saveBufferData = () => {
@@ -598,6 +602,7 @@ const SHOScheduling = () => {
                                 <tr key={idx}>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
+                                    {/* UPDATED: Displays both missed boxes and the detailed status reason */}
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>
                                       {item.missed_boxes}
                                       {item.status && (

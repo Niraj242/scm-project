@@ -25,6 +25,10 @@ WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
 VARIANTS_CACHE = {}  # OPTIMIZATION: Cache variants to prevent heavy nested regex operations
 
+# Global memory cache for downloaded files to optimize performance and prevent repeated slow network I/O
+DOWNLOAD_CACHE = {}
+CACHE_TTL_SECONDS = 300  # 5 minutes TTL
+
 DEFAULT_FURNACES = {
     "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
     "ROLLER FURNACE ( 148 )": 250.0, "SIMPLICITY FURNACE(1238)": 180.0,
@@ -138,41 +142,48 @@ class SaveBreakdownsRequest(BaseModel):
     date: str
     entries: List[BreakdownItem]
 
-class SaveBufferRequest(BaseModel):
-    date: str
-    sector: str
-    unit_mode: str
-    entries: Dict[str, Any]
+# ==========================================
+# UTIL FUNCTIONS & CACHED EXCEL PROCESSOR
+# ==========================================
+def fetch_with_cache(url: str) -> bytes:
+    """Downloads sheets with a 5-minute global TTL block, avoiding redundant bandwidth strain."""
+    now = time.time()
+    if url in DOWNLOAD_CACHE:
+        cached_content, timestamp = DOWNLOAD_CACHE[url]
+        if now - timestamp < CACHE_TTL_SECONDS:
+            return cached_content
+    
+    resp = requests.get(url, timeout=60)
+    if resp.status_code == 200:
+        DOWNLOAD_CACHE[url] = (resp.content, now)
+        return resp.content
+    raise Exception(f"Failed to fetch Excel sheet from {url}. Status code: {resp.status_code}")
 
-# ==========================================
-# UTIL FUNCTIONS
-# ==========================================
 def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
     if not url or url.strip() == "": 
         return
     try:
-        resp = requests.get(url, timeout=60)
-        if resp.status_code == 200:
-            with io.BytesIO(resp.content) as file_buffer:
-                try:
-                    xls = pd.ExcelFile(file_buffer, engine='calamine')
-                except Exception:
-                    xls = pd.ExcelFile(file_buffer, engine='openpyxl')
-                    
-                target_sheets = sheet_names_to_process if sheet_names_to_process else xls.sheet_names
+        content = fetch_with_cache(url)
+        with io.BytesIO(content) as file_buffer:
+            try:
+                xls = pd.ExcelFile(file_buffer, engine='calamine')
+            except Exception:
+                xls = pd.ExcelFile(file_buffer, engine='openpyxl')
                 
-                for sheet in target_sheets:
-                    if sheet in xls.sheet_names:
-                        df = pd.read_excel(xls, sheet_name=sheet, header=None, usecols=usecols)
-                        yield sheet, df
-                        del df
-                        gc.collect()
-                del xls
-        del resp
+            target_sheets = sheet_names_to_process if sheet_names_to_process else xls.sheet_names
+            
+            for sheet in target_sheets:
+                if sheet in xls.sheet_names:
+                    df = pd.read_excel(xls, sheet_name=sheet, header=None, usecols=usecols)
+                    yield sheet, df
+                    del df
+                    gc.collect()
+            del xls
         gc.collect()
     except Exception as e:
         print(f"Error loading sequentially from {url}: {e}")
 
+# Global Resource Cache to prevent re-reading Excel heavily for basic routing/master lists
 MASTER_RESOURCES_CACHE = {"furnaces": [], "face": [], "od": [], "channels": []}
 
 def get_all_resources():
@@ -420,21 +431,6 @@ def get_box_for_part(display_name, p_code, box_matrix):
     qty, _, _ = get_box_for_part_detailed(display_name, p_code, box_matrix)
     return qty
 
-def get_rpd_for_part(display_name, p_code, box_matrix):
-    variants = get_lookup_variants(display_name, p_code)
-    for var in variants:
-        if var in box_matrix and p_code in box_matrix[var]: 
-            return box_matrix[var][p_code].get('rpd', 0.0)
-            
-    norm_disp = re.sub(r'[\s./_\-]', '', str(display_name).upper())
-    for b_key, b_val in box_matrix.items():
-        norm_bkey = re.sub(r'[\s./_\-]', '', str(b_key).upper())
-        if norm_bkey in norm_disp or norm_disp in norm_bkey:
-            if p_code in b_val:
-                return b_val[p_code].get('rpd', 0.0)
-                
-    return 0.0
-
 def format_time(rel_hrs):
     rel_hrs = max(0.0, rel_hrs)
     total_minutes = int(round(rel_hrs * 60))
@@ -451,47 +447,6 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
         if (var, p_code) in setup_chart_matrix:
             return setup_chart_matrix[(var, p_code)]
     return None
-
-def get_buffers_in_rings(entries, unit_mode, ch_norm, pc, rpd, rpb):
-    ch_buf = 0.0
-    od_buf = 0.0
-    face_buf = 0.0
-    ht_buf = 0.0
-    
-    if ch_norm in entries:
-        ch_data = entries[ch_norm]
-        mappings = {
-            'CH': [('ch_buffer_1', 'type_1'), ('ch_buffer_2', 'next_type_1')],
-            'OD': [('od_buffer_1', 'type_2'), ('od_buffer_2', 'next_type_2')],
-            'FACE': [('face_buffer_1', 'type_3'), ('face_buffer_2', 'type_4')],
-            'HT': [('ht_buffer_1', 'type_5'), ('ht_buffer_2', 'type_6')],
-        }
-        
-        def extract_buf(stage_keys):
-            for b_key, t_key in stage_keys:
-                if str(ch_data.get(t_key, '')).strip().upper() == pc:
-                    try: return float(ch_data.get(b_key, 0.0))
-                    except: pass
-            return 0.0
-
-        ch_buf_raw = extract_buf(mappings['CH'])
-        od_buf_raw = extract_buf(mappings['OD'])
-        face_buf_raw = extract_buf(mappings['FACE'])
-        ht_buf_raw = extract_buf(mappings['HT'])
-
-        def convert(val):
-            if not val: return 0.0
-            um = str(unit_mode).strip().lower()
-            if um in ['days', 'day']: return val * rpd
-            if um in ['boxes', 'box']: return val * rpb
-            return float(val)
-
-        ch_buf = convert(ch_buf_raw)
-        od_buf = convert(od_buf_raw)
-        face_buf = convert(face_buf_raw)
-        ht_buf = convert(ht_buf_raw)
-
-    return ch_buf, od_buf, face_buf, ht_buf
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
@@ -578,15 +533,19 @@ def get_monthly_tracking_api():
 def get_machines():
     try:
         res = get_all_resources()
+        
         if not res:
             res = {}
+
         machines_dict = {}
+        
         for f in res.get("furnaces", []): machines_dict[f] = {"type": "Furnace"}
         for m in res.get("face", []): machines_dict[m] = {"type": "Face Grinding"}
         for m in res.get("od", []): machines_dict[m] = {"type": "OD Grinding"}
         for c in res.get("channels", []): machines_dict[c] = {"type": "Channel"}
         
         return {"status": "success", "data": machines_dict}
+        
     except Exception as e:
         print(f"BACKEND ERROR in /api/machines: {str(e)}")
         return {"status": "error", "message": str(e), "data": {}}
@@ -630,28 +589,6 @@ def get_summary(payload: dict):
             "status": "success", 
             "data": plan_data.get("summary", [])
         }
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-
-# ==========================================
-# BUFFER ENDPOINTS (NEW)
-# ==========================================
-@router.post("/api/save_buffers")
-def save_buffers(payload: SaveBufferRequest):
-    try:
-        key = f"buffers_{payload.date}_{payload.sector}"
-        data = {"unit_mode": payload.unit_mode, "entries": payload.entries}
-        save_setting(key, data)
-        return {"status": "success"}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}
-
-@router.get("/api/load_buffers")
-def load_buffers(date: str, sector: str):
-    try:
-        key = f"buffers_{date}_{sector}"
-        data = get_setting(key, {"unit_mode": "Days", "entries": {}})
-        return {"status": "success", "data": data}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -802,7 +739,7 @@ def generate_schedule(payload: ScheduleRequest):
                         channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
                         channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
 
-        # 2. LOAD BOX RING MATRIX MATRIX SEQUENTIALLY (WITH SETUP CHART)
+        # 2. LOAD BOX RING MATRIX SEQUENTIALLY (WITH SETUP CHART)
         box_matrices = {"tier1": {}, "tier2": {}, "tier3": {}}
         setup_chart_matrix = {}
         for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
@@ -873,10 +810,10 @@ def generate_schedule(payload: ScheduleRequest):
                                 clean_keys = get_lookup_variants(part_type, p_c)
                                 for ck in clean_keys:
                                     if ck not in target_map: target_map[ck] = {}
-                                    if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR'].get('qty', 0) <= 0):
-                                        if ir_rpb > 0: target_map[ck]['IR'] = {'qty': ir_rpb, 'rpd': ref_qty, 'source': s_name}
-                                    if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR'].get('qty', 0) <= 0):
-                                        if or_rpb > 0: target_map[ck]['OR'] = {'qty': or_rpb, 'rpd': ref_qty, 'source': s_name}
+                                    if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR']['qty'] <= 0):
+                                        if ir_rpb > 0: target_map[ck]['IR'] = {'qty': ir_rpb, 'source': s_name}
+                                    if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR']['qty'] <= 0):
+                                        if or_rpb > 0: target_map[ck]['OR'] = {'qty': or_rpb, 'source': s_name}
 
                 type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
                 for r_idx in range(min(20, len(df_box))):
@@ -896,10 +833,10 @@ def generate_schedule(payload: ScheduleRequest):
                             clean_keys = get_lookup_variants(raw_t, p_c)
                             for ck in clean_keys:
                                 if ck not in target_map: target_map[ck] = {}
-                                if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR'].get('qty', 0) <= 0):
+                                if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR']['qty'] <= 0):
                                     fq = safe_float(row_vals[ir_col]) if (ir_col != -1 and ir_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
                                     if fq > 0: target_map[ck]['IR'] = {'qty': fq, 'source': s_name}
-                                if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR'].get('qty', 0) <= 0):
+                                if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR']['qty'] <= 0):
                                     fq = safe_float(row_vals[or_col]) if (or_col != -1 and or_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
                                     if fq > 0: target_map[ck]['OR'] = {'qty': fq, 'source': s_name}
 
@@ -908,11 +845,7 @@ def generate_schedule(payload: ScheduleRequest):
             for part_key, part_data in box_matrices[tier].items():
                 if part_key not in box_matrix: box_matrix[part_key] = {}
                 for p_code, details in part_data.items():
-                    if p_code not in box_matrix[part_key]:
-                        box_matrix[part_key][p_code] = details.copy()
-                    else:
-                        if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code]['qty'] = details['qty']
-                        if 'rpd' in details: box_matrix[part_key][p_code]['rpd'] = details['rpd']
+                    if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code] = details
 
         # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
         weight_matrix = {}
@@ -1076,8 +1009,14 @@ def generate_schedule(payload: ScheduleRequest):
                 rt = float(stage_data.get("rt", 0.0))
                 
                 if qty > 0 and stage != first_stage:
-                    # WIP items assigned an absolute lowest score (-100.0) so they always sort first in the ascending loop
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, -100.0, routing))
+                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
+
+        ch_stats = {}
+        for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
+            for display_name, data in demands.items():
+                ch_norm = normalize_channel(data['channel'])
+                if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
+                ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
         tracker_ht = {}
         for display_name, data in channel_demands_day1.items():
@@ -1096,11 +1035,6 @@ def generate_schedule(payload: ScheduleRequest):
                     if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
                     tracker_ht[key]['raw_d2'] = raw_d2
 
-        total_req_ht = 0.0
-        total_req_face = 0.0
-        total_req_od = 0.0
-        total_req_channel = 0.0
-
         for key, reqs in tracker_ht.items():
             disp, pc = key
             ch_norm = normalize_channel(reqs['channel'])
@@ -1113,98 +1047,47 @@ def generate_schedule(payload: ScheduleRequest):
             raw_d2 = reqs['raw_d2']
             bal = ht_balances.get(key, 0.0)
             
-            rpd = get_rpd_for_part(disp, pc, box_matrix)
-            rpb = get_box_for_part(disp, pc, box_matrix)
+            d1_sat = min(raw_d1, bal)
+            bal -= d1_sat
+            net_d1 = raw_d1 - d1_sat
             
-            ch_buf, od_buf, face_buf, ht_buf = get_buffers_in_rings(payload.entries, payload.unit_mode, ch_norm, pc, rpd, rpb)
+            d2_sat = min(raw_d2, bal)
+            bal -= d2_sat
+            net_d2 = raw_d2 - d2_sat
             
-            # Score matches the channel buffer directly (in rings) 
-            item_priority = ch_buf
-
-            curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf = ch_buf, od_buf, face_buf, ht_buf
-
-            def apply_buffers_to_demand(demand, c_b, o_b, f_b, h_b):
-                c_sat = min(demand, c_b)
-                r_ch = demand - c_sat
-                c_b -= c_sat
-
-                r_by_stg = {'CHANNEL': r_ch}
-                rev_stages = reversed([s for s in routing if s != 'CHANNEL'])
-                curr_req = r_ch
-                for stg in rev_stages:
-                    if stg == 'OD':
-                        sat = min(curr_req, o_b)
-                        curr_req -= sat
-                        o_b -= sat
-                    elif stg == 'FACE':
-                        sat = min(curr_req, f_b)
-                        curr_req -= sat
-                        f_b -= sat
-                    elif stg == 'HT':
-                        sat = min(curr_req, h_b)
-                        curr_req -= sat
-                        h_b -= sat
-                    r_by_stg[stg] = curr_req
-
-                return r_by_stg, c_b, o_b, f_b, h_b
-
-            # Day 1 Demand calculation deducting independent process buffers
-            reqs_d1, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf = apply_buffers_to_demand(
-                raw_d1, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf
-            )
-
-            # Day 2 Demand calculation deducting independent process buffers
-            reqs_d2, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf = apply_buffers_to_demand(
-                raw_d2, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf
-            )
-
-            total_req_ht += reqs_d1.get('HT', 0.0) + reqs_d2.get('HT', 0.0)
-            total_req_face += reqs_d1.get('FACE', 0.0) + reqs_d2.get('FACE', 0.0)
-            total_req_od += reqs_d1.get('OD', 0.0) + reqs_d2.get('OD', 0.0)
-            total_req_channel += reqs_d1.get('CHANNEL', 0.0) + reqs_d2.get('CHANNEL', 0.0)
-
-            actual_bal_consumed = 0.0
-
-            # Schedule Day-1 only with remaining exact quantities per stage (clamped locally)
-            for i, stage in enumerate(routing):
-                if stage == 'CHANNEL': continue
-                req_here = reqs_d1.get(stage, 0.0)
-
-                inject_qty = req_here
-
-                if stage == first_stage and inject_qty > 0:
-                    sat_bal = min(inject_qty, bal)
-                    inject_qty -= sat_bal
-                    bal -= sat_bal
-                    actual_bal_consumed += sat_bal
-
-                if inject_qty > 0:
-                    work_items.append(WorkItem(stage, disp, pc, 0, reqs['channel'], inject_qty, 0.0, item_priority, routing[i:]))
-
-            d2_satisfied = 0.0
-            
-            # Schedule Day-2 unused machine capacity
-            for i, stage in enumerate(routing):
-                if stage == 'CHANNEL': continue
-                req_here = reqs_d2.get(stage, 0.0)
-
-                inject_qty = req_here
-
-                if stage == first_stage and inject_qty > 0:
-                    sat_bal = min(inject_qty, bal)
-                    inject_qty -= sat_bal
-                    bal -= sat_bal
-                    d2_satisfied += sat_bal
-                    actual_bal_consumed += sat_bal
-
-                if inject_qty > 0:
-                    work_items.append(WorkItem(stage, disp, pc, 1, reqs['channel'], inject_qty, 0.0, item_priority, routing[i:]))
-
-            reqs['net_d1'] = reqs_d1.get(first_stage, 0.0)
-            reqs['net_d2'] = reqs_d2.get(first_stage, 0.0)
-            reqs['d2_satisfied'] = d2_satisfied
+            reqs['net_d1'] = net_d1
+            reqs['net_d2'] = net_d2
+            reqs['d2_satisfied'] = d2_sat
             reqs['leftover_bal'] = bal
             reqs['first_stage'] = first_stage
+            
+            # -----------------------------------------------------
+            # FULLY IMPLEMENTED BUFFER PRIORITIZATION LOGIC
+            # -----------------------------------------------------
+            buffer_val = 0.0
+            
+            ch_entry = payload.entries.get(ch_norm)
+            
+            if isinstance(ch_entry, dict):
+                entry_type = str(ch_entry.get('type', '')).strip().upper()
+                if not entry_type or entry_type in ['NONE', 'NAN'] or entry_type == disp:
+                    raw_buf = ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))
+                    try: 
+                        buffer_val = float(raw_buf)
+                    except: 
+                        pass
+            elif ch_entry is not None:
+                try: 
+                    buffer_val = float(ch_entry)
+                except: 
+                    pass
+
+            item_priority = ch_stats[ch_norm]['score'] - buffer_val
+
+            if net_d1 > 0:
+                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, item_priority, routing))
+            if net_d2 > 0:
+                work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
 
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}
@@ -1316,7 +1199,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if not active_items: break 
                     
                 best_pair = None
-                best_key = (float('inf'), float('inf'), float('inf'), float('inf'), float('inf'))
+                best_key = (float('inf'), float('inf'), float('inf'), float('inf'), float('-inf'))
                 
                 for item in active_items:
                     for res in item.valid_resources:
@@ -1372,9 +1255,7 @@ def generate_schedule(payload: ScheduleRequest):
                         time_available = available_time_limit - start_time
                         
                         needs_split = 1 if req_time > time_available else 0
-                        
-                        # Ascending sort logic key: direct item.priority orders least buffer first
-                        key = (needs_split, start_time, item.day_idx, gap, item.priority)
+                        key = (needs_split, start_time, item.day_idx, gap, -item.priority)
                         
                         if key < best_key:
                             best_key = key
@@ -1568,23 +1449,6 @@ def generate_schedule(payload: ScheduleRequest):
         }
         save_setting("pending_state", snapshot)
 
-        # Log injection block
-        skipped_reasons = {}
-        for u in unscheduled:
-            r = u.get("reason", "Unknown")
-            skipped_reasons[r] = skipped_reasons.get(r, 0) + 1
-
-        debug_logs.append(f"Demands Generated: {len(tracker_ht)}")
-        debug_logs.append(f"Remaining HT: {total_req_ht}")
-        debug_logs.append(f"Remaining Face: {total_req_face}")
-        debug_logs.append(f"Remaining OD: {total_req_od}")
-        debug_logs.append(f"Remaining Channel: {total_req_channel}")
-        debug_logs.append(f"Work Items Created: {len(work_items)}")
-        debug_logs.append(f"Work Items Allocated (Rows): {sum(len(r.rows) for r in resources)}")
-        debug_logs.append(f"Work Items Skipped: {len(unscheduled)}")
-        for r, count in skipped_reasons.items():
-            debug_logs.append(f" - {r}: {count}")
-
         return {
             "status": "success", 
             "debug_logs": debug_logs, 
@@ -1602,7 +1466,7 @@ def generate_schedule(payload: ScheduleRequest):
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
 
 # ==========================================
-# REQUIRED DATA AVAILABILITY ENDPOINT
+# REQUIRED DATA AVAILABILITY TAB
 # ==========================================
 @router.get("/api/data_availability")
 def get_data_availability(date: str):
@@ -1717,10 +1581,10 @@ def get_data_availability(date: str):
                                 clean_keys = get_lookup_variants(part_type, p_c)
                                 for ck in clean_keys:
                                     if ck not in target_map: target_map[ck] = {}
-                                    if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR'].get('qty', 0) <= 0):
-                                        if ir_rpb > 0: target_map[ck]['IR'] = {'qty': ir_rpb, 'rpd': ref_qty, 'source': s_name}
-                                    if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR'].get('qty', 0) <= 0):
-                                        if or_rpb > 0: target_map[ck]['OR'] = {'qty': or_rpb, 'rpd': ref_qty, 'source': s_name}
+                                    if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR']['qty'] <= 0):
+                                        if ir_rpb > 0: target_map[ck]['IR'] = {'qty': ir_rpb, 'source': s_name}
+                                    if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR']['qty'] <= 0):
+                                        if or_rpb > 0: target_map[ck]['OR'] = {'qty': or_rpb, 'source': s_name}
                 type_col, ir_col, or_col, single_rpb_col = -1, -1, -1, -1
                 for r_idx in range(min(20, len(df_box))):
                     norm_strs = [re.sub(r'[\s./_\-]', '', str(x).strip().upper()) for x in df_box.iloc[r_idx]]
@@ -1739,10 +1603,10 @@ def get_data_availability(date: str):
                             clean_keys = get_lookup_variants(raw_t, p_c)
                             for ck in clean_keys:
                                 if ck not in target_map: target_map[ck] = {}
-                                if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR'].get('qty', 0) <= 0):
+                                if p_c == 'IR' and ('IR' not in target_map[ck] or target_map[ck]['IR']['qty'] <= 0):
                                     fq = safe_float(row_vals[ir_col]) if (ir_col != -1 and ir_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
                                     if fq > 0: target_map[ck]['IR'] = {'qty': fq, 'source': s_name}
-                                if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR'].get('qty', 0) <= 0):
+                                if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR']['qty'] <= 0):
                                     fq = safe_float(row_vals[or_col]) if (or_col != -1 and or_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
                                     if fq > 0: target_map[ck]['OR'] = {'qty': fq, 'source': s_name}
 

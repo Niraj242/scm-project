@@ -87,22 +87,33 @@ const SHOScheduling = () => {
     { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
   ];
 
-  // Load Initial Buffer State
+  // Load Initial Buffer State from Backend
   useEffect(() => {
-    const storageKey = `sho_db_${sector}_${bufferDate}`;
-    const savedData = localStorage.getItem(storageKey);
-    if (savedData) {
-      setTableData(JSON.parse(savedData).entries || {});
-    } else {
-      setTableData({});
-    }
+    const fetchBufferData = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/get_buffer?sector=${sector}&date=${bufferDate}`);
+        const result = await response.json();
+        
+        if (response.ok && result.status === 'success' && result.data) {
+          setTableData(result.data.entries || {});
+          if (result.data.unit_mode) {
+            setUnitMode(result.data.unit_mode);
+          }
+        } else {
+          setTableData({});
+        }
+      } catch (err) {
+        console.warn("Failed to load buffer data:", err);
+        alert("Failed to load buffer entries from the server.");
+      }
+    };
+    fetchBufferData();
   }, [sector, bufferDate]);
 
   // NEW FIX: Automatically load saved plan when Date changes, or clear if none exists
   useEffect(() => {
     const fetchSavedPlanForDate = async () => {
       try {
-        // Backend must implement this GET endpoint to return {"status": "success", "data": {...}}
         const response = await fetch(`${API_BASE}/api/get_plan?date=${scheduleDate}`);
         const result = await response.json();
         if (response.ok && result.status === 'success' && result.data) {
@@ -136,14 +147,11 @@ const SHOScheduling = () => {
           
           // Safely extract the machine names into an array of strings
           if (Array.isArray(machinePayload)) {
-             // If backend sends an array: ["Furnace 1"] OR [{"name": "Furnace 1"}]
              machineNames = machinePayload.map(m => typeof m === 'string' ? m : (m.name || m.id));
           } else if (typeof machinePayload === 'object' && machinePayload !== null) {
-             // If backend sends a dictionary: {"Furnace 1": {"type": "Furnace"}}
              machineNames = Object.keys(machinePayload);
           }
 
-          // Now we can safely map because machineNames is guaranteed to be an array of strings
           const loadedMachines = machineNames.map(m => ({
             id: m, machine: m, enabled: true, bd_date: '', start_time: '', end_time: ''
           }));
@@ -161,13 +169,44 @@ const SHOScheduling = () => {
   }, []);
   
 
-
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
-  const saveBufferData = () => {
+  const saveBufferData = async () => {
     setIsSaving(true);
-    localStorage.setItem(`sho_db_${sector}_${bufferDate}`, JSON.stringify({ entries: tableData }));
-    setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
+    try {
+      const payload = {
+        date: bufferDate,
+        sector: sector,
+        unit_mode: unitMode,
+        entries: tableData
+      };
+      
+      const response = await fetch(`${API_BASE}/api/save_buffer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const result = await response.json();
+      
+      if (response.ok && result.status === 'success') {
+        // Refresh the displayed values from the backend to guarantee DB sync
+        const fetchResponse = await fetch(`${API_BASE}/api/get_buffer?sector=${sector}&date=${bufferDate}`);
+        const fetchResult = await fetchResponse.json();
+        
+        if (fetchResponse.ok && fetchResult.status === 'success' && fetchResult.data) {
+          setTableData(fetchResult.data.entries || {});
+          if (fetchResult.data.unit_mode) {
+            setUnitMode(fetchResult.data.unit_mode);
+          }
+        }
+        alert("Buffer Data Saved successfully.");
+      } else {
+        alert("Error saving buffer data: " + (result.detail || "Unknown error"));
+      }
+    } catch (err) {
+      alert("Failed to connect to server to save buffer data.");
+    }
+    setIsSaving(false);
   };
 
   const updateMachineConstraint = (id, field, value) => {
@@ -206,7 +245,7 @@ const SHOScheduling = () => {
       face_grinding: scheduleData.face_grinding || [],
       od_grinding: scheduleData.od_grinding || [],
       heat_treatment: scheduleData.heat_treatment || [],
-      unscheduled: scheduleData.unscheduled || [] // Ensuring unscheduled parts save to DB
+      unscheduled: scheduleData.unscheduled || [] 
     };
 
     try {
@@ -602,7 +641,6 @@ const SHOScheduling = () => {
                                 <tr key={idx}>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', fontWeight: 'bold' }}>{item.stage}</td>
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc' }}>{item.part}</td>
-                                    {/* UPDATED: Displays both missed boxes and the detailed status reason */}
                                     <td style={{ padding: '8px', border: '1px solid #ffcccc', color: '#cc0000' }}>
                                       {item.missed_boxes}
                                       {item.status && (

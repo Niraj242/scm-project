@@ -1041,9 +1041,7 @@ def generate_schedule(payload: ScheduleRequest):
                         data[pc] = reduced_d1
                  
                         print(
-                            f"[BUFFER CHECK] {disp_name} {pc} "
-                            f"Demand={raw_val} "
-                            f"AvailBuffer={avail_rings}"
+                            f"[AFTER REDUCTION] {disp_name} {pc} = {data[pc]}"
                         )
                     
             

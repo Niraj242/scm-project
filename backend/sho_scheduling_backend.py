@@ -258,7 +258,7 @@ def get_lookup_variants(raw_text, p_code=None):
     elif '/' in t and len(parts) > 1:
         if not any(x in parts[1] for x in ['Q', 'X']): t = parts[0].strip()
 
-    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q', 'LM', 'M']
+    suffixes = ['VK210', 'X/Q', '/Q', 'J2', 'AE', 'AB', 'A', 'B', 'E', 'J', 'X', 'Q', 'LM', 'M', 'ETN9', 'J2/Q']
     t_nosuff = t
     changed = True
     while changed:
@@ -273,7 +273,7 @@ def get_lookup_variants(raw_text, p_code=None):
     t_nosuff = t_nosuff.strip()
     t_clean = re.sub(r'[\s\-_/.]', '', t_nosuff)
     
-    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM', 'FACE ', 'OD ', 'HT ', 'FACE', 'OD', 'HT']
+    prefixes_to_strip = ['BAH', 'BTH', 'BAR', 'BB1B', 'BB1', 'BB', 'BT1', 'BT', 'UC', 'LM', 'FACE ', 'OD ', 'HT ', 'FACE', 'OD', 'HT', 'BDA']
     t_nopfx = t_clean
     found_prefix = ""
     for pfx in prefixes_to_strip:

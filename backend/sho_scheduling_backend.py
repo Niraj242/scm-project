@@ -138,6 +138,12 @@ class SaveBreakdownsRequest(BaseModel):
     date: str
     entries: List[BreakdownItem]
 
+class SaveBufferRequest(BaseModel):
+    date: str
+    sector: str
+    unit_mode: str
+    entries: Dict[str, Any]
+
 # ==========================================
 # UTIL FUNCTIONS
 # ==========================================
@@ -446,6 +452,47 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
             return setup_chart_matrix[(var, p_code)]
     return None
 
+def get_buffers_in_rings(entries, unit_mode, ch_norm, pc, rpd, rpb):
+    ch_buf = 0.0
+    od_buf = 0.0
+    face_buf = 0.0
+    ht_buf = 0.0
+    
+    if ch_norm in entries:
+        ch_data = entries[ch_norm]
+        mappings = {
+            'CH': [('ch_buffer_1', 'type_1'), ('ch_buffer_2', 'next_type_1')],
+            'OD': [('od_buffer_1', 'type_2'), ('od_buffer_2', 'next_type_2')],
+            'FACE': [('face_buffer_1', 'type_3'), ('face_buffer_2', 'type_4')],
+            'HT': [('ht_buffer_1', 'type_5'), ('ht_buffer_2', 'type_6')],
+        }
+        
+        def extract_buf(stage_keys):
+            for b_key, t_key in stage_keys:
+                if str(ch_data.get(t_key, '')).strip().upper() == pc:
+                    try: return float(ch_data.get(b_key, 0.0))
+                    except: pass
+            return 0.0
+
+        ch_buf_raw = extract_buf(mappings['CH'])
+        od_buf_raw = extract_buf(mappings['OD'])
+        face_buf_raw = extract_buf(mappings['FACE'])
+        ht_buf_raw = extract_buf(mappings['HT'])
+
+        def convert(val):
+            if not val: return 0.0
+            um = str(unit_mode).strip().lower()
+            if um in ['days', 'day']: return val * rpd
+            if um in ['boxes', 'box']: return val * rpb
+            return float(val)
+
+        ch_buf = convert(ch_buf_raw)
+        od_buf = convert(od_buf_raw)
+        face_buf = convert(face_buf_raw)
+        ht_buf = convert(ht_buf_raw)
+
+    return ch_buf, od_buf, face_buf, ht_buf
+
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
         self.stage = stage
@@ -583,6 +630,28 @@ def get_summary(payload: dict):
             "status": "success", 
             "data": plan_data.get("summary", [])
         }
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+# ==========================================
+# BUFFER ENDPOINTS (NEW)
+# ==========================================
+@router.post("/api/save_buffers")
+def save_buffers(payload: SaveBufferRequest):
+    try:
+        key = f"buffers_{payload.date}_{payload.sector}"
+        data = {"unit_mode": payload.unit_mode, "entries": payload.entries}
+        save_setting(key, data)
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@router.get("/api/load_buffers")
+def load_buffers(date: str, sector: str):
+    try:
+        key = f"buffers_{date}_{sector}"
+        data = get_setting(key, {"unit_mode": "Days", "entries": {}})
+        return {"status": "success", "data": data}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
@@ -840,7 +909,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if part_key not in box_matrix: box_matrix[part_key] = {}
                 for p_code, details in part_data.items():
                     if p_code not in box_matrix[part_key]:
-                        box_matrix[part_key][p_code] = details.copy()  # FIXED TYPO HERE
+                        box_matrix[part_key][p_code] = details.copy()
                     else:
                         if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code]['qty'] = details['qty']
                         if 'rpd' in details: box_matrix[part_key][p_code]['rpd'] = details['rpd']
@@ -1007,28 +1076,8 @@ def generate_schedule(payload: ScheduleRequest):
                 rt = float(stage_data.get("rt", 0.0))
                 
                 if qty > 0 and stage != first_stage:
+                    # WIP items assigned an absolute lowest score (-100.0) so they always sort first in the ascending loop
                     work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, -100.0, routing))
-
-        # -----------------------------------------------------
-        # DYNAMIC CHANNEL BUFFER & PRIORITY RULE EXTRACTION
-        # -----------------------------------------------------
-        ch_stats = {}
-        for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
-            for display_name, data in demands.items():
-                ch_norm = normalize_channel(data['channel'])
-                if ch_norm not in ch_stats: 
-                    buffer_val = 0.0
-                    ch_entry = payload.entries.get(ch_norm)
-                    if isinstance(ch_entry, dict):
-                        raw_buf = ch_entry.get('CHANNEL', ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0))))
-                        try: buffer_val = float(raw_buf)
-                        except: pass
-                    elif ch_entry is not None:
-                        try: buffer_val = float(ch_entry)
-                        except: pass
-                    
-                    ch_stats[ch_norm] = {'demand': 0.0, 'buffer': buffer_val, 'score': buffer_val}
-                ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
         tracker_ht = {}
         for display_name, data in channel_demands_day1.items():
@@ -1061,99 +1110,95 @@ def generate_schedule(payload: ScheduleRequest):
             
             rpd = get_rpd_for_part(disp, pc, box_matrix)
             rpb = get_box_for_part(disp, pc, box_matrix)
-            if rpd <= 0: rpd = 1000.0
-            if rpb <= 0: rpb = 100.0
             
-            ch_entry = payload.entries.get(ch_norm, {})
-            ch_buf_raw = 0.0
-            od_buf_raw = 0.0
-            face_buf_raw = 0.0
-            ht_buf_raw = 0.0
+            ch_buf, od_buf, face_buf, ht_buf = get_buffers_in_rings(payload.entries, payload.unit_mode, ch_norm, pc, rpd, rpb)
             
-            if isinstance(ch_entry, dict):
-                ch_buf_raw = float(ch_entry.get('CHANNEL', ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))))
-                od_buf_raw = float(ch_entry.get('OD', 0.0))
-                face_buf_raw = float(ch_entry.get('FACE', 0.0))
-                ht_buf_raw = float(ch_entry.get('HT', 0.0))
-            elif ch_entry is not None:
-                try: ch_buf_raw = float(ch_entry)
-                except: pass
+            # Score matches the channel buffer directly (in rings) 
+            item_priority = ch_buf
 
-            def to_rings(val, stage_key):
-                unit = payload.unit_mode
-                if isinstance(ch_entry, dict):
-                    unit = ch_entry.get(f"{stage_key}_unit", ch_entry.get(f"{stage_key}_mode", ch_entry.get("unit", ch_entry.get("unit_mode", payload.unit_mode))))
-                unit_str = str(unit).lower().strip()
-                if 'day' in unit_str: return val * rpd
-                if 'box' in unit_str or 'bx' in unit_str: return val * rpb
-                if 'ring' in unit_str or 'rng' in unit_str: return val
-                if payload.unit_mode == 'day': return val * rpd
-                if payload.unit_mode == 'box': return val * rpb
-                return val
+            curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf = ch_buf, od_buf, face_buf, ht_buf
 
-            buffers_state = {
-                'CHANNEL': to_rings(ch_buf_raw, 'CHANNEL'),
-                'OD': to_rings(od_buf_raw, 'OD'),
-                'FACE': to_rings(face_buf_raw, 'FACE'),
-                'HT': to_rings(ht_buf_raw, 'HT')
-            }
+            def apply_buffers_to_demand(demand, c_b, o_b, f_b, h_b):
+                c_sat = min(demand, c_b)
+                r_ch = demand - c_sat
+                c_b -= c_sat
+
+                r_by_stg = {'CHANNEL': r_ch}
+                rev_stages = reversed([s for s in routing if s != 'CHANNEL'])
+                curr_req = r_ch
+                for stg in rev_stages:
+                    if stg == 'OD':
+                        sat = min(curr_req, o_b)
+                        curr_req -= sat
+                        o_b -= sat
+                    elif stg == 'FACE':
+                        sat = min(curr_req, f_b)
+                        curr_req -= sat
+                        f_b -= sat
+                    elif stg == 'HT':
+                        sat = min(curr_req, h_b)
+                        curr_req -= sat
+                        h_b -= sat
+                    r_by_stg[stg] = curr_req
+
+                return r_by_stg, c_b, o_b, f_b, h_b
+
+            # Day 1 Demand calculation deducting independent process buffers
+            reqs_d1, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf = apply_buffers_to_demand(
+                raw_d1, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf
+            )
+
+            # Day 2 Demand calculation deducting independent process buffers
+            reqs_d2, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf = apply_buffers_to_demand(
+                raw_d2, curr_ch_buf, curr_od_buf, curr_face_buf, curr_ht_buf
+            )
+
+            actual_bal_consumed = 0.0
+
+            # Schedule Day-1 only with remaining exact quantities per stage (clamped locally)
+            for i, stage in enumerate(routing):
+                if stage == 'CHANNEL': continue
+                req_here = reqs_d1.get(stage, 0.0)
+                next_stage = routing[i+1]
+                req_next = reqs_d1.get(next_stage, 0.0)
+
+                inject_qty = req_here - req_next
+
+                if stage == first_stage and inject_qty > 0:
+                    sat_bal = min(inject_qty, bal)
+                    inject_qty -= sat_bal
+                    bal -= sat_bal
+                    actual_bal_consumed += sat_bal
+
+                if inject_qty > 0:
+                    work_items.append(WorkItem(stage, disp, pc, 0, reqs['channel'], inject_qty, 0.0, item_priority, routing[i:]))
+
+            d2_satisfied = 0.0
             
-            # --- DAY-1 BACKWARD PROPAGATION DEDUCTION FLOW ---
-            rem_ch_d1 = max(0.0, raw_d1 - buffers_state['CHANNEL'])
-            buffers_state['CHANNEL'] = max(0.0, buffers_state['CHANNEL'] - raw_d1)
-            
-            rem_od_d1 = max(0.0, rem_ch_d1 - buffers_state['OD'])
-            buffers_state['OD'] = max(0.0, buffers_state['OD'] - rem_ch_d1)
-            
-            rem_face_d1 = max(0.0, rem_od_d1 - buffers_state['FACE'])
-            buffers_state['FACE'] = max(0.0, buffers_state['FACE'] - rem_od_d1)
-            
-            rem_ht_d1 = max(0.0, rem_face_d1 - buffers_state['HT'])
-            buffers_state['HT'] = max(0.0, buffers_state['HT'] - rem_face_d1)
-            
-            reqs_d1 = {'CHANNEL': rem_ch_d1, 'OD': rem_od_d1, 'FACE': rem_face_d1, 'HT': rem_ht_d1}
-            
-            # --- DAY-2 BACKWARD PROPAGATION DEDUCTION FLOW ---
-            rem_ch_d2 = max(0.0, raw_d2 - buffers_state['CHANNEL'])
-            buffers_state['CHANNEL'] = max(0.0, buffers_state['CHANNEL'] - raw_d2)
-            
-            rem_od_d2 = max(0.0, rem_ch_d2 - buffers_state['OD'])
-            buffers_state['OD'] = max(0.0, buffers_state['OD'] - rem_ch_d2)
-            
-            rem_face_d2 = max(0.0, rem_od_d2 - buffers_state['FACE'])
-            buffers_state['FACE'] = max(0.0, buffers_state['FACE'] - rem_od_d2)
-            
-            rem_ht_d2 = max(0.0, rem_face_d2 - buffers_state['HT'])
-            buffers_state['HT'] = max(0.0, buffers_state['HT'] - rem_face_d2)
-            
-            reqs_d2 = {'CHANNEL': rem_ch_d2, 'OD': rem_od_d2, 'FACE': rem_face_d2, 'HT': rem_ht_d2}
-            
-            wip_d1_sat = min(rem_ht_d1, bal)
-            leftover_bal = bal - wip_d1_sat
-            wip_d2_sat = min(rem_ht_d2, leftover_bal)
-            leftover_bal -= wip_d2_sat
-            
-            reqs['net_d1'] = rem_ht_d1
-            reqs['net_d2'] = rem_ht_d2
-            reqs['d2_satisfied'] = wip_d2_sat
-            reqs['leftover_bal'] = leftover_bal
+            # Schedule Day-2 unused machine capacity
+            for i, stage in enumerate(routing):
+                if stage == 'CHANNEL': continue
+                req_here = reqs_d2.get(stage, 0.0)
+                next_stage = routing[i+1]
+                req_next = reqs_d2.get(next_stage, 0.0)
+
+                inject_qty = req_here - req_next
+
+                if stage == first_stage and inject_qty > 0:
+                    sat_bal = min(inject_qty, bal)
+                    inject_qty -= sat_bal
+                    bal -= sat_bal
+                    d2_satisfied += sat_bal
+                    actual_bal_consumed += sat_bal
+
+                if inject_qty > 0:
+                    work_items.append(WorkItem(stage, disp, pc, 1, reqs['channel'], inject_qty, 0.0, item_priority, routing[i:]))
+
+            reqs['net_d1'] = reqs_d1.get(first_stage, 0.0)
+            reqs['net_d2'] = reqs_d2.get(first_stage, 0.0)
+            reqs['d2_satisfied'] = d2_satisfied
+            reqs['leftover_bal'] = bal
             reqs['first_stage'] = first_stage
-            
-            item_priority = ch_stats[ch_norm]['score']
-            
-            schedulable = [s for s in routing if s in ['HT', 'FACE', 'OD']]
-            
-            if schedulable:
-                for day_idx, r_dict in [(0, reqs_d1), (1, reqs_d2)]:
-                    injections = {schedulable[0]: r_dict.get(schedulable[0], 0.0)}
-                    for i in range(1, len(schedulable)):
-                        curr = schedulable[i]
-                        prev = schedulable[i-1]
-                        injections[curr] = max(0.0, r_dict.get(curr, 0.0) - r_dict.get(prev, 0.0))
-                        
-                    for stage, qty in injections.items():
-                        if qty > 0:
-                            work_items.append(WorkItem(stage, disp, pc, day_idx, reqs['channel'], qty, 0.0, item_priority, routing))
 
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}
@@ -1322,7 +1367,7 @@ def generate_schedule(payload: ScheduleRequest):
                         
                         needs_split = 1 if req_time > time_available else 0
                         
-                        # Ascending sort logic key: direct item.priority orders least buffer first
+                        # Ascending sort logic key: direct item.priority orders least buffer first[cite: 1]
                         key = (needs_split, start_time, item.day_idx, gap, item.priority)
                         
                         if key < best_key:

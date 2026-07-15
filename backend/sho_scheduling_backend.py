@@ -209,8 +209,8 @@ def get_all_resources():
                     cells = [c.strip() for c in str_matrix[r] if c.strip()]
                     m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
                     if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
-                        if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): face_mcs.add(m_cand)
-                        elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in current_m_num: od_mcs.add(m_cand)
+                        if "FACE" in row_text or "DDS" in m_cand.upper() or "BG" in m_cand.upper(): face_mcs.add(m_cand)
+                        elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand: od_mcs.add(m_cand)
 
     if not face_mcs: face_mcs = {"DDS 1", "DDS 2", "BG 1"}
     if not od_mcs: od_mcs = {"CL 1", "CL 2", "CELL 1"}
@@ -451,109 +451,88 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
 # ==========================================
 # ROBUST BUFFER DAYS CONVERSION HELPERS
 # ==========================================
-def get_channel_entry(entries, ch_norm):
-    """Retrieves an entry mapping safely by normalizing target channel keys."""
-    if not entries:
-        return None
-    if ch_norm in entries:
-        return entries[ch_norm]
-    ch_norm_clean = str(ch_norm).strip().upper().replace(" ", "")
-    for k, v in entries.items():
-        k_norm = normalize_channel(k)
-        k_norm_clean = str(k_norm).strip().upper().replace(" ", "")
-        if k_norm_clean == ch_norm_clean:
-            return v
-    return None
-
-def find_boxes_per_day(disp, pc, ch_norm, box_per_day_map):
-    """Finds matching rows in box per day mappings using safe, non-normalized matching."""
-    disp_clean = str(disp).strip().upper().replace(" ", "")
-    ch_clean = str(ch_norm).strip().upper().replace(" ", "")
-    
-    # Exact Match
-    for (r_type, r_ch, r_pc), val in box_per_day_map.items():
-        r_type_clean = str(r_type).strip().upper().replace(" ", "")
-        r_ch_clean = str(r_ch).strip().upper().replace(" ", "")
-        if r_pc == pc and r_ch_clean == ch_clean:
-            if r_type_clean == disp_clean:
-                return val
-                
-    # Substring Match Fallback
-    for (r_type, r_ch, r_pc), val in box_per_day_map.items():
-        r_type_clean = str(r_type).strip().upper().replace(" ", "")
-        r_ch_clean = str(r_ch).strip().upper().replace(" ", "")
-        if r_pc == pc and r_ch_clean == ch_clean:
-            if r_type_clean in disp_clean or disp_clean in r_type_clean:
-                return val
-    return 0.0
-
-def get_buffer_rings_for_part(disp, side, ch_norm, payload, box_matrix, demand_rings):
+def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_rings):
     """
-    Returns:
-        available_rings, available_boxes
+    Returns a dictionary of available rings at each distinct location:
+    {"CH BUFFER": x, "OD": y, "FACE": z, "HT": w}
+    Parses complex JSON combinations gracefully to assign the correct buffer quantity.
     """
-
-    ch_entry = get_channel_entry(payload.entries, ch_norm)
-
-    if ch_entry is None:
-        return 0.0, 0.0
-
-    entered_val = 0.0
-
-    if isinstance(ch_entry, dict):
-        entry_type = str(ch_entry.get("type", "")).strip().upper()
-
-        if (not entry_type) or entry_type in ["NONE", "NAN"] or entry_type == disp:
-            entered_val = safe_float(
-                ch_entry.get(
-                    "buffer_day",
-                    ch_entry.get(
-                        "buffer",
-                        ch_entry.get("value", 0.0)
-                    )
-                )
-            )
-    else:
-        entered_val = safe_float(ch_entry)
-
-    if entered_val <= 0:
-        return 0.0, 0.0
-
+    buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
     unit_mode = str(payload.unit_mode).strip().upper()
+    rpb = get_box_for_part(disp, pc, box_matrix)
+    
+    def convert(val):
+        if val <= 0: return 0.0
+        if "DAY" in unit_mode: return float(val * demand_rings)
+        elif "BOX" in unit_mode: return float(val * rpb)
+        else: return float(val)
 
-    rpb = get_box_for_part(disp, side, box_matrix)
+    entries = payload.entries if payload.entries else {}
+    ch_clean = normalize_channel(ch_norm).replace(" ", "")
+    
+    def check_and_add(entry_dict, loc_override=None):
+        t = str(entry_dict.get("type", entry_dict.get("running", ""))).strip().upper()
+        s = str(entry_dict.get("pc", entry_dict.get("side", ""))).strip().upper()
+        if t and t not in ["NONE", "NAN"] and t != disp: return
+        if s and s not in ["NONE", "NAN"] and s != pc: return
+        
+        loc_raw = str(entry_dict.get("location", loc_override or "CH BUFFER")).upper()
+        loc = "CH BUFFER"
+        if "OD" in loc_raw: loc = "OD"
+        elif "FACE" in loc_raw: loc = "FACE"
+        elif "HT" in loc_raw or "HEAT" in loc_raw: loc = "HT"
+        
+        val = safe_float(entry_dict.get("buffer_day", entry_dict.get("buffer", entry_dict.get("value", 0.0))))
+        buffers_rings[loc] += convert(val)
 
-    # ---------------- DAYS ----------------
-    if "DAY" in unit_mode:
+    for key, val in entries.items():
+        k_norm = normalize_channel(key).replace(" ", "")
+        k_up = key.upper()
+        is_loc_key = any(l in k_up for l in ["OD", "FACE", "HT", "BUFFER"])
+        
+        if k_norm == ch_clean:
+            if isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict): check_and_add(item)
+            elif isinstance(val, dict):
+                has_loc = any(l in k.upper() for k in val.keys() for l in ["OD", "FACE", "HT", "BUFFER"])
+                if has_loc:
+                    for sub_k, sub_v in val.items():
+                        if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=sub_k)
+                        else:
+                            sub_k_up = str(sub_k).upper()
+                            loc = "CH BUFFER"
+                            if "OD" in sub_k_up: loc = "OD"
+                            elif "FACE" in sub_k_up: loc = "FACE"
+                            elif "HT" in sub_k_up or "HEAT" in sub_k_up: loc = "HT"
+                            buffers_rings[loc] += convert(safe_float(sub_v))
+                else:
+                    check_and_add(val)
+            else:
+                buffers_rings["CH BUFFER"] += convert(safe_float(val))
+                
+        elif is_loc_key:
+            loc = "CH BUFFER"
+            if "OD" in k_up: loc = "OD"
+            elif "FACE" in k_up: loc = "FACE"
+            elif "HT" in k_up or "HEAT" in k_up: loc = "HT"
+            
+            if isinstance(val, dict):
+                for sub_k, sub_v in val.items():
+                    if normalize_channel(sub_k).replace(" ", "") == ch_clean:
+                        if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=loc)
+                        else: buffers_rings[loc] += convert(safe_float(sub_v))
+            elif isinstance(val, list):
+                for item in val:
+                    if isinstance(item, dict) and normalize_channel(item.get("channel", "")).replace(" ", "") == ch_clean:
+                        check_and_add(item, loc_override=loc)
+                        
+    if isinstance(entries, list):
+        for item in entries:
+            if isinstance(item, dict) and normalize_channel(item.get("channel", "")).replace(" ", "") == ch_clean:
+                check_and_add(item)
 
-        # 1 Day = today's requirement
-        avail_rings = entered_val * demand_rings
-
-        if rpb > 0:
-            avail_boxes = math.ceil(avail_rings / rpb)
-        else:
-            avail_boxes = 0
-
-        return avail_rings, float(avail_boxes)
-
-    # ---------------- BOXES ----------------
-    elif "BOX" in unit_mode:
-
-        avail_rings = entered_val * rpb
-
-        return avail_rings, entered_val
-
-    # ---------------- RINGS ----------------
-    else:
-
-        if rpb > 0:
-            avail_boxes = math.ceil(entered_val / rpb)
-        else:
-            avail_boxes = 0
-
-        return entered_val, float(avail_boxes)
-
-
+    return buffers_rings
 
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
@@ -849,7 +828,6 @@ def generate_schedule(payload: ScheduleRequest):
         # 2. LOAD BOX RING MATRIX SEQUENTIALLY (WITH SETUP CHART)
         box_matrices = {"tier1": {}, "tier2": {}, "tier3": {}}
         setup_chart_matrix = {}
-        box_per_day_map = {}  # Stores loaded "Boxes Per Day" parameters
         for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
             s_name_up = str(s_name).upper().strip()
             df_box = df_b.fillna('')
@@ -947,69 +925,6 @@ def generate_schedule(payload: ScheduleRequest):
                                 if p_c == 'OR' and ('OR' not in target_map[ck] or target_map[ck]['OR']['qty'] <= 0):
                                     fq = safe_float(row_vals[or_col]) if (or_col != -1 and or_col < len(row_vals)) else (safe_float(row_vals[single_rpb_col]) if (single_rpb_col != -1 and single_rpb_col < len(row_vals)) else 0.0)
                                     if fq > 0: target_map[ck]['OR'] = {'qty': fq, 'source': s_name}
-                                    
-                # Parse Custom Buffer Days values specifically from target master sheets[cite: 1]
-                if s_name_up in ["BOX PER DAY TRB", "BOX PER DAY DGBB"]:
-                    header_row_idx = None
-                    running_type_col_idx = None
-                    channel_cols = {}
-                    
-                    for r_idx_pd in range(min(20, len(df_box))):
-                        row_vals_pd = [str(x).strip().upper() for x in df_box.iloc[r_idx_pd]]
-                        type_indices = [i for i, val in enumerate(row_vals_pd) if "RUNNING" in val or "TYPE" in val]
-                        if type_indices:
-                            running_type_col_idx = type_indices[0]
-                            header_row_idx = r_idx_pd
-                            for c_idx_pd, val in enumerate(row_vals_pd):
-                                if c_idx_pd == running_type_col_idx: continue
-                                norm_val = normalize_channel(val)
-                                if norm_val and ("CH" in norm_val or "SABB" in norm_val or "T" in norm_val or "HUB" in norm_val):
-                                    channel_cols[norm_val] = c_idx_pd
-                            break
-                            
-                    if header_row_idx is None:
-                        running_type_col_idx = 0
-                        header_row_idx = 0
-                        for r_idx_pd in range(min(5, len(df_box))):
-                            row_vals_pd = [str(x).strip().upper() for x in df_box.iloc[r_idx_pd]]
-                            for c_idx_pd, val in enumerate(row_vals_pd):
-                                if c_idx_pd == 0: continue
-                                norm_val = normalize_channel(val)
-                                if norm_val and ("CH" in norm_val or "SABB" in norm_val or "T" in norm_val or "HUB" in norm_val):
-                                    channel_cols[norm_val] = c_idx_pd
-                                   
-                    for r_idx_pd in range(header_row_idx + 1, len(df_box)):
-                        row_vals_pd = df_box.iloc[r_idx_pd]
-                        if running_type_col_idx >= len(row_vals_pd): continue
-                        raw_type_val = str(row_vals_pd.iloc[running_type_col_idx]).strip()
-                        if not raw_type_val or is_invalid_part(raw_type_val): continue
-                        running_type_norm = raw_type_val.upper()
-                        
-                        for norm_ch, c_idx_pd in channel_cols.items():
-                            if c_idx_pd >= len(row_vals_pd): continue
-                            cell_val = str(row_vals_pd.iloc[c_idx_pd]).strip()
-                            if not cell_val or cell_val.upper() in ["NAN", "NONE", "", "-"]: continue
-                            
-                            # Parse dual IR/OR brackets (e.g. "6012 (30/41) 4.5 K")[cite: 1]
-                            match = re.search(r'\(\s*(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)\s*\)', cell_val)
-                            if match:
-                                ir_boxes = float(match.group(1))
-                                or_boxes = float(match.group(2))
-                                box_per_day_map[(running_type_norm, norm_ch, 'IR')] = ir_boxes
-                                box_per_day_map[(running_type_norm, norm_ch, 'OR')] = or_boxes
-                            else:
-                                # Fallback to single value bounds
-                                match_single = re.search(r'\(\s*(\d+(?:\.\d+)?)\s*\)', cell_val)
-                                if match_single:
-                                    val_single = float(match_single.group(1))
-                                    box_per_day_map[(running_type_norm, norm_ch, 'IR')] = val_single
-                                    box_per_day_map[(running_type_norm, norm_ch, 'OR')] = val_single
-                                else:
-                                    match_num = re.search(r'^\s*(\d+(?:\.\d+)?)\s*$', cell_val)
-                                    if match_num:
-                                        val_num = float(match_num.group(1))
-                                        box_per_day_map[(running_type_norm, norm_ch, 'IR')] = val_num
-                                        box_per_day_map[(running_type_norm, norm_ch, 'OR')] = val_num
 
         box_matrix = {}
         for tier in ["tier3", "tier2", "tier1"]:
@@ -1019,29 +934,33 @@ def generate_schedule(payload: ScheduleRequest):
                     if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code] = details
 
         # -----------------------------------------------------
-        # APPLY BUFFER CONVERSION & REDUCTION BEFORE SCHEDULING[cite: 1]
+        # APPLY BUFFER CONVERSION & REDUCTION BEFORE SCHEDULING
         # -----------------------------------------------------
+        parsed_buffers = {}
+        
         for disp_name in list(channel_demands_day1.keys()):
             data = channel_demands_day1[disp_name]
             ch_norm = normalize_channel(data['channel'])
             for pc in ['IR', 'OR']:
                 raw_val = float(data.get(pc, 0.0))
                 if raw_val > 0:
-                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
-                    if avail_rings > 0:
-                        # Reduce Day 1 demand first, then spill leftover to Day 2 demands[cite: 1]
-                        rem_buf = avail_rings
+                    buffers_rings = get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
+                    parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
+                    
+                    total_avail_rings = sum(buffers_rings.values())
+                    if total_avail_rings > 0:
+                        # Reduce Day 1 demand first, then spill leftover to Day 2 demands based on ALL buffers combined
+                        rem_buf = total_avail_rings
                         reduced_d1 = max(0.0, raw_val - rem_buf)
                         rem_buf -= (raw_val - reduced_d1)
                         data[pc] = reduced_d1
                         print(
                             f"[BUFFER] {disp_name} {pc} | "
                             f"Demand={raw_val} | "
-                            f"Buffer={avail_rings} | "
+                            f"Total Buffer={total_avail_rings} | "
                             f"Remaining={reduced_d1}"
                         )
             
-                        
                         if rem_buf > 0 and disp_name in channel_demands_day2:
                             d2_data = channel_demands_day2[disp_name]
                             raw_val_d2 = float(d2_data.get(pc, 0.0))
@@ -1058,9 +977,12 @@ def generate_schedule(payload: ScheduleRequest):
                     continue
                 raw_val = float(data.get(pc, 0.0))
                 if raw_val > 0:
-                    avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
-                    if avail_rings > 0:
-                        data[pc] = max(0.0, raw_val - avail_rings)
+                    buffers_rings = get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
+                    parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
+                    
+                    total_avail_rings = sum(buffers_rings.values())
+                    if total_avail_rings > 0:
+                        data[pc] = max(0.0, raw_val - total_avail_rings)
 
         # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
         weight_matrix = {}
@@ -1276,32 +1198,17 @@ def generate_schedule(payload: ScheduleRequest):
             reqs['leftover_bal'] = bal
             reqs['first_stage'] = first_stage
 
-
-
-
-
-
-            
             # -----------------------------------------------------
             # FULLY IMPLEMENTED BUFFER PRIORITIZATION LOGIC
             # -----------------------------------------------------
             buffer_val = 0.0
             
-            ch_entry = payload.entries.get(ch_norm)
-            
-            if isinstance(ch_entry, dict):
-                entry_type = str(ch_entry.get('type', '')).strip().upper()
-                if not entry_type or entry_type in ['NONE', 'NAN'] or entry_type == disp:
-                    raw_buf = ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))
-                    try: 
-                        buffer_val = float(raw_buf)
-                    except: 
-                        pass
-            elif ch_entry is not None:
-                try: 
-                    buffer_val = float(ch_entry)
-                except: 
-                    pass
+            if (disp, pc, ch_norm) in parsed_buffers:
+                b_rings = parsed_buffers[(disp, pc, ch_norm)]
+                total_rings = sum(b_rings.values())
+                demand = max(raw_d1, raw_d2)
+                if demand > 0: 
+                    buffer_val = total_rings / demand
 
             item_priority = ch_stats[ch_norm]['score'] - buffer_val
 
@@ -1309,6 +1216,16 @@ def generate_schedule(payload: ScheduleRequest):
                 work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, item_priority, routing))
             if net_d2 > 0:
                 work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
+
+        # Inject the parsed downstream buffers as WIP WorkItems!
+        for (disp, pc, ch_norm), b_rings in parsed_buffers.items():
+            routing = get_routing_for_part(ch_norm, pc)
+            for stage, qty in b_rings.items():
+                if stage == "CH BUFFER" or qty <= 0.01: continue
+                if stage not in routing: continue
+                
+                # Priority 10000.0 with day_idx=-1 guarantees these run first as existing WIP 
+                work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, 0.0, 10000.0, routing))
 
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}
@@ -1685,4 +1602,3 @@ def generate_schedule(payload: ScheduleRequest):
     except Exception as e:
         import traceback
         return {"status": "error", "debug_logs": debug_logs + [f"CRITICAL ERROR: {traceback.format_exc()}"], "detail": str(e)}
-

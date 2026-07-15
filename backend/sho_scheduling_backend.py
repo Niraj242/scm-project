@@ -533,10 +533,7 @@ def get_machines():
         return {"status": "success", "data": machines_dict}
         
     except Exception as e:
-        # Print the exact error to your Python terminal so we can debug it
         print(f"BACKEND ERROR in /api/machines: {str(e)}")
-        
-        # Return 'message' so the frontend console logs the actual error instead of 'undefined'
         return {"status": "error", "message": str(e), "data": {}}
 
 @router.get("/api/get_plan")
@@ -570,18 +567,10 @@ def save_plan(payload: SavePlanRequest):
 
 @router.post("/api/summary")
 def get_summary(payload: dict):
-    """
-    Restored endpoint to satisfy frontend POST /api/summary calls.
-    Accepts a generic dict to prevent 422 Unprocessable Entity errors.
-    """
     try:
-        # Default to today if date isn't provided in the payload
         date = payload.get("date", datetime.now().strftime("%Y-%m-%d"))
-        
-        # Fetch the plan and return just the summary portion
         plans = load_saved_plan()
         plan_data = plans.get(date, {})
-        
         return {
             "status": "success", 
             "data": plan_data.get("summary", [])
@@ -1058,10 +1047,40 @@ def generate_schedule(payload: ScheduleRequest):
             reqs['leftover_bal'] = bal
             reqs['first_stage'] = first_stage
             
+            # -----------------------------------------------------
+            # FULLY IMPLEMENTED BUFFER PRIORITIZATION LOGIC
+            # -----------------------------------------------------
+            buffer_val = 0.0
+            
+            # Attempt to fetch the buffer entry for this specific channel
+            ch_entry = payload.entries.get(ch_norm)
+            
+            if isinstance(ch_entry, dict):
+                # Check if a specific part type was entered for this buffer
+                entry_type = str(ch_entry.get('type', '')).strip().upper()
+                
+                # If NO type was provided (or matches the ongoing part), apply the buffer to this part
+                if not entry_type or entry_type in ['NONE', 'NAN'] or entry_type == disp:
+                    raw_buf = ch_entry.get('buffer_day', ch_entry.get('buffer', ch_entry.get('value', 0.0)))
+                    try: 
+                        buffer_val = float(raw_buf)
+                    except: 
+                        pass
+            elif ch_entry is not None:
+                # Fallback if the frontend just sent a flat number mapping
+                try: 
+                    buffer_val = float(ch_entry)
+                except: 
+                    pass
+
+            # Scheduler engine processes by highest priority, which is negative (-priority).
+            # Subtracting the buffer gives items with a lower buffer stock a higher (lower numerical) score.
+            item_priority = ch_stats[ch_norm]['score'] - buffer_val
+
             if net_d1 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, ch_stats[ch_norm]['score'], routing))
+                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, item_priority, routing))
             if net_d2 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, ch_stats[ch_norm]['score'], routing))
+                work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
 
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}

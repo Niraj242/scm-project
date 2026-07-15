@@ -522,6 +522,11 @@ def get_buffer_rings_for_part(disp, side, ch_norm, payload, box_matrix, demand_r
     unit_mode = str(payload.unit_mode).strip().upper()
 
     rpb = get_box_for_part(disp, side, box_matrix)
+    print(
+        f"[BUFFER CHECK] {disp_name} {pc} "
+        f"Demand={raw_val} "
+        f"AvailBuffer={avail_rings}"
+    )
 
     # ---------------- DAYS ----------------
     if "DAY" in unit_mode:
@@ -1034,12 +1039,13 @@ def generate_schedule(payload: ScheduleRequest):
                         reduced_d1 = max(0.0, raw_val - rem_buf)
                         rem_buf -= (raw_val - reduced_d1)
                         data[pc] = reduced_d1
+                 
                         print(
-                            f"[BUFFER] {disp_name} {pc} | "
-                            f"Demand={raw_val} | "
-                            f"Buffer={avail_rings} | "
-                            f"Remaining={reduced_d1}"
+                            f"[BUFFER CHECK] {disp_name} {pc} "
+                            f"Demand={raw_val} "
+                            f"AvailBuffer={avail_rings}"
                         )
+                    
             
                         
                         if rem_buf > 0 and disp_name in channel_demands_day2:
@@ -1061,6 +1067,13 @@ def generate_schedule(payload: ScheduleRequest):
                     avail_rings, _ = get_buffer_rings_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
                     if avail_rings > 0:
                         data[pc] = max(0.0, raw_val - avail_rings)
+                        
+                        print(
+                            f"[BUFFER CHECK] {disp_name} {pc} "
+                            f"Demand={raw_val} "
+                            f"AvailBuffer={avail_rings}"
+                        )
+        
 
         # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
         weight_matrix = {}
@@ -1287,7 +1300,7 @@ def generate_schedule(payload: ScheduleRequest):
             # -----------------------------------------------------
             buffer_val = 0.0
             
-            ch_entry = payload.entries.get(ch_norm)
+            ch_entry = get_channel_entry(payload.entries, ch_norm)
             
             if isinstance(ch_entry, dict):
                 entry_type = str(ch_entry.get('type', '')).strip().upper()

@@ -23,11 +23,11 @@ BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
 RATE_CACHE = {}
 WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
-VARIANTS_CACHE = {}  # OPTIMIZATION: Cache variants to prevent heavy nested regex operations
+VARIANTS_CACHE = {}  
 
-# Global memory cache for downloaded files to optimize performance and prevent repeated slow network I/O
+# Global memory cache for downloaded files to optimize performance 
 DOWNLOAD_CACHE = {}
-CACHE_TTL_SECONDS = 300  # 5 minutes TTL
+CACHE_TTL_SECONDS = 300  
 
 DEFAULT_FURNACES = {
     "AICHELIN.(896)": 350.0, "CASTLINK FURNACE( 1018 )": 250.0,
@@ -146,7 +146,6 @@ class SaveBreakdownsRequest(BaseModel):
 # UTIL FUNCTIONS & CACHED EXCEL PROCESSOR
 # ==========================================
 def fetch_with_cache(url: str) -> bytes:
-    """Downloads sheets with a 5-minute global TTL block, avoiding redundant bandwidth strain."""
     now = time.time()
     if url in DOWNLOAD_CACHE:
         cached_content, timestamp = DOWNLOAD_CACHE[url]
@@ -183,7 +182,6 @@ def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
     except Exception as e:
         print(f"Error loading sequentially from {url}: {e}")
 
-# Global Resource Cache to prevent re-reading Excel heavily for basic routing/master lists
 MASTER_RESOURCES_CACHE = {"furnaces": [], "face": [], "od": [], "channels": []}
 
 def get_all_resources():
@@ -453,12 +451,12 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
 # ==========================================
 def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_rings):
     """
-    Returns a dictionary of available rings at each distinct location:
-    {"CH BUFFER": x, "OD": y, "FACE": z, "HT": w}
     Parses complex JSON combinations gracefully to assign the correct buffer quantity.
+    Returns dictionary of reduced rings by location.
     """
     buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
-    unit_mode = str(payload.unit_mode).strip().upper()
+    unit_mode = str(getattr(payload, 'unit_mode', 'DAY')).strip().upper()
+    if not unit_mode: unit_mode = 'DAY'
     rpb = get_box_for_part(disp, pc, box_matrix)
     
     def convert(val):
@@ -482,52 +480,64 @@ def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_ring
         elif "FACE" in loc_raw: loc = "FACE"
         elif "HT" in loc_raw or "HEAT" in loc_raw: loc = "HT"
         
-        val = safe_float(entry_dict.get("buffer_day", entry_dict.get("buffer", entry_dict.get("value", 0.0))))
+        val = 0.0
+        # Robustly extract the numeric value from the dict regardless of key name
+        for k_chk in ["buffer_day", "buffer", "value", "days", "qty", "amount"]:
+            if k_chk in entry_dict:
+                val = safe_float(entry_dict[k_chk])
+                break
+        if val == 0.0:
+            for v_chk in entry_dict.values():
+                if isinstance(v_chk, (int, float, str)) and str(v_chk).replace('.', '', 1).isdigit():
+                    val = float(v_chk)
+                    break
+                    
         buffers_rings[loc] += convert(val)
 
-    for key, val in entries.items():
-        k_norm = normalize_channel(key).replace(" ", "")
-        k_up = key.upper()
-        is_loc_key = any(l in k_up for l in ["OD", "FACE", "HT", "BUFFER"])
-        
-        if k_norm == ch_clean:
-            if isinstance(val, list):
-                for item in val:
-                    if isinstance(item, dict): check_and_add(item)
-            elif isinstance(val, dict):
-                has_loc = any(l in k.upper() for k in val.keys() for l in ["OD", "FACE", "HT", "BUFFER"])
-                if has_loc:
-                    for sub_k, sub_v in val.items():
-                        if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=sub_k)
-                        else:
-                            sub_k_up = str(sub_k).upper()
-                            loc = "CH BUFFER"
-                            if "OD" in sub_k_up: loc = "OD"
-                            elif "FACE" in sub_k_up: loc = "FACE"
-                            elif "HT" in sub_k_up or "HEAT" in sub_k_up: loc = "HT"
-                            buffers_rings[loc] += convert(safe_float(sub_v))
-                else:
-                    check_and_add(val)
-            else:
-                buffers_rings["CH BUFFER"] += convert(safe_float(val))
-                
-        elif is_loc_key:
-            loc = "CH BUFFER"
-            if "OD" in k_up: loc = "OD"
-            elif "FACE" in k_up: loc = "FACE"
-            elif "HT" in k_up or "HEAT" in k_up: loc = "HT"
+    if isinstance(entries, dict):
+        for key, val in entries.items():
+            k_norm = normalize_channel(key).replace(" ", "")
+            k_up = key.upper()
+            is_loc_key = any(l in k_up for l in ["OD", "FACE", "HT", "BUFFER"])
             
-            if isinstance(val, dict):
-                for sub_k, sub_v in val.items():
-                    if normalize_channel(sub_k).replace(" ", "") == ch_clean:
-                        if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=loc)
-                        else: buffers_rings[loc] += convert(safe_float(sub_v))
-            elif isinstance(val, list):
-                for item in val:
-                    if isinstance(item, dict) and normalize_channel(item.get("channel", "")).replace(" ", "") == ch_clean:
-                        check_and_add(item, loc_override=loc)
-                        
-    if isinstance(entries, list):
+            if k_norm == ch_clean:
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict): check_and_add(item)
+                elif isinstance(val, dict):
+                    has_loc = any(l in k.upper() for k in val.keys() for l in ["OD", "FACE", "HT", "BUFFER"])
+                    if has_loc:
+                        for sub_k, sub_v in val.items():
+                            if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=sub_k)
+                            else:
+                                sub_k_up = str(sub_k).upper()
+                                loc = "CH BUFFER"
+                                if "OD" in sub_k_up: loc = "OD"
+                                elif "FACE" in sub_k_up: loc = "FACE"
+                                elif "HT" in sub_k_up or "HEAT" in sub_k_up: loc = "HT"
+                                buffers_rings[loc] += convert(safe_float(sub_v))
+                    else:
+                        check_and_add(val)
+                else:
+                    buffers_rings["CH BUFFER"] += convert(safe_float(val))
+                    
+            elif is_loc_key:
+                loc = "CH BUFFER"
+                if "OD" in k_up: loc = "OD"
+                elif "FACE" in k_up: loc = "FACE"
+                elif "HT" in k_up or "HEAT" in k_up: loc = "HT"
+                
+                if isinstance(val, dict):
+                    for sub_k, sub_v in val.items():
+                        if normalize_channel(sub_k).replace(" ", "") == ch_clean:
+                            if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=loc)
+                            else: buffers_rings[loc] += convert(safe_float(sub_v))
+                elif isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict) and normalize_channel(item.get("channel", "")).replace(" ", "") == ch_clean:
+                            check_and_add(item, loc_override=loc)
+                            
+    elif isinstance(entries, list):
         for item in entries:
             if isinstance(item, dict) and normalize_channel(item.get("channel", "")).replace(" ", "") == ch_clean:
                 check_and_add(item)
@@ -619,21 +629,14 @@ def get_monthly_tracking_api():
 def get_machines():
     try:
         res = get_all_resources()
-        
-        if not res:
-            res = {}
-
+        if not res: res = {}
         machines_dict = {}
-        
         for f in res.get("furnaces", []): machines_dict[f] = {"type": "Furnace"}
         for m in res.get("face", []): machines_dict[m] = {"type": "Face Grinding"}
         for m in res.get("od", []): machines_dict[m] = {"type": "OD Grinding"}
         for c in res.get("channels", []): machines_dict[c] = {"type": "Channel"}
-        
         return {"status": "success", "data": machines_dict}
-        
     except Exception as e:
-        print(f"BACKEND ERROR in /api/machines: {str(e)}")
         return {"status": "error", "message": str(e), "data": {}}
 
 @router.get("/api/get_plan")
@@ -671,16 +674,10 @@ def get_summary(payload: dict):
         date = payload.get("date", datetime.now().strftime("%Y-%m-%d"))
         plans = load_saved_plan()
         plan_data = plans.get(date, {})
-        return {
-            "status": "success", 
-            "data": plan_data.get("summary", [])
-        }
+        return {"status": "success", "data": plan_data.get("summary", [])}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
-# ==========================================
-# BREAKDOWN ENDPOINTS
-# ==========================================
 @router.get("/api/breakdowns")
 def get_breakdowns(date: str):
     saved = {}
@@ -696,14 +693,10 @@ def get_breakdowns(date: str):
     master = get_all_resources()
     res_list = []
     
-    for f in master["furnaces"]:
-        res_list.append({"resource": f, "type": "Furnace", **saved.get(f, {"status": "Available", "start_time": "", "end_time": ""})})
-    for m in master["face"]:
-        res_list.append({"resource": m, "type": "Face Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
-    for m in master["od"]:
-        res_list.append({"resource": m, "type": "OD Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
-    for c in master["channels"]:
-        res_list.append({"resource": c, "type": "Channel", **saved.get(c, {"status": "Available", "start_time": "", "end_time": ""})})
+    for f in master["furnaces"]: res_list.append({"resource": f, "type": "Furnace", **saved.get(f, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in master["face"]: res_list.append({"resource": m, "type": "Face Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in master["od"]: res_list.append({"resource": m, "type": "OD Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for c in master["channels"]: res_list.append({"resource": c, "type": "Channel", **saved.get(c, {"status": "Available", "start_time": "", "end_time": ""})})
 
     return {"status": "success", "data": res_list}
 
@@ -934,55 +927,47 @@ def generate_schedule(payload: ScheduleRequest):
                     if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code] = details
 
         # -----------------------------------------------------
-        # APPLY BUFFER CONVERSION & REDUCTION BEFORE SCHEDULING
+        # CORRECT BUFFER REDUCTION LOGIC
         # -----------------------------------------------------
         parsed_buffers = {}
         
-        for disp_name in list(channel_demands_day1.keys()):
-            data = channel_demands_day1[disp_name]
-            ch_norm = normalize_channel(data['channel'])
-            for pc in ['IR', 'OR']:
-                raw_val = float(data.get(pc, 0.0))
-                if raw_val > 0:
-                    buffers_rings = get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
-                    parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
-                    
-                    total_avail_rings = sum(buffers_rings.values())
-                    if total_avail_rings > 0:
-                        # Reduce Day 1 demand first, then spill leftover to Day 2 demands based on ALL buffers combined
-                        rem_buf = total_avail_rings
-                        reduced_d1 = max(0.0, raw_val - rem_buf)
-                        rem_buf -= (raw_val - reduced_d1)
-                        data[pc] = reduced_d1
-                        print(
-                            f"[BUFFER] {disp_name} {pc} | "
-                            f"Demand={raw_val} | "
-                            f"Total Buffer={total_avail_rings} | "
-                            f"Remaining={reduced_d1}"
-                        )
+        # Combine keys to iterate over all possible parts today or tomorrow
+        all_parts = set(list(channel_demands_day1.keys()) + list(channel_demands_day2.keys()))
+        
+        for disp_name in all_parts:
+            d1_meta = channel_demands_day1.get(disp_name, {})
+            d2_meta = channel_demands_day2.get(disp_name, {})
+            ch_raw = d1_meta.get('channel') or d2_meta.get('channel')
+            ch_norm = normalize_channel(ch_raw)
             
-                        if rem_buf > 0 and disp_name in channel_demands_day2:
-                            d2_data = channel_demands_day2[disp_name]
-                            raw_val_d2 = float(d2_data.get(pc, 0.0))
-                            if raw_val_d2 > 0:
-                                reduced_d2 = max(0.0, raw_val_d2 - rem_buf)
-                                rem_buf -= (raw_val_d2 - reduced_d2)
-                                d2_data[pc] = reduced_d2
-
-        for disp_name in list(channel_demands_day2.keys()):
-            data = channel_demands_day2[disp_name]
-            ch_norm = normalize_channel(data['channel'])
             for pc in ['IR', 'OR']:
-                if disp_name in channel_demands_day1:
-                    continue
-                raw_val = float(data.get(pc, 0.0))
-                if raw_val > 0:
-                    buffers_rings = get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, raw_val)
-                    parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
+                raw_d1 = float(d1_meta.get(pc, 0.0))
+                raw_d2 = float(d2_meta.get(pc, 0.0))
+                
+                if raw_d1 <= 0 and raw_d2 <= 0: continue
+                
+                # To accurately convert "1 Day" of buffer to quantities, use the max of D1 and D2 demand.
+                daily_rate_ref = max(raw_d1, raw_d2)
+                if daily_rate_ref <= 0: continue
+                
+                buffers_rings = get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, daily_rate_ref)
+                parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
+                
+                total_avail_rings = sum(buffers_rings.values())
+                
+                # If there is buffer, subtract it strictly from the demand dicts in-place
+                if total_avail_rings > 0:
+                    rem_buf = total_avail_rings
                     
-                    total_avail_rings = sum(buffers_rings.values())
-                    if total_avail_rings > 0:
-                        data[pc] = max(0.0, raw_val - total_avail_rings)
+                    if raw_d1 > 0:
+                        reduced_d1 = max(0.0, raw_d1 - rem_buf)
+                        rem_buf -= (raw_d1 - reduced_d1)
+                        channel_demands_day1[disp_name][pc] = reduced_d1
+                        
+                    if raw_d2 > 0 and rem_buf > 0:
+                        reduced_d2 = max(0.0, raw_d2 - rem_buf)
+                        rem_buf -= (raw_d2 - reduced_d2)
+                        channel_demands_day2[disp_name][pc] = reduced_d2
 
         # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
         weight_matrix = {}
@@ -1155,6 +1140,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
+        # Because we already subtracted buffer above, the raw_d1 inside here is the true reduced demand.
         tracker_ht = {}
         for display_name, data in channel_demands_day1.items():
             for p_code in ['IR', 'OR']:
@@ -1198,11 +1184,7 @@ def generate_schedule(payload: ScheduleRequest):
             reqs['leftover_bal'] = bal
             reqs['first_stage'] = first_stage
 
-            # -----------------------------------------------------
-            # FULLY IMPLEMENTED BUFFER PRIORITIZATION LOGIC
-            # -----------------------------------------------------
             buffer_val = 0.0
-            
             if (disp, pc, ch_norm) in parsed_buffers:
                 b_rings = parsed_buffers[(disp, pc, ch_norm)]
                 total_rings = sum(b_rings.values())
@@ -1217,16 +1199,6 @@ def generate_schedule(payload: ScheduleRequest):
             if net_d2 > 0:
                 work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
 
-        # Inject the parsed downstream buffers as WIP WorkItems!
-        for (disp, pc, ch_norm), b_rings in parsed_buffers.items():
-            routing = get_routing_for_part(ch_norm, pc)
-            for stage, qty in b_rings.items():
-                if stage == "CH BUFFER" or qty <= 0.01: continue
-                if stage not in routing: continue
-                
-                # Priority 10000.0 with day_idx=-1 guarantees these run first as existing WIP 
-                work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, 0.0, 10000.0, routing))
-
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}
         channel_bd_map = {}
@@ -1240,7 +1212,6 @@ def generate_schedule(payload: ScheduleRequest):
         except Exception:
             pass
 
-        # Build Channel Breakdown Map explicitly for lookup
         for k, v in db_breakdowns.items():
             norm_k = normalize_channel(k)
             st = v.get("status", "")
@@ -1284,7 +1255,7 @@ def generate_schedule(payload: ScheduleRequest):
         for item in work_items:
             init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
 
-        # 1. LOOK-AHEAD BATCH MERGING (PRE-EVALUATION)
+        # 1. LOOK-AHEAD BATCH MERGING
         for i in range(len(work_items)):
             item1 = work_items[i]
             if item1.qty <= 0.01 or item1.day_idx != 0: continue
@@ -1299,15 +1270,8 @@ def generate_schedule(payload: ScheduleRequest):
             
             for j in range(i + 1, len(work_items)):
                 item2 = work_items[j]
-                if (item2.day_idx == 1 and 
-                    item2.disp == item1.disp and 
-                    item2.pc == item1.pc and 
-                    item2.stage == item1.stage and 
-                    item2.channel == item1.channel and 
-                    item2.qty > 0.01):
-                    
+                if (item2.day_idx == 1 and item2.disp == item1.disp and item2.pc == item1.pc and item2.stage == item1.stage and item2.channel == item1.channel and item2.qty > 0.01):
                     est_time2 = (item2.qty * weight_dummy) / rate_dummy if res_dummy.type == 'HT' else item2.qty / rate_dummy
-                    
                     if est_time1 < merge_thresh or est_time2 < merge_thresh:
                         item1.qty += item2.qty
                         item2.qty = 0.0
@@ -1316,7 +1280,6 @@ def generate_schedule(payload: ScheduleRequest):
         # SIMULATION LOOP
         for target_day in [-1, 0, 1]:
             current_max_time = 24.0 
-            
             for r in resources:
                 r.max_time = current_max_time
                 if r.ready_time < current_max_time: r.blocked = False
@@ -1324,7 +1287,6 @@ def generate_schedule(payload: ScheduleRequest):
             while True:
                 active_items = [i for i in work_items if i.qty > 0.01 and i.ready_time < current_max_time and i.day_idx == target_day]
                 
-                # Filter out Complete Channel Breakdowns
                 filtered_active_items = []
                 for i in active_items:
                     norm_ch = normalize_channel(i.channel)
@@ -1342,10 +1304,8 @@ def generate_schedule(payload: ScheduleRequest):
                 for item in active_items:
                     for res in item.valid_resources:
                         if res.blocked or res.ready_time >= res.max_time: continue
-                        
                         rate_or_cap = item.rates[res.id][0] if res.type == 'HT' else item.rates[res.id]
                         
-                        # HEAT TREATMENT SETUP GAP CHANGEOVER LOGIC MODIFICATION
                         if res.type == 'HT':
                             if res.last_fam is None: setup = 0.5
                             elif res.last_fam == item.disp and res.last_pc == item.pc: setup = 0.0
@@ -1366,11 +1326,9 @@ def generate_schedule(payload: ScheduleRequest):
                         else:
                             est_req_time = item.qty / rate_or_cap
 
-                        # Adjust for machine breakdown overlap: delay scheduling until breakdown ends
                         if res.has_bd and start_time < res.bd_end and (start_time + est_req_time) > res.bd_start:
                             start_time = max(start_time, res.bd_end)
 
-                        # Adjust for channel breakdown overlap: delay scheduling until channel breakdown ends
                         norm_ch = normalize_channel(item.channel)
                         if norm_ch in channel_bd_map and not channel_bd_map[norm_ch].get("blocked"):
                             ch_bds = channel_bd_map[norm_ch]["start"]
@@ -1382,15 +1340,8 @@ def generate_schedule(payload: ScheduleRequest):
                         
                         is_continuation = (res.last_fam == item.disp and res.last_pc == item.pc and start_time <= res.ready_time + 0.01)
                         gap = max(0.0, item.ready_time - (res.ready_time + setup))
-                        
-                        if res.type == 'HT':
-                            weight = item.rates[res.id][1]
-                            req_time = (item.qty * weight) / rate_or_cap
-                        else:
-                            req_time = item.qty / rate_or_cap
-                            
-                        available_time_limit = res.max_time
-                        time_available = available_time_limit - start_time
+                        req_time = (item.qty * item.rates[res.id][1]) / rate_or_cap if res.type == 'HT' else item.qty / rate_or_cap
+                        time_available = res.max_time - start_time
                         
                         needs_split = 1 if req_time > time_available else 0
                         key = (needs_split, start_time, item.day_idx, gap, -item.priority)
@@ -1403,25 +1354,19 @@ def generate_schedule(payload: ScheduleRequest):
                     
                 res, item, start_time, setup, rate_or_cap, is_continuation = best_pair
                 chunk_qty = item.qty
-                
-                if res.type == 'HT':
-                    weight = item.rates[res.id][1]
-                    actual_time = (chunk_qty * weight) / rate_or_cap
-                else:
-                    actual_time = chunk_qty / rate_or_cap
+                actual_time = (chunk_qty * item.rates[res.id][1]) / rate_or_cap if res.type == 'HT' else chunk_qty / rate_or_cap
 
-                # 2. END-OF-DAY STOPPING LOGIC
                 if start_time < 24.0 and (start_time + actual_time) > 24.0:
                     max_allowed_time = min(6.0, 30.0 - start_time)
                     if actual_time > max_allowed_time:
                         actual_time = max_allowed_time
-                        if res.type == 'HT': chunk_qty = (actual_time * rate_or_cap) / weight
+                        if res.type == 'HT': chunk_qty = (actual_time * rate_or_cap) / item.rates[res.id][1]
                         else: chunk_qty = actual_time * rate_or_cap
                 
                 if res.type == 'HT':
                     res_ready_time = start_time + actual_time + 0.5
                     out_time = start_time + actual_time + 3.5
-                    display_rate = f"{round((chunk_qty * weight), 1)} kg"
+                    display_rate = f"{round((chunk_qty * item.rates[res.id][1]), 1)} kg"
                     if item.disp in monthly_data.get(month_str, {}): 
                         monthly_data[month_str][item.disp]["produced"] += chunk_qty
                 else:
@@ -1435,7 +1380,6 @@ def generate_schedule(payload: ScheduleRequest):
                 res.last_pc = item.pc
                 
                 if res.ready_time >= 24.0: res.blocked = True
-                
                 item.qty -= chunk_qty
                 
                 next_stage = get_next_required_stage(res.type, item.routing)
@@ -1505,7 +1449,6 @@ def generate_schedule(payload: ScheduleRequest):
         for key, bal in ht_balances.items():
             if key not in tracker_ht and bal > 0: new_ht_balances[key] = bal
 
-        # 3. UNSCHEDULED PARTS REASON GENERATION
         for item in work_items:
             if item.qty <= 0.01: continue
             
@@ -1533,11 +1476,9 @@ def generate_schedule(payload: ScheduleRequest):
             if item.day_idx == -1: day_label = "WIP"
             else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"
                 
-            part_display = f"{item.disp} {item.pc} ({day_label})"
-            
             unscheduled.append({
                 "stage": item.stage, 
-                "part": part_display, 
+                "part": f"{item.disp} {item.pc} ({day_label})", 
                 "missed_boxes": missed_val,
                 "status": assigned_reason, 
                 "reason": assigned_reason 

@@ -840,7 +840,7 @@ def generate_schedule(payload: ScheduleRequest):
                 if part_key not in box_matrix: box_matrix[part_key] = {}
                 for p_code, details in part_data.items():
                     if p_code not in box_matrix[part_key]:
-                        box_matrix[part_key][part_key] = details.copy()
+                        box_matrix[part_key][p_code] = details.copy()  # FIXED TYPO HERE
                     else:
                         if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code]['qty'] = details['qty']
                         if 'rpd' in details: box_matrix[part_key][p_code]['rpd'] = details['rpd']

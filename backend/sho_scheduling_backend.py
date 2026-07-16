@@ -451,96 +451,76 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
 # ==========================================
 def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_rings):
     """
-    Parses complex JSON combinations gracefully to assign the correct buffer quantity.
-    Returns dictionary of reduced rings by location.
+    Parses the flat JSON dictionary structures passed by the React Frontend 
+    gracefully to assign the correct buffer quantity to the exact channels.
+    Returns a dictionary of available rings mapped by location.
     """
     buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
-    unit_mode = str(getattr(payload, 'unit_mode', 'DAY')).strip().upper()
-    if not unit_mode: unit_mode = 'DAY'
+    
+    # Matches the Dropdown options accurately
+    unit_mode = str(getattr(payload, 'unit_mode', 'DAYS')).strip().upper()
+    if not unit_mode: unit_mode = 'DAYS'
+    
     rpb = get_box_for_part(disp, pc, box_matrix)
     
     def convert(val):
         if val <= 0: return 0.0
-        if "DAY" in unit_mode: return float(val * demand_rings)
-        elif "BOX" in unit_mode: return float(val * rpb)
-        else: return float(val)
+        if "DAY" in unit_mode: 
+            return float(val * demand_rings)
+        elif "BOX" in unit_mode: 
+            return float(val * rpb)
+        else: 
+            return float(val) # For No. of Rings
 
     entries = payload.entries if payload.entries else {}
     ch_clean = normalize_channel(ch_norm).replace(" ", "")
     
-    def check_and_add(entry_dict, loc_override=None):
-        t = str(entry_dict.get("type", entry_dict.get("running", ""))).strip().upper()
-        s = str(entry_dict.get("pc", entry_dict.get("side", ""))).strip().upper()
-        if t and t not in ["NONE", "NAN"] and t != disp: return
-        if s and s not in ["NONE", "NAN"] and s != pc: return
-        
-        loc_raw = str(entry_dict.get("location", loc_override or "CH BUFFER")).upper()
-        loc = "CH BUFFER"
-        if "OD" in loc_raw: loc = "OD"
-        elif "FACE" in loc_raw: loc = "FACE"
-        elif "HT" in loc_raw or "HEAT" in loc_raw: loc = "HT"
-        
-        val = 0.0
-        # Robustly extract the numeric value from the dict regardless of key name
-        for k_chk in ["buffer_day", "buffer", "value", "days", "qty", "amount"]:
-            if k_chk in entry_dict:
-                val = safe_float(entry_dict[k_chk])
-                break
-        if val == 0.0:
-            for v_chk in entry_dict.values():
-                if isinstance(v_chk, (int, float, str)) and str(v_chk).replace('.', '', 1).isdigit():
-                    val = float(v_chk)
-                    break
-                    
-        buffers_rings[loc] += convert(val)
+    # Map the front-end row identifiers to backend validation rules
+    buffer_type_map = {
+        'ch_buffer_1': ('type_1', 'CH BUFFER'),
+        'ch_buffer_2': ('next_type_1', 'CH BUFFER'),
+        'od_buffer_1': ('type_2', 'OD'),
+        'od_buffer_2': ('next_type_2', 'OD'),
+        'face_buffer_1': ('type_3', 'FACE'),
+        'face_buffer_2': ('type_4', 'FACE'),
+        'ht_buffer_1': ('type_5', 'HT'),
+        'ht_buffer_2': ('type_6', 'HT'),
+        'buffer_in_days': (['running', 'next_type_3'], 'CH BUFFER')
+    }
+    
+    disp_variants = [disp.upper()] + [str(v).upper() for v in get_lookup_variants(disp, pc)]
 
-    if isinstance(entries, dict):
-        for key, val in entries.items():
-            k_norm = normalize_channel(key).replace(" ", "")
-            k_up = key.upper()
-            is_loc_key = any(l in k_up for l in ["OD", "FACE", "HT", "BUFFER"])
+    for key, val in entries.items():
+        # Ensure key corresponds to the matching Process Code (IR / OR)
+        if not key.endswith(f"_{pc}"):
+            continue
             
-            if k_norm == ch_clean:
-                if isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, dict): check_and_add(item)
-                elif isinstance(val, dict):
-                    has_loc = any(l in k.upper() for k in val.keys() for l in ["OD", "FACE", "HT", "BUFFER"])
-                    if has_loc:
-                        for sub_k, sub_v in val.items():
-                            if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=sub_k)
-                            else:
-                                sub_k_up = str(sub_k).upper()
-                                loc = "CH BUFFER"
-                                if "OD" in sub_k_up: loc = "OD"
-                                elif "FACE" in sub_k_up: loc = "FACE"
-                                elif "HT" in sub_k_up or "HEAT" in sub_k_up: loc = "HT"
-                                buffers_rings[loc] += convert(safe_float(sub_v))
-                    else:
-                        check_and_add(val)
-                else:
-                    buffers_rings["CH BUFFER"] += convert(safe_float(val))
-                    
-            elif is_loc_key:
-                loc = "CH BUFFER"
-                if "OD" in k_up: loc = "OD"
-                elif "FACE" in k_up: loc = "FACE"
-                elif "HT" in k_up or "HEAT" in k_up: loc = "HT"
+        prefix_and_ch = key[:-(len(pc)+1)]
+        
+        # Iterate to find which field this buffer value corresponds to
+        for buf_prefix, mapping in buffer_type_map.items():
+            if prefix_and_ch.startswith(buf_prefix + "_"):
                 
-                if isinstance(val, dict):
-                    for sub_k, sub_v in val.items():
-                        if normalize_channel(sub_k).replace(" ", "") == ch_clean:
-                            if isinstance(sub_v, dict): check_and_add(sub_v, loc_override=loc)
-                            else: buffers_rings[loc] += convert(safe_float(sub_v))
-                elif isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, dict) and normalize_channel(item.get("channel", "")).replace(" ", "") == ch_clean:
-                            check_and_add(item, loc_override=loc)
+                # Extract channel logic properly
+                ch_part = prefix_and_ch[len(buf_prefix)+1:]
+                
+                if normalize_channel(ch_part).replace(" ", "") == ch_clean:
+                    
+                    type_keys = mapping[0] if isinstance(mapping[0], list) else [mapping[0]]
+                    loc = mapping[1]
+                    
+                    is_match = False
+                    for t_prefix in type_keys:
+                        type_key = f"{t_prefix}_{ch_part}_{pc}"
+                        type_val = str(entries.get(type_key, "")).strip().upper()
+                        
+                        if type_val and type_val in disp_variants:
+                            is_match = True
+                            break
                             
-    elif isinstance(entries, list):
-        for item in entries:
-            if isinstance(item, dict) and normalize_channel(item.get("channel", "")).replace(" ", "") == ch_clean:
-                check_and_add(item)
+                    # If this type matches the demand part, safely parse the quantity
+                    if is_match:
+                        buffers_rings[loc] += convert(safe_float(val))
 
     return buffers_rings
 
@@ -955,7 +935,8 @@ def generate_schedule(payload: ScheduleRequest):
                 
                 total_avail_rings = sum(buffers_rings.values())
                 
-                # If there is buffer, subtract it strictly from the demand dicts in-place
+                # If there is buffer anywhere (FACE/OD/HT), subtract it strictly from the demand dicts in-place
+                # This guarantees that if we have required items further down the stream, we schedule exactly what's needed at HT.
                 if total_avail_rings > 0:
                     rem_buf = total_avail_rings
                     

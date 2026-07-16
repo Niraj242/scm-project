@@ -87,15 +87,35 @@ const SHOScheduling = () => {
     { label: 'BUFFER IN DAYS', key: 'buffer_in_days', section: 'RUN', sectionIndex: 2 }
   ];
 
-  // Load Initial Buffer State
+  // Load Initial Buffer State from Backend API instead of localStorage
   useEffect(() => {
-    const storageKey = `sho_db_${sector}_${bufferDate}`;
-    const savedData = localStorage.getItem(storageKey);
-    if (savedData) {
-      setTableData(JSON.parse(savedData).entries || {});
-    } else {
-      setTableData({});
-    }
+    const fetchBufferData = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/api/get_buffers?buffer_date=${bufferDate}&sector=${sector}`);
+        if (response.ok) {
+          const result = await response.json();
+          // Adjust based on how your backend nests the response (e.g., result.data.entries or result.entries)
+          const dataPayload = result.data || result;
+          
+          if (dataPayload && Object.keys(dataPayload).length > 0) {
+            setTableData(dataPayload.entries || {});
+            if (dataPayload.unit_mode) {
+              setUnitMode(dataPayload.unit_mode);
+            }
+          } else {
+            setTableData({});
+            // keep default unit mode
+          }
+        } else {
+          setTableData({});
+        }
+      } catch (err) {
+        console.warn("Could not fetch buffer data from backend:", err);
+        setTableData({});
+      }
+    };
+    
+    fetchBufferData();
   }, [sector, bufferDate]);
 
   // NEW FIX: Automatically load saved plan when Date changes, or clear if none exists
@@ -164,10 +184,33 @@ const SHOScheduling = () => {
 
   const handleInputChange = (rowKey, col, subCol, value) => setTableData(prev => ({ ...prev, [`${rowKey}_${col}_${subCol}`]: value }));
 
-  const saveBufferData = () => {
+  const saveBufferData = async () => {
     setIsSaving(true);
-    localStorage.setItem(`sho_db_${sector}_${bufferDate}`, JSON.stringify({ entries: tableData }));
-    setTimeout(() => { setIsSaving(false); alert("Buffer Data Saved successfully."); }, 300);
+    try {
+      const response = await fetch(`${API_BASE}/api/save_buffers`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          buffer_date: bufferDate,
+          sector: sector,
+          unit_mode: unitMode,
+          entries: tableData
+        })
+      });
+      
+      const result = await response.json();
+      
+      if (response.ok && (result.status === 'success' || !result.detail)) {
+        alert("Buffer Data Saved successfully.");
+      } else {
+        alert("Failed to save buffer data: " + (result.detail || result.message || "Unknown error"));
+      }
+    } catch (err) {
+      alert("Error connecting to server to save buffer data.");
+      console.error(err);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const updateMachineConstraint = (id, field, value) => {

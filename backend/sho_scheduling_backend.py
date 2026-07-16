@@ -14,7 +14,6 @@ from pydantic import BaseModel
 from typing import Dict, Any, List
 from database import get_db
 from sqlalchemy.orm import Session
-from datetime import datetime
 import models
 
 router = APIRouter()
@@ -148,6 +147,178 @@ class SaveBreakdownsRequest(BaseModel):
     entries: List[BreakdownItem]
 
 # ==========================================
+# CORE SCHEDULING LOGIC ENGINE (ISOLATED)
+# ==========================================
+class ScheduleLogic:
+    @staticmethod
+    def match_parts(demand_part: str, buffer_part: str, pc: str) -> bool:
+        """
+        Reuses existing lookup normalization variants to match demand and buffer parts.
+        Avoids loose substring matching and strict string equality.
+        """
+        if not buffer_part or not demand_part: 
+            return False
+        
+        demand_part_clean = str(demand_part).upper().strip()
+        buffer_part_clean = str(buffer_part).upper().strip()
+        
+        if demand_part_clean == buffer_part_clean: 
+            return True
+        
+        d_vars = set([demand_part_clean] + [str(v).upper() for v in get_lookup_variants(demand_part_clean, pc)])
+        b_vars = set([buffer_part_clean] + [str(v).upper() for v in get_lookup_variants(buffer_part_clean, pc)])
+        
+        return len(d_vars.intersection(b_vars)) > 0
+
+    @staticmethod
+    def calculate_net_demands(raw_d1: float, raw_d2: float, buffers_rings: dict, routing: list):
+        """
+        Implements process-aware stage demand reduction logic.
+        - Channel Buffer (CH BUFFER) -> reduces only CHANNEL demand.
+        - OD Buffer (OD) -> reduces OD, FACE, and HT demands.
+        - FACE Buffer (FACE) -> reduces FACE and HT demands.
+        - HT Buffer (HT) -> reduces HT demand only.
+        """
+        net_d1 = {stage: raw_d1 for stage in routing}
+        net_d2 = {stage: raw_d2 for stage in routing}
+        
+        ch_buf = buffers_rings.get('CH BUFFER', 0.0)
+        od_buf = buffers_rings.get('OD', 0.0)
+        face_buf = buffers_rings.get('FACE', 0.0)
+        ht_buf = buffers_rings.get('HT', 0.0)
+
+        # Apply process-aware reduction rules for Day 1
+        if 'CHANNEL' in net_d1:
+            net_d1['CHANNEL'] = max(0.0, net_d1['CHANNEL'] - ch_buf)
+        for stage in ['OD', 'FACE', 'HT']:
+            if stage in net_d1:
+                net_d1[stage] = max(0.0, net_d1[stage] - od_buf)
+        for stage in ['FACE', 'HT']:
+            if stage in net_d1:
+                net_d1[stage] = max(0.0, net_d1[stage] - face_buf)
+        if 'HT' in net_d1:
+            net_d1['HT'] = max(0.0, net_d1['HT'] - ht_buf)
+
+        # Apply process-aware reduction rules for Day 2
+        if 'CHANNEL' in net_d2:
+            net_d2['CHANNEL'] = max(0.0, net_d2['CHANNEL'] - ch_buf)
+        for stage in ['OD', 'FACE', 'HT']:
+            if stage in net_d2:
+                net_d2[stage] = max(0.0, net_d2[stage] - od_buf)
+        for stage in ['FACE', 'HT']:
+            if stage in net_d2:
+                net_d2[stage] = max(0.0, net_d2[stage] - face_buf)
+        if 'HT' in net_d2:
+            net_d2['HT'] = max(0.0, net_d2['HT'] - ht_buf)
+
+        return net_d1, net_d2
+
+    @staticmethod
+    def calculate_ht_priority(ch_norm: str, ch_stats: dict, buffers_rings: dict, total_demand: float) -> float:
+        """
+        Urgency calculation for Heat Treatment. 
+        Considers complete downstream inventories (Channel + FACE + OD).
+        Lower stock relative to requirement increases the final urgency score.
+        """
+        downstream_stock = (
+            buffers_rings.get('CH BUFFER', 0.0) +
+            buffers_rings.get('FACE', 0.0) +
+            buffers_rings.get('OD', 0.0)
+        )
+        
+        stock_ratio = (downstream_stock / total_demand) if total_demand > 0 else 1.0
+        priority_score = 10.0 - stock_ratio
+        return priority_score
+
+    @staticmethod
+    def get_all_buffers_for_part(disp: str, pc: str, ch_norm: str, payload, box_matrix: dict, demand_rings: float) -> dict:
+        """
+        Converts Days / Boxes buffers into Rings.
+        Uses exact production requirements of specific Channel + Type + IR/OR.
+        """
+        buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
+        
+        unit_mode = str(getattr(payload, 'unit_mode', 'DAYS')).strip().upper()
+        if not unit_mode: 
+            unit_mode = 'DAYS'
+        
+        rpb = get_box_for_part(disp, pc, box_matrix)
+        
+        def convert(val):
+            if val <= 0: 
+                return 0.0
+            if "DAY" in unit_mode: 
+                return float(val * demand_rings)
+            elif "BOX" in unit_mode: 
+                return float(val * rpb)
+            else: 
+                return float(val)
+
+        entries = payload.entries if payload.entries else {}
+        ch_clean = normalize_channel(ch_norm).replace(" ", "")
+        
+        buffer_type_map = {
+            'ch_buffer_1': ('type_1', 'CH BUFFER'),
+            'ch_buffer_2': ('next_type_1', 'CH BUFFER'),
+            'od_buffer_1': ('type_2', 'OD'),
+            'od_buffer_2': ('next_type_2', 'OD'),
+            'face_buffer_1': ('type_3', 'FACE'),
+            'face_buffer_2': ('type_4', 'FACE'),
+            'ht_buffer_1': ('type_5', 'HT'),
+            'ht_buffer_2': ('type_6', 'HT'),
+            'buffer_in_days': (['running', 'next_type_3'], 'CH BUFFER')
+        }
+
+        for key, val in entries.items():
+            if not key.endswith(f"_{pc}"):
+                continue
+                
+            prefix_and_ch = key[:-(len(pc)+1)]
+            
+            for buf_prefix, mapping in buffer_type_map.items():
+                if prefix_and_ch.startswith(buf_prefix + "_"):
+                    ch_part = prefix_and_ch[len(buf_prefix)+1:]
+                    
+                    if normalize_channel(ch_part).replace(" ", "") == ch_clean:
+                        type_keys = mapping[0] if isinstance(mapping[0], list) else [mapping[0]]
+                        loc = mapping[1]
+                        
+                        is_match = False
+                        for t_prefix in type_keys:
+                            type_key = f"{t_prefix}_{ch_part}_{pc}"
+                            type_val = str(entries.get(type_key, "")).strip().upper()
+                            
+                            if type_val and ScheduleLogic.match_parts(disp, type_val, pc):
+                                is_match = True
+                                break
+                                
+                        if is_match:
+                            buffers_rings[loc] += convert(safe_float(val))
+
+        return buffers_rings
+
+    @staticmethod
+    def inject_wip_from_buffers(work_items: list, disp: str, pc: str, ch_norm: str, routing: list, buffers_rings: dict, item_priority: float):
+        """
+        Buffers belong to specific completed stages.
+        This injects items directly into the next process stage (at day_idx = -1) so the scheduler processes them immediately.
+        """
+        buf_map = {
+            'HT': buffers_rings.get('HT', 0.0),
+            'FACE': buffers_rings.get('FACE', 0.0),
+            'OD': buffers_rings.get('OD', 0.0)
+        }
+        
+        for i, stage in enumerate(routing):
+            if stage in buf_map and buf_map[stage] > 0:
+                qty = buf_map[stage]
+                if i + 1 < len(routing):
+                    next_stage = routing[i + 1]
+                    if next_stage != 'CHANNEL':
+                        work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
+
+
+# ==========================================
 # UTIL FUNCTIONS & CACHED EXCEL PROCESSOR
 # ==========================================
 def fetch_with_cache(url: str) -> bytes:
@@ -212,8 +383,8 @@ def get_all_resources():
                     cells = [c.strip() for c in str_matrix[r] if c.strip()]
                     m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
                     if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
-                        if "FACE" in row_text or "DDS" in m_cand.upper() or "BG" in m_cand.upper(): face_mcs.add(m_cand)
-                        elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand: od_mcs.add(m_cand)
+                        if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): face_mcs.add(m_cand)
+                        elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in m_cand: od_mcs.add(m_cand)
 
     if not face_mcs: face_mcs = {"DDS 1", "DDS 2", "BG 1"}
     if not od_mcs: od_mcs = {"CL 1", "CL 2", "CELL 1"}
@@ -451,161 +622,6 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
             return setup_chart_matrix[(var, p_code)]
     return None
 
-# ==========================================
-# LOGIC BLOCK: DEMAND AND BUFFER CALCULATION
-# (Separated for process-aware logic changes)
-# ==========================================
-class ScheduleLogic:
-    @staticmethod
-    def calculate_net_demands(raw_d1, raw_d2, buffers_rings, routing):
-        """
-        Implements process-aware backward netting.
-        Inventory at a stage reduces demand for that stage and all upstream stages.
-        """
-        buf_map = {
-            'CHANNEL': buffers_rings.get('CH BUFFER', 0.0),
-            'OD': buffers_rings.get('OD', 0.0),
-            'FACE': buffers_rings.get('FACE', 0.0),
-            'HT': buffers_rings.get('HT', 0.0)
-        }
-        
-        rem_buf = {k: v for k, v in buf_map.items()}
-        
-        def net_backward(raw_qty):
-            net = raw_qty
-            res = {}
-            for stage in reversed(routing):
-                b = rem_buf.get(stage, 0.0)
-                used = min(net, b)
-                rem_buf[stage] -= used
-                net -= used
-                res[stage] = net
-            return res
-
-        demands_d1 = net_backward(raw_d1)
-        demands_d2 = net_backward(raw_d2)
-        
-        return demands_d1, demands_d2
-
-    @staticmethod
-    def match_parts(demand_part, buffer_part, pc):
-        """
-        Reuses existing normalization logic to match demand parts and buffer parts.
-        """
-        if not buffer_part: return False
-        if demand_part == buffer_part: return True
-        d_vars = [demand_part] + [str(v).upper() for v in get_lookup_variants(demand_part, pc)]
-        b_vars = [buffer_part] + [str(v).upper() for v in get_lookup_variants(buffer_part, pc)]
-        return any(bv in d_vars for bv in b_vars)
-
-    @staticmethod
-    def calculate_ht_priority(ch_norm, ch_stats, buffers_rings, total_demand):
-        """
-        Heat Treatment urgency considers downstream stock. 
-        Higher buffer = lower priority.
-        """
-        total_buffer = sum(buffers_rings.values())
-        buffer_ratio = (total_buffer / total_demand) if total_demand > 0 else 0
-        base_score = ch_stats.get(ch_norm, {}).get('score', 1.0)
-        return base_score - buffer_ratio
-
-    @staticmethod
-    def inject_wip_from_buffers(work_items, disp, pc, ch_norm, routing, buffers_rings, item_priority):
-        """
-        Completed buffer inventory is ready for the NEXT stage.
-        Injects WorkItems at day_idx = -1 (WIP) so the scheduler processes them immediately.
-        """
-        buf_map = {
-            'HT': buffers_rings.get('HT', 0.0),
-            'FACE': buffers_rings.get('FACE', 0.0),
-            'OD': buffers_rings.get('OD', 0.0)
-        }
-        
-        for i, stage in enumerate(routing):
-            if stage in buf_map and buf_map[stage] > 0:
-                qty = buf_map[stage]
-                if i + 1 < len(routing):
-                    next_stage = routing[i + 1]
-                    if next_stage != 'CHANNEL':
-                        work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
-
-
-# ==========================================
-# ROBUST BUFFER DAYS CONVERSION HELPERS
-# ==========================================
-def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_rings):
-    """
-    Parses the flat JSON dictionary structures passed by the React Frontend 
-    gracefully to assign the correct buffer quantity to the exact channels.
-    Returns a dictionary of available rings mapped by location.
-    """
-    buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
-    
-    # Matches the Dropdown options accurately
-    unit_mode = str(getattr(payload, 'unit_mode', 'DAYS')).strip().upper()
-    if not unit_mode: unit_mode = 'DAYS'
-    
-    rpb = get_box_for_part(disp, pc, box_matrix)
-    
-    def convert(val):
-        if val <= 0: return 0.0
-        if "DAY" in unit_mode: 
-            return float(val * demand_rings)
-        elif "BOX" in unit_mode: 
-            return float(val * rpb)
-        else: 
-            return float(val) # For No. of Rings
-
-    entries = payload.entries if payload.entries else {}
-    ch_clean = normalize_channel(ch_norm).replace(" ", "")
-    
-    # Map the front-end row identifiers to backend validation rules
-    buffer_type_map = {
-        'ch_buffer_1': ('type_1', 'CH BUFFER'),
-        'ch_buffer_2': ('next_type_1', 'CH BUFFER'),
-        'od_buffer_1': ('type_2', 'OD'),
-        'od_buffer_2': ('next_type_2', 'OD'),
-        'face_buffer_1': ('type_3', 'FACE'),
-        'face_buffer_2': ('type_4', 'FACE'),
-        'ht_buffer_1': ('type_5', 'HT'),
-        'ht_buffer_2': ('type_6', 'HT'),
-        'buffer_in_days': (['running', 'next_type_3'], 'CH BUFFER')
-    }
-
-    for key, val in entries.items():
-        # Ensure key corresponds to the matching Process Code (IR / OR)
-        if not key.endswith(f"_{pc}"):
-            continue
-            
-        prefix_and_ch = key[:-(len(pc)+1)]
-        
-        # Iterate to find which field this buffer value corresponds to
-        for buf_prefix, mapping in buffer_type_map.items():
-            if prefix_and_ch.startswith(buf_prefix + "_"):
-                
-                # Extract channel logic properly
-                ch_part = prefix_and_ch[len(buf_prefix)+1:]
-                
-                if normalize_channel(ch_part).replace(" ", "") == ch_clean:
-                    
-                    type_keys = mapping[0] if isinstance(mapping[0], list) else [mapping[0]]
-                    loc = mapping[1]
-                    
-                    is_match = False
-                    for t_prefix in type_keys:
-                        type_key = f"{t_prefix}_{ch_part}_{pc}"
-                        type_val = str(entries.get(type_key, "")).strip().upper()
-                        
-                        if type_val and ScheduleLogic.match_parts(disp.upper(), type_val, pc):
-                            is_match = True
-                            break
-                            
-                    # If this type matches the demand part, safely parse the quantity
-                    if is_match:
-                        buffers_rings[loc] += convert(safe_float(val))
-
-    return buffers_rings
-
 class WorkItem:
     def __init__(self, stage, disp, pc, day_idx, channel, qty, ready_time, priority, routing):
         self.stage = stage
@@ -778,10 +794,8 @@ def save_breakdowns(payload: SaveBreakdownsRequest):
 
 
 # ==========================================
-# MAIN Buffer ROUTE
+# MAIN BUFFER ROUTE
 # ==========================================
-
-
 class BufferSaveRequest(BaseModel):
     buffer_date: str
     sector: str
@@ -853,12 +867,11 @@ def get_buffers(buffer_date: str, sector: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
 # ==========================================
 # MAIN SCHEDULER ROUTE
 # ==========================================
 @router.post("/api/schedule")
-def generate_schedule(payload: ScheduleRequest):
+def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
     debug_logs = []
     unscheduled = []
     
@@ -869,6 +882,20 @@ def generate_schedule(payload: ScheduleRequest):
     gc.collect()
     
     try:
+        # DB FALLBACK: If payload entries are empty, load the saved buffer entries
+        if not payload.entries or len(payload.entries) == 0:
+            try:
+                db_date = datetime.strptime(payload.date, "%Y-%m-%d").date()
+                saved_buffer = db.query(models.BufferEntry).filter(
+                    models.BufferEntry.buffer_date == db_date,
+                    models.BufferEntry.sector == payload.sector
+                ).first()
+                if saved_buffer:
+                    payload.entries = json.loads(saved_buffer.entries_json or "{}")
+                    payload.unit_mode = saved_buffer.unit_mode
+            except Exception as db_err:
+                debug_logs.append(f"DB Error loading saved buffers: {db_err}")
+
         req_date = datetime.strptime(payload.date, "%Y-%m-%d")
         day_1 = req_date  
         day_2 = req_date + timedelta(days=1)
@@ -1067,11 +1094,10 @@ def generate_schedule(payload: ScheduleRequest):
                     if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code] = details
 
         # -----------------------------------------------------
-        # CORRECT BUFFER REDUCTION LOGIC (USING ScheduleLogic)
+        # DETECT AND CONVERT PROCESS-AWARE STAGE DEMANDS
         # -----------------------------------------------------
         parsed_buffers = {}
         all_parts = set(list(channel_demands_day1.keys()) + list(channel_demands_day2.keys()))
-        
         stage_demands = {} 
         
         for disp_name in all_parts:
@@ -1086,12 +1112,14 @@ def generate_schedule(payload: ScheduleRequest):
                 
                 if raw_d1 <= 0 and raw_d2 <= 0: continue
                 
-                daily_rate_ref = max(raw_d1, raw_d2)
+                daily_rate_ref = raw_d1 if raw_d1 > 0 else raw_d2
                 routing = get_routing_for_part(ch_norm, pc)
                 
-                buffers_rings = get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, daily_rate_ref)
+                # Fetch dynamically via logical engine
+                buffers_rings = ScheduleLogic.get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, daily_rate_ref)
                 parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
                 
+                # Calculate demands stage-by-stage
                 demands_d1, demands_d2 = ScheduleLogic.calculate_net_demands(raw_d1, raw_d2, buffers_rings, routing)
                 
                 stage_demands[(disp_name, pc)] = {
@@ -1327,7 +1355,7 @@ def generate_schedule(payload: ScheduleRequest):
             if net_d2 > 0:
                 work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
 
-        # Inject downstream WIP from parsed buffers!
+        # Inject downstream WIP from parsed buffers dynamically using Core Logical Engine!
         for key, data in stage_demands.items():
             disp, pc = key
             ch_norm = data['channel']

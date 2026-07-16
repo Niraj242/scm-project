@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey, Boolean
+from sqlalchemy import Column, Integer, String, Float, Date, DateTime, ForeignKey, Boolean, Text, UniqueConstraint
 from datetime import datetime
 from database import Base
 
@@ -11,6 +11,35 @@ class User(Base):
     # Ensure this is defined as Integer
     is_active = Column(Integer, default=1) 
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BufferEntry(Base):
+    __tablename__ = "buffer_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    # Buffer belongs to one date and one sector
+    buffer_date = Column(Date, nullable=False)
+    sector = Column(String, nullable=False)          # DGBB / TRB / HUB
+    unit_mode = Column(String, nullable=False)       # Days / Boxes / Rings
+
+    # Complete table data from UI
+    entries_json = Column(Text, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "buffer_date",
+            "sector",
+            name="uq_buffer_date_sector"
+        ),
+    )
 
 
 class Order(Base):

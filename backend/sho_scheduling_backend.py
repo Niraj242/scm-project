@@ -452,6 +452,85 @@ def get_tempering_temp(display_name, p_code, setup_chart_matrix):
     return None
 
 # ==========================================
+# LOGIC BLOCK: DEMAND AND BUFFER CALCULATION
+# (Separated for process-aware logic changes)
+# ==========================================
+class ScheduleLogic:
+    @staticmethod
+    def calculate_net_demands(raw_d1, raw_d2, buffers_rings, routing):
+        """
+        Implements process-aware backward netting.
+        Inventory at a stage reduces demand for that stage and all upstream stages.
+        """
+        buf_map = {
+            'CHANNEL': buffers_rings.get('CH BUFFER', 0.0),
+            'OD': buffers_rings.get('OD', 0.0),
+            'FACE': buffers_rings.get('FACE', 0.0),
+            'HT': buffers_rings.get('HT', 0.0)
+        }
+        
+        rem_buf = {k: v for k, v in buf_map.items()}
+        
+        def net_backward(raw_qty):
+            net = raw_qty
+            res = {}
+            for stage in reversed(routing):
+                b = rem_buf.get(stage, 0.0)
+                used = min(net, b)
+                rem_buf[stage] -= used
+                net -= used
+                res[stage] = net
+            return res
+
+        demands_d1 = net_backward(raw_d1)
+        demands_d2 = net_backward(raw_d2)
+        
+        return demands_d1, demands_d2
+
+    @staticmethod
+    def match_parts(demand_part, buffer_part, pc):
+        """
+        Reuses existing normalization logic to match demand parts and buffer parts.
+        """
+        if not buffer_part: return False
+        if demand_part == buffer_part: return True
+        d_vars = [demand_part] + [str(v).upper() for v in get_lookup_variants(demand_part, pc)]
+        b_vars = [buffer_part] + [str(v).upper() for v in get_lookup_variants(buffer_part, pc)]
+        return any(bv in d_vars for bv in b_vars)
+
+    @staticmethod
+    def calculate_ht_priority(ch_norm, ch_stats, buffers_rings, total_demand):
+        """
+        Heat Treatment urgency considers downstream stock. 
+        Higher buffer = lower priority.
+        """
+        total_buffer = sum(buffers_rings.values())
+        buffer_ratio = (total_buffer / total_demand) if total_demand > 0 else 0
+        base_score = ch_stats.get(ch_norm, {}).get('score', 1.0)
+        return base_score - buffer_ratio
+
+    @staticmethod
+    def inject_wip_from_buffers(work_items, disp, pc, ch_norm, routing, buffers_rings, item_priority):
+        """
+        Completed buffer inventory is ready for the NEXT stage.
+        Injects WorkItems at day_idx = -1 (WIP) so the scheduler processes them immediately.
+        """
+        buf_map = {
+            'HT': buffers_rings.get('HT', 0.0),
+            'FACE': buffers_rings.get('FACE', 0.0),
+            'OD': buffers_rings.get('OD', 0.0)
+        }
+        
+        for i, stage in enumerate(routing):
+            if stage in buf_map and buf_map[stage] > 0:
+                qty = buf_map[stage]
+                if i + 1 < len(routing):
+                    next_stage = routing[i + 1]
+                    if next_stage != 'CHANNEL':
+                        work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
+
+
+# ==========================================
 # ROBUST BUFFER DAYS CONVERSION HELPERS
 # ==========================================
 def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_rings):
@@ -492,8 +571,6 @@ def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_ring
         'ht_buffer_2': ('type_6', 'HT'),
         'buffer_in_days': (['running', 'next_type_3'], 'CH BUFFER')
     }
-    
-    disp_variants = [disp.upper()] + [str(v).upper() for v in get_lookup_variants(disp, pc)]
 
     for key, val in entries.items():
         # Ensure key corresponds to the matching Process Code (IR / OR)
@@ -519,7 +596,7 @@ def get_all_buffers_for_part(disp, pc, ch_norm, payload, box_matrix, demand_ring
                         type_key = f"{t_prefix}_{ch_part}_{pc}"
                         type_val = str(entries.get(type_key, "")).strip().upper()
                         
-                        if type_val and type_val in disp_variants:
+                        if type_val and ScheduleLogic.match_parts(disp.upper(), type_val, pc):
                             is_match = True
                             break
                             
@@ -990,12 +1067,12 @@ def generate_schedule(payload: ScheduleRequest):
                     if details.get('qty', 0.0) > 0: box_matrix[part_key][p_code] = details
 
         # -----------------------------------------------------
-        # CORRECT BUFFER REDUCTION LOGIC
+        # CORRECT BUFFER REDUCTION LOGIC (USING ScheduleLogic)
         # -----------------------------------------------------
         parsed_buffers = {}
-        
-        # Combine keys to iterate over all possible parts today or tomorrow
         all_parts = set(list(channel_demands_day1.keys()) + list(channel_demands_day2.keys()))
+        
+        stage_demands = {} 
         
         for disp_name in all_parts:
             d1_meta = channel_demands_day1.get(disp_name, {})
@@ -1009,29 +1086,23 @@ def generate_schedule(payload: ScheduleRequest):
                 
                 if raw_d1 <= 0 and raw_d2 <= 0: continue
                 
-                # To accurately convert "1 Day" of buffer to quantities, use the max of D1 and D2 demand.
                 daily_rate_ref = max(raw_d1, raw_d2)
-                if daily_rate_ref <= 0: continue
+                routing = get_routing_for_part(ch_norm, pc)
                 
                 buffers_rings = get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, daily_rate_ref)
                 parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
                 
-                total_avail_rings = sum(buffers_rings.values())
+                demands_d1, demands_d2 = ScheduleLogic.calculate_net_demands(raw_d1, raw_d2, buffers_rings, routing)
                 
-                # If there is buffer anywhere (FACE/OD/HT), subtract it strictly from the demand dicts in-place
-                # This guarantees that if we have required items further down the stream, we schedule exactly what's needed at HT.
-                if total_avail_rings > 0:
-                    rem_buf = total_avail_rings
-                    
-                    if raw_d1 > 0:
-                        reduced_d1 = max(0.0, raw_d1 - rem_buf)
-                        rem_buf -= (raw_d1 - reduced_d1)
-                        channel_demands_day1[disp_name][pc] = reduced_d1
-                        
-                    if raw_d2 > 0 and rem_buf > 0:
-                        reduced_d2 = max(0.0, raw_d2 - rem_buf)
-                        rem_buf -= (raw_d2 - reduced_d2)
-                        channel_demands_day2[disp_name][pc] = reduced_d2
+                stage_demands[(disp_name, pc)] = {
+                    'd1': demands_d1,
+                    'd2': demands_d2,
+                    'channel': ch_norm,
+                    'routing': routing,
+                    'buffers': buffers_rings,
+                    'raw_d1': raw_d1,
+                    'raw_d2': raw_d2
+                }
 
         # 3. LOAD PRODUCTION MASTER SEQUENTIALLY
         weight_matrix = {}
@@ -1204,34 +1275,35 @@ def generate_schedule(payload: ScheduleRequest):
                 if ch_norm not in ch_stats: ch_stats[ch_norm] = {'demand': 0.0, 'buffer': 0.0, 'score': 1.0}
                 ch_stats[ch_norm]['demand'] += data.get('IR', 0) + data.get('OR', 0)
 
-        # Because we already subtracted buffer above, the raw_d1 inside here is the true reduced demand.
         tracker_ht = {}
-        for display_name, data in channel_demands_day1.items():
-            for p_code in ['IR', 'OR']:
-                raw_d1 = float(data.get(p_code, 0.0))
-                if raw_d1 > 0:
-                    key = (display_name, p_code)
-                    if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
-                    tracker_ht[key]['raw_d1'] = raw_d1
-                    
-        for display_name, data in channel_demands_day2.items():
-            for p_code in ['IR', 'OR']:
-                raw_d2 = float(data.get(p_code, 0.0))
-                if raw_d2 > 0:
-                    key = (display_name, p_code)
-                    if key not in tracker_ht: tracker_ht[key] = {'raw_d1': 0.0, 'raw_d2': 0.0, 'channel': data['channel']}
-                    tracker_ht[key]['raw_d2'] = raw_d2
-
-        for key, reqs in tracker_ht.items():
+        for key, data in stage_demands.items():
             disp, pc = key
-            ch_norm = normalize_channel(reqs['channel'])
-            routing = get_routing_for_part(ch_norm, pc)
+            routing = data['routing']
             first_stage = get_first_required_stage(routing)
             
             if not first_stage: continue
             
-            raw_d1 = reqs['raw_d1']
-            raw_d2 = reqs['raw_d2']
+            net_d1 = data['d1'].get(first_stage, 0.0)
+            net_d2 = data['d2'].get(first_stage, 0.0)
+            
+            if net_d1 > 0 or net_d2 > 0:
+                tracker_ht[key] = {
+                    'net_d1': net_d1,
+                    'net_d2': net_d2,
+                    'channel': data['channel'],
+                    'first_stage': first_stage,
+                    'raw_d1': data['raw_d1'],
+                    'raw_d2': data['raw_d2']
+                }
+
+        for key, reqs in tracker_ht.items():
+            disp, pc = key
+            ch_norm = reqs['channel']
+            routing = get_routing_for_part(ch_norm, pc)
+            first_stage = reqs['first_stage']
+            
+            raw_d1 = reqs['net_d1']
+            raw_d2 = reqs['net_d2']
             bal = ht_balances.get(key, 0.0)
             
             d1_sat = min(raw_d1, bal)
@@ -1246,22 +1318,26 @@ def generate_schedule(payload: ScheduleRequest):
             reqs['net_d2'] = net_d2
             reqs['d2_satisfied'] = d2_sat
             reqs['leftover_bal'] = bal
-            reqs['first_stage'] = first_stage
 
-            buffer_val = 0.0
-            if (disp, pc, ch_norm) in parsed_buffers:
-                b_rings = parsed_buffers[(disp, pc, ch_norm)]
-                total_rings = sum(b_rings.values())
-                demand = max(raw_d1, raw_d2)
-                if demand > 0: 
-                    buffer_val = total_rings / demand
-
-            item_priority = ch_stats[ch_norm]['score'] - buffer_val
+            buffers_rings = stage_demands[key]['buffers']
+            item_priority = ScheduleLogic.calculate_ht_priority(ch_norm, ch_stats, buffers_rings, reqs['raw_d1'] + reqs['raw_d2'])
 
             if net_d1 > 0:
                 work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, item_priority, routing))
             if net_d2 > 0:
                 work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
+
+        # Inject downstream WIP from parsed buffers!
+        for key, data in stage_demands.items():
+            disp, pc = key
+            ch_norm = data['channel']
+            routing = data['routing']
+            buffers_rings = data['buffers']
+            
+            total_dem = data['raw_d1'] + data['raw_d2']
+            item_priority = ScheduleLogic.calculate_ht_priority(ch_norm, ch_stats, buffers_rings, total_dem)
+            
+            ScheduleLogic.inject_wip_from_buffers(work_items, disp, pc, ch_norm, routing, buffers_rings, item_priority)
 
         # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}

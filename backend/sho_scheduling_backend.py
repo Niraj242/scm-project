@@ -152,11 +152,6 @@ class SaveBreakdownsRequest(BaseModel):
 class ScheduleLogic:
     @staticmethod
     def match_parts(demand_part: str, buffer_part: str, pc: str) -> bool:
-        """
-        Rule 2: Flexible Type Matching (Relaxed)
-        Allows partial matches of core families to ensure nearby variants are caught
-        without relying on strict exact string matching.
-        """
         if not buffer_part or not demand_part: 
             return False
         
@@ -192,9 +187,8 @@ class ScheduleLogic:
     @staticmethod
     def calculate_net_demands(raw_d1: float, raw_d2: float, buffers_rings: dict, routing: list):
         """
-        Rules 3 & 4: Process-Aware Stage Demand Reduction Logic
         Calculates Total Requirement = D1 + D2 and nets stages independently based on 
-        where inventory currently sits. HT Buffer is ignored per user request.
+        where inventory currently sits. 
         """
         total_req = raw_d1 + raw_d2
         
@@ -210,7 +204,8 @@ class ScheduleLogic:
             elif stage == 'OD':
                 net_total['OD'] = max(0.0, total_req - ch_buf - od_buf)
             elif stage == 'FACE':
-                net_total['FACE'] = max(0.0, total_req - ch_buf - face_buf)
+                # FIXED: Face demand is reduced by parts ALREADY at OD (since they passed Face)
+                net_total['FACE'] = max(0.0, total_req - ch_buf - od_buf - face_buf)
             elif stage == 'HT':
                 net_total['HT'] = max(0.0, total_req - ch_buf - od_buf - face_buf)
             else:
@@ -235,7 +230,6 @@ class ScheduleLogic:
     def calculate_priority(ch_norm: str, ch_stats: dict, buffers_rings: dict, total_demand: float) -> float:
         """
         Dynamic priority evaluation: Lower channel buffer = higher priority.
-        Ensures scheduling pulls aggressively when upstream buffers are depleted.
         """
         ch_buf = buffers_rings.get('CH BUFFER', 0.0)
         
@@ -252,9 +246,6 @@ class ScheduleLogic:
 
     @staticmethod
     def get_all_buffers_for_part(disp: str, pc: str, ch_norm: str, payload, box_matrix: dict, demand_rings: float) -> dict:
-        """
-        Rule 1: Buffer Days → Rings Conversion based purely on Channel Capacity.
-        """
         buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
         
         unit_mode = str(getattr(payload, 'unit_mode', 'DAYS')).strip().upper()
@@ -355,9 +346,9 @@ class ScheduleLogic:
     @staticmethod
     def inject_wip_from_buffers(work_items: list, disp: str, pc: str, ch_norm: str, routing: list, buffers_rings: dict, item_priority: float):
         """
-        Transforms buffered assets into execution instructions for the NEXT process step.
+        Transforms buffered assets into execution instructions for the CURRENT process step they are waiting for.
         """
-        for i, stage in enumerate(routing):
+        for stage in routing:
             qty = 0.0
             if stage == 'HT':
                 pass # Ignored as requested
@@ -366,12 +357,9 @@ class ScheduleLogic:
             elif stage == 'OD':
                 qty = buffers_rings.get('OD', 0.0) 
                 
-            if qty > 0.0 and (i + 1) < len(routing):
-                next_stage = routing[i + 1]
-                try:
-                    work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
-                except NameError:
-                    pass
+            # FIXED: If material is sitting at the FACE buffer, it gets scheduled FOR FACE immediately (Day -1).
+            if qty > 0.0:
+                work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
 
 # ==========================================
 # UTIL FUNCTIONS & CACHED EXCEL PROCESSOR
@@ -1334,7 +1322,6 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                 res.last_fam = matched_state.get("last_fam")
                 res.last_pc = matched_state.get("last_pc")
                 
-            # FORCE FACE AND OD MACHINES TO START NO EARLIER THAN 10:30 (0.5 hrs)
             if res.type in ['FACE', 'OD'] and res.ready_time < 0.5:
                 res.ready_time = 0.5
 

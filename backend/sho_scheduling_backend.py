@@ -9,9 +9,9 @@ import time
 import sqlite3
 import gc
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from database import get_db
 from sqlalchemy.orm import Session
 import models
@@ -28,9 +28,8 @@ WEIGHT_CACHE = {}
 FURNACE_CACHE = {}
 VARIANTS_CACHE = {}  
 
-# Global memory cache for downloaded files AND parsed DataFrames to optimize performance 
+# Global memory cache for downloaded files to optimize performance 
 DOWNLOAD_CACHE = {}
-PARSED_EXCEL_CACHE = {}
 CACHE_TTL_SECONDS = 300  
 
 DEFAULT_FURNACES = {
@@ -85,23 +84,7 @@ def save_daily_state(date_str, state_data):
 
 def load_monthly_tracking(): return get_setting('monthly_tracking', {})
 def save_monthly_tracking(data): save_setting('monthly_tracking', data)
-
-# ==========================================
-# PYDANTIC MODELS (Restored for Buffers)
-# ==========================================
-class BufferSaveRequest(BaseModel):
-    sector: str
-    date: str
-    entries: Dict[str, Any]
-    unit_mode: str = "DAYS"
-
-class ScheduleRequest(BaseModel):
-    sector: str
-    date: str
-    unit_mode: str
-    entries: Dict[str, Any] = {}
-    unlocked_blocks: List[str] = []
-    machine_availability: Dict[str, Any] = {}
+def load_saved_plan(): return get_setting('saved_plan', {})
 
 # ==========================================
 # ROUTING CONFIGURATION
@@ -140,9 +123,258 @@ PROCESS_FLOW = {
 }
 DEFAULT_ROUTING = ["HT", "FACE", "OD", "CHANNEL"]
 
+class ScheduleRequest(BaseModel):
+    sector: str
+    date: str
+    unit_mode: str
+    entries: Dict[str, Any] = {}
+    unlocked_blocks: List[str] = []
+    machine_availability: Dict[str, Any] = {}
+
+class SavePlanRequest(BaseModel):
+    date: str
+    plan: Dict[str, Any]
+
+class BreakdownItem(BaseModel):
+    resource: str
+    status: str
+    start_time: str
+    end_time: str
+
+class SaveBreakdownsRequest(BaseModel):
+    date: str
+    entries: List[BreakdownItem]
 
 # ==========================================
-# PERFORMANCE OPTIMIZED EXCEL PROCESSOR
+# CORE SCHEDULING LOGIC ENGINE (ISOLATED)
+# ==========================================
+
+class ScheduleLogic:
+    @staticmethod
+    def match_parts(demand_part: str, buffer_part: str, pc: str) -> bool:
+        """
+        Rule 2: Flexible Type Matching (Relaxed)
+        Allows partial matches of core families to ensure nearby variants are caught
+        without relying on strict exact string matching.
+        """
+        if not buffer_part or not demand_part: 
+            return False
+        
+        demand_part_clean = str(demand_part).upper().replace(" ", "")
+        buffer_part_clean = str(buffer_part).upper().replace(" ", "")
+        
+        if demand_part_clean == buffer_part_clean: 
+            return True
+        
+        def extract_base_family(part_str):
+            match = re.search(r'(\d{4,5})', part_str)
+            if match:
+                return match.group(1)
+            match_short = re.search(r'(\d+)', part_str)
+            return match_short.group(1) if match_short else part_str
+            
+        d_base = extract_base_family(demand_part_clean)
+        b_base = extract_base_family(buffer_part_clean)
+        
+        if d_base and b_base and (d_base in b_base or b_base in d_base):
+            return True
+            
+        try:
+            d_vars = set([demand_part_clean] + [str(v).upper().replace(" ", "") for v in get_lookup_variants(demand_part_clean, pc)])
+            b_vars = set([buffer_part_clean] + [str(v).upper().replace(" ", "") for v in get_lookup_variants(buffer_part_clean, pc)])
+            if len(d_vars.intersection(b_vars)) > 0:
+                return True
+        except NameError:
+            pass
+            
+        return False
+
+    @staticmethod
+    def calculate_net_demands(raw_d1: float, raw_d2: float, buffers_rings: dict, routing: list):
+        """
+        Rules 3 & 4: Process-Aware Stage Demand Reduction Logic
+        Calculates Total Requirement = D1 + D2 and nets stages independently based on 
+        where inventory currently sits. HT Buffer is ignored per user request.
+        """
+        total_req = raw_d1 + raw_d2
+        
+        ch_buf = buffers_rings.get('CH BUFFER', 0.0)
+        od_buf = buffers_rings.get('OD', 0.0)
+        face_buf = buffers_rings.get('FACE', 0.0)
+        ht_buf = 0.0  # Explicitly ignored per user instruction
+
+        net_total = {}
+        for stage in routing:
+            if stage == 'CHANNEL':
+                net_total['CHANNEL'] = max(0.0, total_req - ch_buf)
+            elif stage == 'OD':
+                net_total['OD'] = max(0.0, total_req - ch_buf - od_buf)
+            elif stage == 'FACE':
+                net_total['FACE'] = max(0.0, total_req - ch_buf - face_buf)
+            elif stage == 'HT':
+                net_total['HT'] = max(0.0, total_req - ch_buf - od_buf - face_buf)
+            else:
+                net_total[stage] = total_req
+
+        net_d1 = {}
+        net_d2 = {}
+        
+        if total_req > 0:
+            d1_ratio = raw_d1 / total_req
+            for stage in routing:
+                net_d1[stage] = net_total.get(stage, total_req) * d1_ratio
+                net_d2[stage] = net_total.get(stage, total_req) * (1.0 - d1_ratio)
+        else:
+            for stage in routing:
+                net_d1[stage] = 0.0
+                net_d2[stage] = 0.0
+
+        return net_d1, net_d2
+
+    @staticmethod
+    def calculate_priority(ch_norm: str, ch_stats: dict, buffers_rings: dict, total_demand: float) -> float:
+        """
+        Dynamic priority evaluation: Lower channel buffer = higher priority.
+        Ensures scheduling pulls aggressively when upstream buffers are depleted.
+        """
+        ch_buf = buffers_rings.get('CH BUFFER', 0.0)
+        
+        if total_demand <= 0:
+            return 1.0
+            
+        stock_ratio = ch_buf / total_demand
+        priority_score = max(0.0, 10.0 - stock_ratio)
+        
+        if ch_buf < (total_demand * 0.1):
+            priority_score += 3.0 
+            
+        return priority_score
+
+    @staticmethod
+    def get_all_buffers_for_part(disp: str, pc: str, ch_norm: str, payload, box_matrix: dict, demand_rings: float) -> dict:
+        """
+        Rule 1: Buffer Days → Rings Conversion based purely on Channel Capacity.
+        """
+        buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
+        
+        unit_mode = str(getattr(payload, 'unit_mode', 'DAYS')).strip().upper()
+        if not unit_mode: 
+            unit_mode = 'DAYS'
+            
+        try:
+            rpb = get_box_for_part(disp, pc, box_matrix)
+        except NameError:
+            rpb = 1.0
+
+        zeroset = getattr(payload, 'zeroset', [])
+        max_daily_capacity = 0.0
+        
+        for record in zeroset:
+            if isinstance(record, dict):
+                rec_channel = record.get('Channel') or record.get('CHANNEL')
+                rec_type = record.get('Type') or record.get('TYPE')
+                rec_qty = record.get('Qty') or record.get('QTY') or 0.0
+                
+                if rec_channel and rec_type:
+                    if str(rec_channel).strip().upper() == str(ch_norm).strip().upper():
+                        if ScheduleLogic.match_parts(disp, rec_type, pc):
+                            if rec_qty > max_daily_capacity:
+                                max_daily_capacity = rec_qty
+
+        if max_daily_capacity > 0:
+            multiplier = 1000.0 if 0 < max_daily_capacity < 1000.0 else 1.0
+            resolved_capacity_rings = max_daily_capacity * multiplier
+        else:
+            resolved_capacity_rings = demand_rings
+
+        def convert(val):
+            if val <= 0: 
+                return 0.0
+            if "DAY" in unit_mode: 
+                return float(val * resolved_capacity_rings)
+            elif "BOX" in unit_mode: 
+                return float(val * rpb)
+            else: 
+                return float(val)
+
+        entries = payload.entries if getattr(payload, 'entries', None) else {}
+        try:
+            ch_clean = normalize_channel(ch_norm).replace(" ", "")
+        except NameError:
+            ch_clean = str(ch_norm).strip().upper().replace(" ", "")
+        
+        buffer_type_map = {
+            'ch_buffer_1': ('type_1', 'CH BUFFER'),
+            'ch_buffer_2': ('next_type_1', 'CH BUFFER'),
+            'od_buffer_1': ('type_2', 'OD'),
+            'od_buffer_2': ('next_type_2', 'OD'),
+            'face_buffer_1': ('type_3', 'FACE'),
+            'face_buffer_2': ('type_4', 'FACE'),
+            'ht_buffer_1': ('type_5', 'HT'),
+            'ht_buffer_2': ('type_6', 'HT'),
+            'buffer_in_days': (['running', 'next_type_3'], 'CH BUFFER')
+        }
+
+        for key, val in entries.items():
+            if not key.endswith(f"_{pc}"):
+                continue
+                
+            prefix_and_ch = key[:-(len(pc)+1)]
+            
+            for buf_prefix, mapping in buffer_type_map.items():
+                if prefix_and_ch.startswith(buf_prefix + "_"):
+                    ch_part = prefix_and_ch[len(buf_prefix)+1:]
+                    
+                    try:
+                        ch_part_norm = normalize_channel(ch_part).replace(" ", "")
+                    except NameError:
+                        ch_part_norm = str(ch_part).strip().upper().replace(" ", "")
+
+                    if ch_part_norm == ch_clean:
+                        type_keys = mapping[0] if isinstance(mapping[0], list) else [mapping[0]]
+                        loc = mapping[1]
+                        
+                        is_match = False
+                        for t_prefix in type_keys:
+                            type_key = f"{t_prefix}_{ch_part}_{pc}"
+                            type_val = str(entries.get(type_key, "")).strip().upper()
+                            
+                            if type_val and ScheduleLogic.match_parts(disp, type_val, pc):
+                                is_match = True
+                                break
+                                
+                        if is_match:
+                            try:
+                                float_val = float(val) if val is not None else 0.0
+                            except ValueError:
+                                float_val = 0.0
+                            buffers_rings[loc] += convert(float_val)
+
+        return buffers_rings
+
+    @staticmethod
+    def inject_wip_from_buffers(work_items: list, disp: str, pc: str, ch_norm: str, routing: list, buffers_rings: dict, item_priority: float):
+        """
+        Transforms buffered assets into execution instructions for the NEXT process step.
+        """
+        for i, stage in enumerate(routing):
+            qty = 0.0
+            if stage == 'HT':
+                pass # Ignored as requested
+            elif stage == 'FACE':
+                qty = buffers_rings.get('FACE', 0.0) 
+            elif stage == 'OD':
+                qty = buffers_rings.get('OD', 0.0) 
+                
+            if qty > 0.0 and (i + 1) < len(routing):
+                next_stage = routing[i + 1]
+                try:
+                    work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
+                except NameError:
+                    pass
+
+# ==========================================
+# UTIL FUNCTIONS & CACHED EXCEL PROCESSOR
 # ==========================================
 def fetch_with_cache(url: str) -> bytes:
     now = time.time()
@@ -158,27 +390,10 @@ def fetch_with_cache(url: str) -> bytes:
     raise Exception(f"Failed to fetch Excel sheet from {url}. Status code: {resp.status_code}")
 
 def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
-    """
-    OPTIMIZATION: Caches the fully parsed pandas DataFrames rather than just the file bytes.
-    This skips the massive overhead of re-parsing the Excel file (pd.read_excel) on every run.
-    """
     if not url or url.strip() == "": 
         return
-        
-    now = time.time()
-    cache_key = f"{url}_{str(sheet_names_to_process)}"
-    
-    if cache_key in PARSED_EXCEL_CACHE:
-        cached_data, timestamp = PARSED_EXCEL_CACHE[cache_key]
-        if now - timestamp < CACHE_TTL_SECONDS:
-            # Yield from in-memory pre-parsed cache immediately
-            for sheet, df in cached_data.items():
-                yield sheet, df
-            return
-
     try:
         content = fetch_with_cache(url)
-        parsed_sheets_cache = {}
         with io.BytesIO(content) as file_buffer:
             try:
                 xls = pd.ExcelFile(file_buffer, engine='calamine')
@@ -190,18 +405,14 @@ def process_excel_sequentially(url, sheet_names_to_process=None, usecols=None):
             for sheet in target_sheets:
                 if sheet in xls.sheet_names:
                     df = pd.read_excel(xls, sheet_name=sheet, header=None, usecols=usecols)
-                    parsed_sheets_cache[sheet] = df
                     yield sheet, df
+                    del df
+                    gc.collect()
             del xls
-            
-        PARSED_EXCEL_CACHE[cache_key] = (parsed_sheets_cache, now)
         gc.collect()
     except Exception as e:
         print(f"Error loading sequentially from {url}: {e}")
 
-# ==========================================
-# UTIL FUNCTIONS & CACHING
-# ==========================================
 MASTER_RESOURCES_CACHE = {"furnaces": [], "face": [], "od": [], "channels": []}
 
 def get_all_resources():
@@ -481,6 +692,7 @@ class WorkItem:
         self.valid_resources = []
         self.missing_reason = "Capacity Exceeded"
         
+        # Determine initial Day Label 
         if day_idx == -1: self.day_label = " (WIP)"
         elif day_idx == 0: self.day_label = " (D1)"
         elif day_idx == 1: self.day_label = " (D2)"
@@ -541,267 +753,16 @@ class Resource:
         self.capacity_info = capacity_info 
         self.rows = []
 
-class ScheduleLogic:
-    @staticmethod
-    def match_parts(demand_part: str, buffer_part: str, pc: str) -> bool:
-        if not buffer_part or not demand_part: 
-            return False
-        
-        demand_part_clean = str(demand_part).upper().replace(" ", "")
-        buffer_part_clean = str(buffer_part).upper().replace(" ", "")
-        
-        if demand_part_clean == buffer_part_clean: 
-            return True
-        
-        def extract_base_family(part_str):
-            match = re.search(r'(\d{4,5})', part_str)
-            if match:
-                return match.group(1)
-            match_short = re.search(r'(\d+)', part_str)
-            return match_short.group(1) if match_short else part_str
-            
-        d_base = extract_base_family(demand_part_clean)
-        b_base = extract_base_family(buffer_part_clean)
-        
-        if d_base and b_base and (d_base in b_base or b_base in d_base):
-            return True
-            
-        try:
-            d_vars = set([demand_part_clean] + [str(v).upper().replace(" ", "") for v in get_lookup_variants(demand_part_clean, pc)])
-            b_vars = set([buffer_part_clean] + [str(v).upper().replace(" ", "") for v in get_lookup_variants(buffer_part_clean, pc)])
-            if len(d_vars.intersection(b_vars)) > 0:
-                return True
-        except NameError:
-            pass
-            
-        return False
-
-    @staticmethod
-    def calculate_net_demands(raw_d1: float, raw_d2: float, buffers_rings: dict, routing: list):
-        total_req = raw_d1 + raw_d2
-        
-        ch_buf = buffers_rings.get('CH BUFFER', 0.0)
-        od_buf = buffers_rings.get('OD', 0.0)
-        face_buf = buffers_rings.get('FACE', 0.0)
-
-        net_total = {}
-        for stage in routing:
-            if stage == 'CHANNEL':
-                net_total['CHANNEL'] = max(0.0, total_req - ch_buf)
-            elif stage == 'OD':
-                net_total['OD'] = max(0.0, total_req - ch_buf - od_buf)
-            elif stage == 'FACE':
-                net_total['FACE'] = max(0.0, total_req - ch_buf - face_buf)
-            elif stage == 'HT':
-                net_total['HT'] = max(0.0, total_req - ch_buf - od_buf - face_buf)
-            else:
-                net_total[stage] = total_req
-
-        net_d1 = {}
-        net_d2 = {}
-        
-        if total_req > 0:
-            d1_ratio = raw_d1 / total_req
-            for stage in routing:
-                net_d1[stage] = net_total.get(stage, total_req) * d1_ratio
-                net_d2[stage] = net_total.get(stage, total_req) * (1.0 - d1_ratio)
-        else:
-            for stage in routing:
-                net_d1[stage] = 0.0
-                net_d2[stage] = 0.0
-
-        return net_d1, net_d2
-
-    @staticmethod
-    def calculate_priority(ch_norm: str, ch_stats: dict, buffers_rings: dict, total_demand: float) -> float:
-        ch_buf = buffers_rings.get('CH BUFFER', 0.0)
-        
-        if total_demand <= 0:
-            return 1.0
-            
-        stock_ratio = ch_buf / total_demand
-        priority_score = max(0.0, 10.0 - stock_ratio)
-        
-        if ch_buf < (total_demand * 0.1):
-            priority_score += 3.0 
-            
-        return priority_score
-
-    @staticmethod
-    def get_all_buffers_for_part(disp: str, pc: str, ch_norm: str, payload, box_matrix: dict, demand_rings: float) -> dict:
-        buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
-        
-        unit_mode = str(getattr(payload, 'unit_mode', 'DAYS')).strip().upper()
-        if not unit_mode: 
-            unit_mode = 'DAYS'
-            
-        try:
-            rpb = get_box_for_part(disp, pc, box_matrix)
-        except NameError:
-            rpb = 1.0
-
-        zeroset = getattr(payload, 'zeroset', [])
-        max_daily_capacity = 0.0
-        
-        for record in zeroset:
-            if isinstance(record, dict):
-                rec_channel = record.get('Channel') or record.get('CHANNEL')
-                rec_type = record.get('Type') or record.get('TYPE')
-                rec_qty = record.get('Qty') or record.get('QTY') or 0.0
-                
-                if rec_channel and rec_type:
-                    if str(rec_channel).strip().upper() == str(ch_norm).strip().upper():
-                        if ScheduleLogic.match_parts(disp, rec_type, pc):
-                            if rec_qty > max_daily_capacity:
-                                max_daily_capacity = rec_qty
-
-        if max_daily_capacity > 0:
-            multiplier = 1000.0 if 0 < max_daily_capacity < 1000.0 else 1.0
-            resolved_capacity_rings = max_daily_capacity * multiplier
-        else:
-            resolved_capacity_rings = demand_rings
-
-        def convert(val):
-            if val <= 0: 
-                return 0.0
-            if "DAY" in unit_mode: 
-                return float(val * resolved_capacity_rings)
-            elif "BOX" in unit_mode: 
-                return float(val * rpb)
-            else: 
-                return float(val)
-
-        entries = payload.entries if getattr(payload, 'entries', None) else {}
-        try:
-            ch_clean = normalize_channel(ch_norm).replace(" ", "")
-        except NameError:
-            ch_clean = str(ch_norm).strip().upper().replace(" ", "")
-        
-        buffer_type_map = {
-            'ch_buffer_1': ('type_1', 'CH BUFFER'),
-            'ch_buffer_2': ('next_type_1', 'CH BUFFER'),
-            'od_buffer_1': ('type_2', 'OD'),
-            'od_buffer_2': ('next_type_2', 'OD'),
-            'face_buffer_1': ('type_3', 'FACE'),
-            'face_buffer_2': ('type_4', 'FACE'),
-            'ht_buffer_1': ('type_5', 'HT'),
-            'ht_buffer_2': ('type_6', 'HT'),
-            'buffer_in_days': (['running', 'next_type_3'], 'CH BUFFER')
-        }
-
-        for key, val in entries.items():
-            if not key.endswith(f"_{pc}"):
-                continue
-                
-            prefix_and_ch = key[:-(len(pc)+1)]
-            
-            for buf_prefix, mapping in buffer_type_map.items():
-                if prefix_and_ch.startswith(buf_prefix + "_"):
-                    ch_part = prefix_and_ch[len(buf_prefix)+1:]
-                    
-                    try:
-                        ch_part_norm = normalize_channel(ch_part).replace(" ", "")
-                    except NameError:
-                        ch_part_norm = str(ch_part).strip().upper().replace(" ", "")
-
-                    if ch_part_norm == ch_clean:
-                        type_keys = mapping[0] if isinstance(mapping[0], list) else [mapping[0]]
-                        loc = mapping[1]
-                        
-                        is_match = False
-                        for t_prefix in type_keys:
-                            type_key = f"{t_prefix}_{ch_part}_{pc}"
-                            type_val = str(entries.get(type_key, "")).strip().upper()
-                            
-                            if type_val and ScheduleLogic.match_parts(disp, type_val, pc):
-                                is_match = True
-                                break
-                                
-                        if is_match:
-                            try:
-                                float_val = float(val) if val is not None else 0.0
-                            except ValueError:
-                                float_val = 0.0
-                            buffers_rings[loc] += convert(float_val)
-
-        return buffers_rings
-
-    @staticmethod
-    def inject_wip_from_buffers(work_items: list, disp: str, pc: str, ch_norm: str, routing: list, buffers_rings: dict, item_priority: float):
-        for i, stage in enumerate(routing):
-            qty = 0.0
-            if stage == 'HT':
-                pass 
-            elif stage == 'FACE':
-                qty = buffers_rings.get('FACE', 0.0) 
-            elif stage == 'OD':
-                qty = buffers_rings.get('OD', 0.0) 
-                
-            if qty > 0.0 and (i + 1) < len(routing):
-                next_stage = routing[i + 1]
-                try:
-                    work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
-                except NameError:
-                    pass
-
 # ==========================================
-# RESTORED BUFFER API ENDPOINTS
-# ==========================================
-@router.get("/api/buffers")
-def get_buffers(sector: str, date: str, db: Session = Depends(get_db)):
-    """Restored endpoint to fetch buffer entries so they are visible in the UI"""
-    try:
-        req_date = datetime.strptime(date, "%Y-%m-%d").date()
-        buffer_record = db.query(models.BufferEntry).filter(
-            models.BufferEntry.buffer_date == req_date,
-            models.BufferEntry.sector == sector
-        ).first()
-
-        if buffer_record:
-            return {
-                "status": "success",
-                "data": {
-                    "entries": json.loads(buffer_record.entries_json or "{}"),
-                    "unit_mode": buffer_record.unit_mode or "DAYS"
-                }
-            }
-        return {"status": "success", "data": {"entries": {}, "unit_mode": "DAYS"}}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@router.post("/api/buffers")
-def save_buffers(payload: BufferSaveRequest, db: Session = Depends(get_db)):
-    """Restored endpoint to save buffer entries to the database"""
-    try:
-        req_date = datetime.strptime(payload.date, "%Y-%m-%d").date()
-        
-        buffer_record = db.query(models.BufferEntry).filter(
-            models.BufferEntry.buffer_date == req_date,
-            models.BufferEntry.sector == payload.sector
-        ).first()
-
-        if not buffer_record:
-            buffer_record = models.BufferEntry(
-                buffer_date=req_date,
-                sector=payload.sector
-            )
-            db.add(buffer_record)
-
-        buffer_record.entries_json = json.dumps(payload.entries)
-        buffer_record.unit_mode = payload.unit_mode
-        db.commit()
-
-        return {"status": "success", "message": "Buffer entries saved successfully"}
-    except Exception as e:
-        db.rollback()
-        return {"status": "error", "message": str(e)}
-
-# ==========================================
-# HEALTH & SCHEDULE ROUTES
+# GENERAL ENDPOINTS
 # ==========================================
 @router.get("/api/health")
 def health_check():
     return {"status": "ok"}
+
+@router.get("/api/monthly_tracking")
+def get_monthly_tracking_api():
+    return load_monthly_tracking()
 
 @router.get("/api/machines")
 def get_machines():
@@ -817,6 +778,159 @@ def get_machines():
     except Exception as e:
         return {"status": "error", "message": str(e), "data": {}}
 
+@router.get("/api/get_plan")
+def get_plan(date: str):
+    try:
+        plans = load_saved_plan()
+        return plans.get(date, {})
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@router.post("/api/save_plan")
+def save_plan(payload: SavePlanRequest):
+    try:
+        plans = load_saved_plan()
+        plans[payload.date] = payload.plan
+        save_setting('saved_plan', plans)
+
+        pending = get_setting('pending_state', {})
+        if pending:
+            if "monthly_data" in pending:
+                month_str = payload.date[:7]
+                monthly_all = load_monthly_tracking()
+                monthly_all[month_str] = pending["monthly_data"]
+                save_monthly_tracking(monthly_all)
+            if "plant_state" in pending:
+                save_daily_state(payload.date, pending["plant_state"])
+            save_setting('pending_state', {})
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@router.post("/api/summary")
+def get_summary(payload: dict):
+    try:
+        date = payload.get("date", datetime.now().strftime("%Y-%m-%d"))
+        plans = load_saved_plan()
+        plan_data = plans.get(date, {})
+        return {"status": "success", "data": plan_data.get("summary", [])}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@router.get("/api/breakdowns")
+def get_breakdowns(date: str):
+    saved = {}
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT resource, status, start_time, end_time FROM breakdowns WHERE date=?", (date,))
+            for row in c.fetchall():
+                saved[row[0]] = {"status": row[1], "start_time": row[2], "end_time": row[3]}
+    except Exception:
+        pass
+
+    master = get_all_resources()
+    res_list = []
+    
+    for f in master["furnaces"]: res_list.append({"resource": f, "type": "Furnace", **saved.get(f, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in master["face"]: res_list.append({"resource": m, "type": "Face Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for m in master["od"]: res_list.append({"resource": m, "type": "OD Grinding", **saved.get(m, {"status": "Available", "start_time": "", "end_time": ""})})
+    for c in master["channels"]: res_list.append({"resource": c, "type": "Channel", **saved.get(c, {"status": "Available", "start_time": "", "end_time": ""})})
+
+    return {"status": "success", "data": res_list}
+
+@router.post("/api/save_breakdowns")
+def save_breakdowns(payload: SaveBreakdownsRequest):
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM breakdowns WHERE date=?", (payload.date,))
+            for ent in payload.entries:
+                c.execute("INSERT INTO breakdowns (date, resource, status, start_time, end_time) VALUES (?, ?, ?, ?, ?)",
+                          (payload.date, ent.resource, ent.status, ent.start_time, ent.end_time))
+            conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+
+# ==========================================
+# MAIN BUFFER ROUTE
+# ==========================================
+class BufferSaveRequest(BaseModel):
+    buffer_date: str
+    sector: str
+    unit_mode: str
+    entries: Dict[str, Any]
+
+
+@router.post("/api/save_buffers")
+def save_buffers(payload: BufferSaveRequest, db: Session = Depends(get_db)):
+    try:
+        req_date = datetime.strptime(payload.buffer_date, "%Y-%m-%d").date()
+
+        existing_entry = db.query(models.BufferEntry).filter(
+            models.BufferEntry.buffer_date == req_date,
+            models.BufferEntry.sector == payload.sector
+        ).first()
+
+        entries_json = json.dumps(payload.entries, ensure_ascii=False)
+
+        if existing_entry:
+            existing_entry.unit_mode = payload.unit_mode
+            existing_entry.entries_json = entries_json
+            existing_entry.updated_at = datetime.utcnow()
+        else:
+            new_entry = models.BufferEntry(
+                buffer_date=req_date,
+                sector=payload.sector,
+                unit_mode=payload.unit_mode,
+                entries_json=entries_json
+            )
+            db.add(new_entry)
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Buffer data saved successfully"
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/get_buffers")
+def get_buffers(buffer_date: str, sector: str, db: Session = Depends(get_db)):
+    try:
+        req_date = datetime.strptime(buffer_date, "%Y-%m-%d").date()
+
+        entry = db.query(models.BufferEntry).filter(
+            models.BufferEntry.buffer_date == req_date,
+            models.BufferEntry.sector == sector
+        ).first()
+
+        if not entry:
+            return {
+                "status": "success",
+                "unit_mode": "Days",
+                "entries": {}
+            }
+
+        return {
+            "status": "success",
+            "unit_mode": entry.unit_mode,
+            "entries": json.loads(entry.entries_json or "{}")
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==========================================
+# MAIN SCHEDULER ROUTE
+# ==========================================
 @router.post("/api/schedule")
 def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
     debug_logs = []
@@ -829,7 +943,7 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
     gc.collect()
     
     try:
-        # DB FALLBACK: Load saved buffer entries if not provided in payload
+        # DB FALLBACK: If payload entries are empty, load the saved buffer entries
         if not payload.entries or len(payload.entries) == 0:
             try:
                 db_date = datetime.strptime(payload.date, "%Y-%m-%d").date()
@@ -855,7 +969,7 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
         channel_demands_day1 = {} 
         channel_demands_day2 = {}
         
-        # 1. LOAD ZEROSET SEQUENTIALLY (Extremely fast due to Cache optimization)
+        # 1. LOAD ZEROSET SEQUENTIALLY
         for sheet_name, df_zero in process_excel_sequentially(ZEROSET_URL):
             sheet_str_upper = str(sheet_name).strip().upper()
             if sheet_str_upper in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13"]:
@@ -932,7 +1046,7 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                         channel_demands_day2[display_name]['IR'] = max(channel_demands_day2[display_name]['IR'], r2 * ir_multiplier)
                         channel_demands_day2[display_name]['OR'] = max(channel_demands_day2[display_name]['OR'], r2)
 
-        # 2. LOAD BOX RING MATRIX SEQUENTIALLY
+        # 2. LOAD BOX RING MATRIX SEQUENTIALLY (WITH SETUP CHART)
         box_matrices = {"tier1": {}, "tier2": {}, "tier3": {}}
         setup_chart_matrix = {}
         for s_name, df_b in process_excel_sequentially(BOX_RING_DATA_URL):
@@ -1391,7 +1505,7 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                     if est_time1 < merge_thresh or est_time2 < merge_thresh:
                         item1.qty += item2.qty
                         item2.qty = 0.0
-                        item1.day_label = " (D1+D2)"
+                        item1.day_label = " (D1+D2)"  # Explicitly brand merged requirements
                     break
 
         # SIMULATION LOOP

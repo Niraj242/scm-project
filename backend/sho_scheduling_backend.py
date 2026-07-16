@@ -18,7 +18,6 @@ import models
 
 router = APIRouter()
 
-
 ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
@@ -149,185 +148,105 @@ class SaveBreakdownsRequest(BaseModel):
 # ==========================================
 # CORE SCHEDULING LOGIC ENGINE (ISOLATED)
 # ==========================================
-
 class ScheduleLogic:
     @staticmethod
     def match_parts(demand_part: str, buffer_part: str, pc: str) -> bool:
         """
-        Rule 2: Flexible Type Matching
-        Extracts the core 4 or 5 digit base family to ensure exact base matches 
-        without loose substring flaws or over-strict suffix requirements.
-        
-        Examples:
-        BB10596 ↔ 10596   (Match)
-        2213 ↔ 2213ET9    (Match)
-        2213J2 ↔ 2213 C3  (Match)
-        1059 ≠ 10596      (No Match)
+        Reuses existing lookup normalization variants to match demand and buffer parts.
+        Avoids loose substring matching and strict string equality.
         """
         if not buffer_part or not demand_part: 
             return False
         
-        demand_part_clean = str(demand_part).upper().replace(" ", "")
-        buffer_part_clean = str(buffer_part).upper().replace(" ", "")
+        demand_part_clean = str(demand_part).upper().strip()
+        buffer_part_clean = str(buffer_part).upper().strip()
         
         if demand_part_clean == buffer_part_clean: 
             return True
         
-        # Helper to extract the exact core numeric family base sequence (4 or 5 digits)
-        def extract_base_family(part_str):
-            match = re.search(r'(\d{4,5})', part_str)
-            if match:
-                return match.group(1)
-            # Fallback for shorter variant patterns
-            match_short = re.search(r'(\d+)', part_str)
-            return match_short.group(1) if match_short else part_str
-            
-        d_base = extract_base_family(demand_part_clean)
-        b_base = extract_base_family(buffer_part_clean)
+        d_vars = set([demand_part_clean] + [str(v).upper() for v in get_lookup_variants(demand_part_clean, pc)])
+        b_vars = set([buffer_part_clean] + [str(v).upper() for v in get_lookup_variants(buffer_part_clean, pc)])
         
-        if d_base == b_base and d_base != "":
-            return True
-            
-        # Fallback verification to existing global lookup variants if present
-        try:
-            d_vars = set([demand_part_clean] + [str(v).upper().replace(" ", "") for v in get_lookup_variants(demand_part_clean, pc)])
-            b_vars = set([buffer_part_clean] + [str(v).upper().replace(" ", "") for v in get_lookup_variants(buffer_part_clean, pc)])
-            if len(d_vars.intersection(b_vars)) > 0:
-                return True
-        except NameError:
-            pass
-            
-        return False
+        return len(d_vars.intersection(b_vars)) > 0
 
     @staticmethod
     def calculate_net_demands(raw_d1: float, raw_d2: float, buffers_rings: dict, routing: list):
         """
-        Rules 3 & 4: Process-Aware Stage Demand Reduction Logic
-        Calculates Total Requirement = D1 + D2 and nets stages independently based on 
-        where inventory currently sits. Avoids removing materials from all stages simultaneously.
-        
-        Example: Need=20000, CH_BUF=5000, FACE_BUF=7000, OD_BUF=3000 -> 
-        Channel=15000, OD to schedule=12000, FACE to schedule=15000, HT to schedule=12000
+        Implements process-aware stage demand reduction logic based on process order.
+        Calculates Total Requirement = D1 + D2, cascades reductions, then splits the values.
+        Inventory reduces only pending operations.
         """
         total_req = raw_d1 + raw_d2
+        current_req = total_req
         
-        ch_buf = buffers_rings.get('CH BUFFER', 0.0)
-        od_buf = buffers_rings.get('OD', 0.0)
-        face_buf = buffers_rings.get('FACE', 0.0)
-        ht_buf = buffers_rings.get('HT', 0.0)
-
-        net_total = {}
-        for stage in routing:
+        net_demands = {}
+        
+        # Traverse the routing in reverse order so buffers reduce upstream processes
+        for stage in reversed(routing):
             if stage == 'CHANNEL':
-                net_total['CHANNEL'] = max(0.0, total_req - ch_buf)
+                current_req = max(0.0, current_req - buffers_rings.get('CH BUFFER', 0.0))
             elif stage == 'OD':
-                net_total['OD'] = max(0.0, total_req - ch_buf - od_buf)
+                current_req = max(0.0, current_req - buffers_rings.get('OD', 0.0))
             elif stage == 'FACE':
-                net_total['FACE'] = max(0.0, total_req - ch_buf - ht_buf)
+                current_req = max(0.0, current_req - buffers_rings.get('FACE', 0.0))
             elif stage == 'HT':
-                net_total['HT'] = max(0.0, total_req - ch_buf - od_buf - ht_buf)
-            else:
-                net_total[stage] = total_req
+                current_req = max(0.0, current_req - buffers_rings.get('HT', 0.0))
+                
+            net_demands[stage] = current_req
 
-        # Distribute net requirement back to Day 1 and Day 2 windows proportionally
         net_d1 = {}
         net_d2 = {}
-        
-        if total_req > 0:
-            d1_ratio = raw_d1 / total_req
-            for stage in routing:
-                net_d1[stage] = net_total.get(stage, total_req) * d1_ratio
-                net_d2[stage] = net_total.get(stage, total_req) * (1.0 - d1_ratio)
-        else:
-            for stage in routing:
-                net_d1[stage] = 0.0
+        for stage, req in net_demands.items():
+            if req <= raw_d1:
+                net_d1[stage] = req
                 net_d2[stage] = 0.0
+            else:
+                net_d1[stage] = raw_d1
+                net_d2[stage] = req - raw_d1
 
         return net_d1, net_d2
 
     @staticmethod
     def calculate_ht_priority(ch_norm: str, ch_stats: dict, buffers_rings: dict, total_demand: float) -> float:
         """
-        Rule 6: HT Priority Evaluation
-        Ensures Heat Treatment schedules prioritize critical downstream needs while avoiding
-        unnecessary upstream overproduction by dynamically mapping all downstream stages.
+        Urgency calculation for Heat Treatment. 
+        Considers Remaining Channel requirement, Channel Buffer, FACE Buffer, OD Buffer.
         """
-        ch_buf = buffers_rings.get('CH BUFFER', 0.0)
-        face_buf = buffers_rings.get('FACE', 0.0)
-        od_buf = buffers_rings.get('OD', 0.0)
-        ht_buf = buffers_rings.get('HT', 0.0)
-        
-        total_downstream_stock = ch_buf + face_buf + od_buf + ht_buf
-        
-        if total_demand <= 0:
-            return 1.0
+        remaining_ch = total_demand - buffers_rings.get('CH BUFFER', 0.0)
+        if remaining_ch <= 0:
+            return 0.0
             
-        stock_ratio = total_downstream_stock / total_demand
-        priority_score = max(0.0, 10.0 - stock_ratio)
+        downstream_stock = buffers_rings.get('FACE', 0.0) + buffers_rings.get('OD', 0.0)
         
-        # Inject critical starvation boost if the near-channel buffer falls below 10%
-        if ch_buf < (total_demand * 0.1):
-            priority_score += 2.0
-            
-        return priority_score
+        urgency = remaining_ch / (downstream_stock + 1.0)
+        return urgency
 
     @staticmethod
     def get_all_buffers_for_part(disp: str, pc: str, ch_norm: str, payload, box_matrix: dict, demand_rings: float) -> dict:
         """
-        Rule 1: Buffer Days → Rings Conversion
-        Searches the complete ZeroSet payload dataset to find the peak scheduled quantity
-        for the exact Channel + Type family, eliminating distortion on low-production/maintenance days.
+        Converts Days / Boxes buffers into Rings.
+        Uses exact production requirements of specific Channel + Type + IR/OR (via demand_rings).
         """
         buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
         
         unit_mode = str(getattr(payload, 'unit_mode', 'DAYS')).strip().upper()
         if not unit_mode: 
             unit_mode = 'DAYS'
-            
-        try:
-            rpb = get_box_for_part(disp, pc, box_matrix)
-        except NameError:
-            rpb = 1.0
-
-        # Extract complete ZeroSet to calculate Maximum Daily Production Capacity
-        zeroset = getattr(payload, 'zeroset', [])
-        max_daily_capacity = 0.0
         
-        for record in zeroset:
-            if isinstance(record, dict):
-                rec_channel = record.get('Channel') or record.get('CHANNEL')
-                rec_type = record.get('Type') or record.get('TYPE')
-                rec_qty = record.get('Qty') or record.get('QTY') or 0.0
-                
-                if rec_channel and rec_type:
-                    # Validate against normalized channel name and flexible type matching logic
-                    if str(rec_channel).strip().upper() == str(ch_norm).strip().upper():
-                        if ScheduleLogic.match_parts(disp, rec_type, pc):
-                            if rec_qty > max_daily_capacity:
-                                max_daily_capacity = rec_qty
-
-        # Dynamically evaluate scaling factor if records are specified in thousands
-        if max_daily_capacity > 0:
-            multiplier = 1000.0 if 0 < max_daily_capacity < 1000.0 else 1.0
-            resolved_capacity_rings = max_daily_capacity * multiplier
-        else:
-            resolved_capacity_rings = demand_rings
-
+        rpb = get_box_for_part(disp, pc, box_matrix)
+        
         def convert(val):
             if val <= 0: 
                 return 0.0
             if "DAY" in unit_mode: 
-                return float(val * resolved_capacity_rings)
+                return float(val * demand_rings)
             elif "BOX" in unit_mode: 
                 return float(val * rpb)
             else: 
                 return float(val)
 
-        entries = payload.entries if getattr(payload, 'entries', None) else {}
-        try:
-            ch_clean = normalize_channel(ch_norm).replace(" ", "")
-        except NameError:
-            ch_clean = str(ch_norm).strip().upper().replace(" ", "")
+        entries = payload.entries if payload.entries else {}
+        ch_clean = normalize_channel(ch_norm).replace(" ", "")
         
         buffer_type_map = {
             'ch_buffer_1': ('type_1', 'CH BUFFER'),
@@ -351,12 +270,7 @@ class ScheduleLogic:
                 if prefix_and_ch.startswith(buf_prefix + "_"):
                     ch_part = prefix_and_ch[len(buf_prefix)+1:]
                     
-                    try:
-                        ch_part_norm = normalize_channel(ch_part).replace(" ", "")
-                    except NameError:
-                        ch_part_norm = str(ch_part).strip().upper().replace(" ", "")
-
-                    if ch_part_norm == ch_clean:
+                    if normalize_channel(ch_part).replace(" ", "") == ch_clean:
                         type_keys = mapping[0] if isinstance(mapping[0], list) else [mapping[0]]
                         loc = mapping[1]
                         
@@ -370,38 +284,30 @@ class ScheduleLogic:
                                 break
                                 
                         if is_match:
-                            try:
-                                float_val = float(val) if val is not None else 0.0
-                            except ValueError:
-                                float_val = 0.0
-                            buffers_rings[loc] += convert(float_val)
+                            buffers_rings[loc] += convert(safe_float(val))
 
         return buffers_rings
 
     @staticmethod
     def inject_wip_from_buffers(work_items: list, disp: str, pc: str, ch_norm: str, routing: list, buffers_rings: dict, item_priority: float):
         """
-        Rule 5: Existing Buffers Must Become Work
-        Transforms buffered assets instantly into executable execution instructions 
-        for the NEXT process step in sequence at day_idx = -1.
+        Buffers belong to specific completed stages.
+        This injects items directly into the next process stage (at day_idx = -1) so the scheduler processes them immediately.
         """
+        buf_map = {
+            'HT': buffers_rings.get('HT', 0.0),
+            'FACE': buffers_rings.get('FACE', 0.0),
+            'OD': buffers_rings.get('OD', 0.0)
+        }
+        
         for i, stage in enumerate(routing):
-            qty = 0.0
-            if stage == 'HT':
-                qty = buffers_rings.get('HT', 0.0)  # HT complete -> Next is FACE
-            elif stage == 'FACE':
-                qty = buffers_rings.get('FACE', 0.0)  # FACE complete -> Next is OD
-            elif stage == 'OD':
-                qty = buffers_rings.get('OD', 0.0)  # OD complete -> Next is CHANNEL
-                
-            if qty > 0.0 and (i + 1) < len(routing):
-                next_stage = routing[i + 1]
-                try:
-                    # Creates active priority items scheduled ahead of baseline run generation
-                    work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
-                except NameError:
-                    # Fallback structural block instantiation if WorkItem is localized differently
-                    pass
+            if stage in buf_map and buf_map[stage] > 0:
+                qty = buf_map[stage]
+                if i + 1 < len(routing):
+                    next_stage = routing[i + 1]
+                    if next_stage != 'CHANNEL':
+                        work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
+
 
 # ==========================================
 # UTIL FUNCTIONS & CACHED EXCEL PROCESSOR
@@ -468,8 +374,8 @@ def get_all_resources():
                     cells = [c.strip() for c in str_matrix[r] if c.strip()]
                     m_cand = cells[1] if len(cells) > 1 else f"MC_{r}"
                     if m_cand and m_cand != "MACHINE" and m_cand != "M/C":
-                        if "FACE" in row_text or "DDS" in current_m_num.upper() or "BG" in current_m_num.upper(): face_mcs.add(m_cand)
-                        elif "OD" in row_text or "CL" in current_m_num.upper() or "CELL" in current_m_num.upper() or "+" in m_cand: od_mcs.add(m_cand)
+                        if "FACE" in row_text or "DDS" in m_cand.upper() or "BG" in m_cand.upper(): face_mcs.add(m_cand)
+                        elif "OD" in row_text or "CL" in m_cand.upper() or "CELL" in m_cand.upper() or "+" in m_cand: od_mcs.add(m_cand)
 
     if not face_mcs: face_mcs = {"DDS 1", "DDS 2", "BG 1"}
     if not od_mcs: od_mcs = {"CL 1", "CL 2", "CELL 1"}
@@ -992,6 +898,7 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
 
         channel_demands_day1 = {} 
         channel_demands_day2 = {}
+        max_daily_rates = {}
         
         # 1. LOAD ZEROSET SEQUENTIALLY
         for sheet_name, df_zero in process_excel_sequentially(ZEROSET_URL):
@@ -1051,9 +958,18 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                     if display_name not in monthly_data[month_str]:
                         monthly_data[month_str][display_name] = {"total_req": 0, "produced": 0, "channel": ch_name}
                     
-                    row_monthly_sum = sum([safe_float(row_vals_zero[col]) for col in monthly_cols if col < len(row_vals_zero)])
+                    row_monthly_vals = [safe_float(row_vals_zero[col]) for col in monthly_cols if col < len(row_vals_zero)]
+                    row_monthly_sum = sum(row_monthly_vals)
+                    max_monthly_val = max(row_monthly_vals) if row_monthly_vals else 0.0
+
                     if row_monthly_sum > 0: monthly_data[month_str][display_name]["total_req"] += (row_monthly_sum * 1000)
-                    
+
+                    if display_name not in max_daily_rates:
+                        max_daily_rates[display_name] = {'IR': 0.0, 'OR': 0.0, 'channel': ch_name}
+                    if max_monthly_val > 0:
+                        max_daily_rates[display_name]['IR'] = max(max_daily_rates[display_name]['IR'], max_monthly_val * 1000 * ir_multiplier)
+                        max_daily_rates[display_name]['OR'] = max(max_daily_rates[display_name]['OR'], max_monthly_val * 1000)
+
                     val1 = safe_float(row_vals_zero[c1_col]) if (c1_col is not None and c1_col < len(row_vals_zero)) else 0.0
                     val2 = safe_float(row_vals_zero[c2_col]) if (c2_col is not None and c2_col < len(row_vals_zero)) else 0.0
                     
@@ -1198,13 +1114,16 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                 if raw_d1 <= 0 and raw_d2 <= 0: continue
                 
                 daily_rate_ref = raw_d1 if raw_d1 > 0 else raw_d2
+                max_rate_for_pc = max_daily_rates.get(disp_name, {}).get(pc, daily_rate_ref)
+                if max_rate_for_pc <= 0: max_rate_for_pc = daily_rate_ref
+                
                 routing = get_routing_for_part(ch_norm, pc)
                 
                 # Fetch dynamically via logical engine
-                buffers_rings = ScheduleLogic.get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, daily_rate_ref)
+                buffers_rings = ScheduleLogic.get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, max_rate_for_pc)
                 parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
                 
-                # Calculate demands stage-by-stage
+                # Calculate demands stage-by-stage using D1 + D2 combined process-order cascade
                 demands_d1, demands_d2 = ScheduleLogic.calculate_net_demands(raw_d1, raw_d2, buffers_rings, routing)
                 
                 stage_demands[(disp_name, pc)] = {

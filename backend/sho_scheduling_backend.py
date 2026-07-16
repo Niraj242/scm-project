@@ -18,6 +18,7 @@ import models
 
 router = APIRouter()
 
+
 ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
 BOX_RING_DATA_URL = os.getenv("BOX_RING_DATA_URL", "")
@@ -153,9 +154,8 @@ class ScheduleLogic:
     @staticmethod
     def match_parts(demand_part: str, buffer_part: str, pc: str) -> bool:
         """
-        Rule 2: Flexible Type Matching (Relaxed)
-        Allows partial matches of core families to ensure nearby variants are caught
-        without relying on strict exact string matching.
+        Rule 6: Flexible Type Matching
+        Use existing family matching logic (variants) without exact names or expensive fuzzy searching.
         """
         if not buffer_part or not demand_part: 
             return False
@@ -176,7 +176,7 @@ class ScheduleLogic:
         d_base = extract_base_family(demand_part_clean)
         b_base = extract_base_family(buffer_part_clean)
         
-        if d_base and b_base and (d_base in b_base or b_base in d_base):
+        if d_base == b_base and d_base != "":
             return True
             
         try:
@@ -192,38 +192,42 @@ class ScheduleLogic:
     @staticmethod
     def calculate_net_demands(raw_d1: float, raw_d2: float, buffers_rings: dict, routing: list):
         """
-        Rules 3 & 4: Process-Aware Stage Demand Reduction Logic
-        Calculates Total Requirement = D1 + D2 and nets stages independently based on 
-        where inventory currently sits. HT Buffer is ignored per user request.
+        Rule 2: Buffer Consumption
+        Calculate Planning Demand = D1 + D2.
+        Nets stages properly backwards to ensure buffers reduce quantity only once and at the correct stage.
         """
         total_req = raw_d1 + raw_d2
         
         ch_buf = buffers_rings.get('CH BUFFER', 0.0)
         od_buf = buffers_rings.get('OD', 0.0)
         face_buf = buffers_rings.get('FACE', 0.0)
-        ht_buf = 0.0  # Explicitly ignored per user instruction
+        ht_buf = buffers_rings.get('HT', 0.0)
 
         net_total = {}
-        for stage in routing:
+        current_req = total_req
+        
+        # Traverse backwards to ensure upstream receives the remaining requirement accurately
+        for stage in reversed(routing):
             if stage == 'CHANNEL':
-                net_total['CHANNEL'] = max(0.0, total_req - ch_buf)
+                current_req = max(0.0, current_req - ch_buf)
             elif stage == 'OD':
-                net_total['OD'] = max(0.0, total_req - ch_buf - od_buf)
+                current_req = max(0.0, current_req - od_buf)
             elif stage == 'FACE':
-                net_total['FACE'] = max(0.0, total_req - ch_buf - face_buf)
+                current_req = max(0.0, current_req - face_buf)
             elif stage == 'HT':
-                net_total['HT'] = max(0.0, total_req - ch_buf - od_buf - face_buf)
-            else:
-                net_total[stage] = total_req
+                current_req = max(0.0, current_req - ht_buf)
+                
+            net_total[stage] = current_req
 
+        # Keep D1 and D2 separated strictly for reporting, using proportions of the net result
         net_d1 = {}
         net_d2 = {}
         
         if total_req > 0:
             d1_ratio = raw_d1 / total_req
             for stage in routing:
-                net_d1[stage] = net_total.get(stage, total_req) * d1_ratio
-                net_d2[stage] = net_total.get(stage, total_req) * (1.0 - d1_ratio)
+                net_d1[stage] = net_total.get(stage, current_req) * d1_ratio
+                net_d2[stage] = net_total.get(stage, current_req) * (1.0 - d1_ratio)
         else:
             for stage in routing:
                 net_d1[stage] = 0.0
@@ -232,28 +236,34 @@ class ScheduleLogic:
         return net_d1, net_d2
 
     @staticmethod
-    def calculate_priority(ch_norm: str, ch_stats: dict, buffers_rings: dict, total_demand: float) -> float:
+    def calculate_ht_priority(ch_norm: str, ch_stats: dict, buffers_rings: dict, total_demand: float) -> float:
         """
-        Dynamic priority evaluation: Lower channel buffer = higher priority.
-        Ensures scheduling pulls aggressively when upstream buffers are depleted.
+        Rule 3: HT Priority Evaluation
+        Ensure HT schedules don't unnecessarily rush upstream if Channel Buffer already has sufficient material.
         """
         ch_buf = buffers_rings.get('CH BUFFER', 0.0)
+        face_buf = buffers_rings.get('FACE', 0.0)
+        od_buf = buffers_rings.get('OD', 0.0)
+        ht_buf = buffers_rings.get('HT', 0.0)
+        
+        total_downstream_stock = ch_buf + face_buf + od_buf + ht_buf
         
         if total_demand <= 0:
             return 1.0
             
-        stock_ratio = ch_buf / total_demand
+        stock_ratio = total_downstream_stock / total_demand
         priority_score = max(0.0, 10.0 - stock_ratio)
         
         if ch_buf < (total_demand * 0.1):
-            priority_score += 3.0 
+            priority_score += 2.0
             
         return priority_score
 
     @staticmethod
     def get_all_buffers_for_part(disp: str, pc: str, ch_norm: str, payload, box_matrix: dict, demand_rings: float) -> dict:
         """
-        Rule 1: Buffer Days → Rings Conversion based purely on Channel Capacity.
+        Rule 5: Buffer Days Conversion
+        Always use Channel production capacity (from ZeroSet logic), not individual machine rates.
         """
         buffers_rings = {"CH BUFFER": 0.0, "OD": 0.0, "FACE": 0.0, "HT": 0.0}
         
@@ -355,20 +365,22 @@ class ScheduleLogic:
     @staticmethod
     def inject_wip_from_buffers(work_items: list, disp: str, pc: str, ch_norm: str, routing: list, buffers_rings: dict, item_priority: float):
         """
-        Transforms buffered assets into execution instructions for the NEXT process step.
+        Rule 3 & 4: OD and Face Material immediately available.
+        Transforms buffered assets into immediate execution instructions for NEXT step (Ready Time = 0.0)
         """
         for i, stage in enumerate(routing):
             qty = 0.0
             if stage == 'HT':
-                pass # Ignored as requested
+                qty = buffers_rings.get('HT', 0.0)
             elif stage == 'FACE':
                 qty = buffers_rings.get('FACE', 0.0) 
             elif stage == 'OD':
-                qty = buffers_rings.get('OD', 0.0) 
+                qty = buffers_rings.get('OD', 0.0)
                 
             if qty > 0.0 and (i + 1) < len(routing):
                 next_stage = routing[i + 1]
                 try:
+                    # Injected at day_idx = -1 (WIP block) and ready_time = 0.0 (shift start)
                     work_items.append(WorkItem(next_stage, disp, pc, -1, ch_norm, qty, 0.0, item_priority, routing))
                 except NameError:
                     pass
@@ -691,12 +703,6 @@ class WorkItem:
         self.rates = {}
         self.valid_resources = []
         self.missing_reason = "Capacity Exceeded"
-        
-        # Determine initial Day Label 
-        if day_idx == -1: self.day_label = " (WIP)"
-        elif day_idx == 0: self.day_label = " (D1)"
-        elif day_idx == 1: self.day_label = " (D2)"
-        else: self.day_label = f" (D{day_idx+1})"
 
 def init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs):
     item.rates = {}
@@ -1176,9 +1182,11 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                 daily_rate_ref = raw_d1 if raw_d1 > 0 else raw_d2
                 routing = get_routing_for_part(ch_norm, pc)
                 
+                # Fetch dynamically via logical engine
                 buffers_rings = ScheduleLogic.get_all_buffers_for_part(disp_name, pc, ch_norm, payload, box_matrix, daily_rate_ref)
                 parsed_buffers[(disp_name, pc, ch_norm)] = buffers_rings
                 
+                # Calculate demands stage-by-stage
                 demands_d1, demands_d2 = ScheduleLogic.calculate_net_demands(raw_d1, raw_d2, buffers_rings, routing)
                 
                 stage_demands[(disp_name, pc)] = {
@@ -1328,37 +1336,36 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                 if normalize_resource_name(sm_id) == norm_res_id:
                     matched_state = sm_data
                     break
-            
             if matched_state:
                 res.ready_time = float(matched_state.get("ready_time", 0.0))
                 res.last_fam = matched_state.get("last_fam")
                 res.last_pc = matched_state.get("last_pc")
-                
-            # FORCE FACE AND OD MACHINES TO START NO EARLIER THAN 10:30 (0.5 hrs)
-            if res.type in ['FACE', 'OD'] and res.ready_time < 0.5:
-                res.ready_time = 0.5
 
         ht_balances = {}
-        for w_key, w_data in current_state.get("wip", {}).items():
-            if "|" not in w_key: continue
-            disp, pc = w_key.split('|')
-            ch_norm = w_data.get("channel", "UNKNOWN")
-            
-            if "ht_balance" in w_data: ht_balances[(disp, pc)] = float(w_data["ht_balance"])
+        
+        # Rule 2: Ignore all other buffer/WIP logic temporarily, but do not remove the code.
+        # Bypass inserting historical wip to focus solely on Buffer Entry and Production Schedule.
+        if False: 
+            for w_key, w_data in current_state.get("wip", {}).items():
+                if "|" not in w_key: continue
+                disp, pc = w_key.split('|')
+                ch_norm = w_data.get("channel", "UNKNOWN")
                 
-            routing = get_routing_for_part(ch_norm, pc)
-            first_stage = get_first_required_stage(routing)
-            
-            for stage in ['HT', 'FACE', 'OD']:
-                if stage not in routing: continue
-                if stage not in w_data: continue
+                if "ht_balance" in w_data: ht_balances[(disp, pc)] = float(w_data["ht_balance"])
+                    
+                routing = get_routing_for_part(ch_norm, pc)
+                first_stage = get_first_required_stage(routing)
                 
-                stage_data = w_data.get(stage, {})
-                qty = float(stage_data.get("qty", 0.0))
-                rt = float(stage_data.get("rt", 0.0))
-                
-                if qty > 0 and stage != first_stage:
-                    work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
+                for stage in ['HT', 'FACE', 'OD']:
+                    if stage not in routing: continue
+                    if stage not in w_data: continue
+                    
+                    stage_data = w_data.get(stage, {})
+                    qty = float(stage_data.get("qty", 0.0))
+                    rt = float(stage_data.get("rt", 0.0))
+                    
+                    if qty > 0 and stage != first_stage:
+                        work_items.append(WorkItem(stage, disp, pc, -1, ch_norm, qty, rt, 10000.0, routing))
 
         ch_stats = {}
         for day_idx, demands in [(0, channel_demands_day1), (1, channel_demands_day2)]:
@@ -1394,31 +1401,26 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
             routing = get_routing_for_part(ch_norm, pc)
             first_stage = reqs['first_stage']
             
-            raw_d1 = reqs['net_d1']
-            raw_d2 = reqs['net_d2']
-            bal = ht_balances.get(key, 0.0)
-            
-            d1_sat = min(raw_d1, bal)
-            bal -= d1_sat
-            net_d1 = raw_d1 - d1_sat
-            
-            d2_sat = min(raw_d2, bal)
-            bal -= d2_sat
-            net_d2 = raw_d2 - d2_sat
+            # Use raw unfulfilled requirement for this process
+            net_d1 = reqs['net_d1']
+            net_d2 = reqs['net_d2']
             
             reqs['net_d1'] = net_d1
             reqs['net_d2'] = net_d2
-            reqs['d2_satisfied'] = d2_sat
-            reqs['leftover_bal'] = bal
+            reqs['d2_satisfied'] = 0.0
+            reqs['leftover_bal'] = 0.0
 
+            # Rule 1: Always calculate scheduling using Planning Demand = D1 + D2
+            # Kept separate for reporting, merged strictly for the core decision logic
+            combined_demand = net_d1 + net_d2
+            
             buffers_rings = stage_demands[key]['buffers']
-            item_priority = ScheduleLogic.calculate_priority(ch_norm, ch_stats, buffers_rings, reqs['raw_d1'] + reqs['raw_d2'])
+            item_priority = ScheduleLogic.calculate_ht_priority(ch_norm, ch_stats, buffers_rings, reqs['raw_d1'] + reqs['raw_d2'])
 
-            if net_d1 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], net_d1, 0.0, item_priority, routing))
-            if net_d2 > 0:
-                work_items.append(WorkItem(first_stage, disp, pc, 1, reqs['channel'], net_d2, 0.0, item_priority, routing))
+            if combined_demand > 0:
+                work_items.append(WorkItem(first_stage, disp, pc, 0, reqs['channel'], combined_demand, 0.0, item_priority, routing))
 
+        # Inject downstream WIP from parsed buffers dynamically using Core Logical Engine!
         for key, data in stage_demands.items():
             disp, pc = key
             ch_norm = data['channel']
@@ -1426,10 +1428,11 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
             buffers_rings = data['buffers']
             
             total_dem = data['raw_d1'] + data['raw_d2']
-            item_priority = ScheduleLogic.calculate_priority(ch_norm, ch_stats, buffers_rings, total_dem)
+            item_priority = ScheduleLogic.calculate_ht_priority(ch_norm, ch_stats, buffers_rings, total_dem)
             
             ScheduleLogic.inject_wip_from_buffers(work_items, disp, pc, ch_norm, routing, buffers_rings, item_priority)
 
+        # LOAD SAVED RESOURCE AND CHANNEL BREAKDOWNS
         db_breakdowns = {}
         channel_bd_map = {}
         try:
@@ -1485,7 +1488,7 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
         for item in work_items:
             init_item_resources(item, resources, furnace_map, weight_matrix, furnace_specs_local)
 
-        # 1. LOOK-AHEAD BATCH MERGING WITH D1+D2 LABELING
+        # 1. LOOK-AHEAD BATCH MERGING
         for i in range(len(work_items)):
             item1 = work_items[i]
             if item1.qty <= 0.01 or item1.day_idx != 0: continue
@@ -1505,7 +1508,6 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                     if est_time1 < merge_thresh or est_time2 < merge_thresh:
                         item1.qty += item2.qty
                         item2.qty = 0.0
-                        item1.day_label = " (D1+D2)"  # Explicitly brand merged requirements
                     break
 
         # SIMULATION LOOP
@@ -1616,14 +1618,14 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
                 next_stage = get_next_required_stage(res.type, item.routing)
                 if next_stage: 
                     new_item = WorkItem(next_stage, item.disp, item.pc, item.day_idx, item.channel, chunk_qty, out_time, item.priority, item.routing)
-                    new_item.day_label = item.day_label
                     init_item_resources(new_item, resources, furnace_map, weight_matrix, furnace_specs_local)
                     work_items.append(new_item)
 
                 rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
                 can_merge = (res.type != 'HT' and res.rows and is_same_item and is_continuation)
-
-                day_label = getattr(item, 'day_label', f" (D{item.day_idx+1})")
+                
+                if item.day_idx == -1: day_label = " (WIP)"
+                else: day_label = " (D2)" if item.day_idx == 1 else " (D1)"
 
                 if can_merge:
                     last_row = res.rows[-1]
@@ -1704,7 +1706,8 @@ def generate_schedule(payload: ScheduleRequest, db: Session = Depends(get_db)):
             rpb, _, _ = get_box_for_part_detailed(item.disp, item.pc, box_matrix)
             missed_val = f"{int(item.qty)}(Q)" if rpb <= 0 else str(math.ceil(item.qty / rpb))
             
-            day_label = getattr(item, 'day_label', f" (D{item.day_idx+1})").strip(" ()")
+            if item.day_idx == -1: day_label = "WIP"
+            else: day_label = "Day 2" if item.day_idx == 1 else "Day 1"
                 
             unscheduled.append({
                 "stage": item.stage, 

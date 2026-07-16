@@ -701,7 +701,7 @@ def save_breakdowns(payload: SaveBreakdownsRequest):
 
 
 # ==========================================
-# MAIN SCHEDULER ROUTE
+# MAIN Buffer ROUTE
 # ==========================================
 
 
@@ -774,11 +774,6 @@ def get_buffers(buffer_date: str, sector: str, db: Session = Depends(get_db)):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-
-
-
 
 
 

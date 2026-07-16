@@ -9,11 +9,16 @@ import time
 import sqlite3
 import gc
 from datetime import datetime, timedelta
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, List
+from database import get_db
+from sqlalchemy.orm import Session
+from datetime import datetime
+import models
 
 router = APIRouter()
+
 
 ZEROSET_URL = os.getenv("ZEROSET_URL", "")
 SHO_PRODUCTION_URL = os.getenv("SHO_PRODUCTION_URL", "")
@@ -693,6 +698,89 @@ def save_breakdowns(payload: SaveBreakdownsRequest):
         return {"status": "success"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+
+# ==========================================
+# MAIN SCHEDULER ROUTE
+# ==========================================
+
+
+class BufferSaveRequest(BaseModel):
+    buffer_date: str
+    sector: str
+    unit_mode: str
+    entries: Dict[str, Any]
+
+
+@router.post("/api/save_buffers")
+def save_buffers(payload: BufferSaveRequest, db: Session = Depends(get_db)):
+    try:
+        req_date = datetime.strptime(payload.buffer_date, "%Y-%m-%d").date()
+
+        existing_entry = db.query(models.BufferEntry).filter(
+            models.BufferEntry.buffer_date == req_date,
+            models.BufferEntry.sector == payload.sector
+        ).first()
+
+        entries_json = json.dumps(payload.entries, ensure_ascii=False)
+
+        if existing_entry:
+            existing_entry.unit_mode = payload.unit_mode
+            existing_entry.entries_json = entries_json
+            existing_entry.updated_at = datetime.utcnow()
+        else:
+            new_entry = models.BufferEntry(
+                buffer_date=req_date,
+                sector=payload.sector,
+                unit_mode=payload.unit_mode,
+                entries_json=entries_json
+            )
+            db.add(new_entry)
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Buffer data saved successfully"
+        }
+
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/api/get_buffers")
+def get_buffers(buffer_date: str, sector: str, db: Session = Depends(get_db)):
+    try:
+        req_date = datetime.strptime(buffer_date, "%Y-%m-%d").date()
+
+        entry = db.query(models.BufferEntry).filter(
+            models.BufferEntry.buffer_date == req_date,
+            models.BufferEntry.sector == sector
+        ).first()
+
+        if not entry:
+            return {
+                "status": "success",
+                "unit_mode": "Days",
+                "entries": {}
+            }
+
+        return {
+            "status": "success",
+            "unit_mode": entry.unit_mode,
+            "entries": json.loads(entry.entries_json or "{}")
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+
+
+
+
 
 # ==========================================
 # MAIN SCHEDULER ROUTE
